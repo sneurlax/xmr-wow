@@ -1,0 +1,17 @@
+[package]
+name = "p2pool_monero"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+p2pool_crypto = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+hex = { workspace = true }
+base58-monero = { workspace = true }
+curve25519-dalek = { workspace = true }
+ed25519-dalek = { workspace = true }
+rand = { workspace = true }
+bytes = { workspace = true }

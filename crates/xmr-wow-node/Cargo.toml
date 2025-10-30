@@ -1,0 +1,22 @@
+[package]
+name        = "xmr-wow-node"
+description = "XMR<->WOW swap sharechain node: P2P server, merge mining RPC, client JSON-RPC"
+version.workspace   = true
+edition.workspace   = true
+license.workspace   = true
+publish.workspace   = true
+
+[[bin]]
+name = "xmr-wow-node"
+path = "src/main.rs"
+
+[dependencies]
+xmr-wow-sharechain = { workspace = true }
+
+tokio              = { workspace = true }
+clap               = { workspace = true }
+tracing            = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow             = { workspace = true }
+serde              = { workspace = true }
+serde_json         = { workspace = true }
