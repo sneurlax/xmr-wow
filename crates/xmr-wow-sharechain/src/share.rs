@@ -1,0 +1,2 @@
+// stub
+pub struct SwapShare;

@@ -1,0 +1,1 @@
+// xmr-wow-client: stub

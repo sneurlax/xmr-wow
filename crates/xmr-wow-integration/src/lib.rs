@@ -1,0 +1,1 @@
+// xmr-wow-integration: stub

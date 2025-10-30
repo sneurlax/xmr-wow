@@ -1,0 +1,16 @@
+[package]
+name = "p2pool_crypto"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+thiserror = { workspace = true }
+tiny-keccak = { workspace = true }
+curve25519-dalek = { workspace = true }
+ed25519-dalek = { workspace = true }
+rand = { workspace = true }
+hex = { workspace = true }
+serde = { workspace = true }
+randomx-rs = { workspace = true }
