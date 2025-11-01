@@ -1,15 +1,31 @@
 use thiserror::Error;
 
-#[derive(Debug, Error, PartialEq, Eq)]
+#[derive(Error, Debug, PartialEq, Eq)]
 pub enum CryptoError {
-    #[error("DLEQ proof verification failed")]
-    DleqVerification,
-    #[error("scalar is zero")]
-    ZeroScalar,
-    #[error("invalid point encoding")]
+    #[error("Invalid scalar bytes: not a canonical representation")]
+    InvalidScalar,
+
+    #[error("Invalid point bytes: not a valid compressed Edwards point")]
     InvalidPoint,
-    #[error("adaptor signature verification failed")]
-    AdaptorVerification,
-    #[error("address encode/decode error: {0}")]
-    Address(String),
+
+    #[error("Point is not on the prime-order subgroup (torsion component detected)")]
+    NonPrimeOrderPoint,
+
+    #[error("DLEQ proof verification failed")]
+    DleqVerificationFailed,
+
+    #[error("Adaptor signature verification failed")]
+    AdaptorVerificationFailed,
+
+    #[error("Adaptor secret extraction failed: signature inconsistency")]
+    SecretExtractionFailed,
+
+    #[error("Key derivation failed: {0}")]
+    DerivationError(&'static str),
+
+    #[error("Address error: {0}")]
+    AddressError(String),
+
+    #[error("Mnemonic error: {0}")]
+    MnemonicError(String),
 }
