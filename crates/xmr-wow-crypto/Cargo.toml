@@ -23,6 +23,8 @@ serde            = { workspace = true, default-features = false }
 hex              = { workspace = true, default-features = false }
 tiny-keccak      = { workspace = true, default-features = false }
 hmac             = { workspace = true, default-features = false }
+crc              = { workspace = true }
+polyseed         = { workspace = true }
 
 [dev-dependencies]
 rand = { workspace = true }
