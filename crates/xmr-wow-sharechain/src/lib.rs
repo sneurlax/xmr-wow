@@ -2,11 +2,16 @@
 
 pub mod varint;
 pub mod share;
-pub mod chain;
 pub mod escrow;
+pub mod chain;
 pub mod p2p;
 pub mod mm_rpc;
 
-pub use share::SwapShare;
-pub use chain::SwapChain;
-pub use escrow::{EscrowOp, EscrowState, EscrowIndex};
+// -- Top-level re-exports ------------------------------------------------------
+
+pub use share::{
+    Difficulty, EscrowCommitment, EscrowOp, Hash, MergeMinedProof, SwapShare,
+};
+pub use chain::{ChainError, SwapChain, CONSENSUS_ID};
+pub use escrow::{EscrowError, EscrowIndex, EscrowState};
+pub use mm_rpc::merge_mining_router;
