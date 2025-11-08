@@ -1,0 +1,38 @@
+[package]
+name = "monero-rust"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[features]
+default = []
+test-helpers = []
+mock-rpc = []
+
+[dependencies]
+# Crypto backend (dalek v4 via monero-oxide, replaces monero-serai-mirror)
+monero-oxide = { workspace = true }
+curve25519-dalek = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+hex = { workspace = true }
+
+# Crypto utilities
+sha3 = { workspace = true }
+zeroize = { workspace = true }
+rand_core = { workspace = true }
+rand = { workspace = true }
+
+# Async
+async-trait = { workspace = true }
+futures = { workspace = true }
+tokio = { workspace = true }
+reqwest = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
+
+# Address encoding
+base58-monero = { workspace = true }
