@@ -1,0 +1,48 @@
+[package]
+name = "xmr-wow-wallet"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+curve25519-dalek = { workspace = true }
+async-trait = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+tokio = { workspace = true }
+monero-rust = { workspace = true }
+xmr-wow-crypto = { workspace = true }
+reqwest = { workspace = true }
+hex = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+zeroize = { workspace = true }
+
+# monero-oxide wallet (Scanner, ViewPair, SignableTransaction)
+monero-wallet = { git = "https://github.com/sneurlax/monero-oxide", rev = "f9afcdda9e463ed2a94821265929acf60fa57346" }
+# monero-oxide interface (ScannableBlock, FeeRate)
+monero-interface = { git = "https://github.com/sneurlax/monero-oxide", rev = "f9afcdda9e463ed2a94821265929acf60fa57346" }
+# monero-oxide core (Block, Transaction, ed25519 types)
+monero-oxide = { workspace = true }
+
+# wownero-oxide wallet (Scanner, ViewPair, SignableTransaction -- renamed from monero-*)
+wownero-wallet = { path = "../../deps/wownero-oxide/monero-oxide/wallet" }
+# wownero-oxide interface (ScannableBlock, daemon traits)
+wownero-interface = { path = "../../deps/wownero-oxide/monero-oxide/interface" }
+# wownero-oxide core (Block, Transaction, ed25519 types)
+wownero-oxide = { workspace = true }
+
+# Daemon RPC for ProvidesDecoys (decoy selection, fee rates, output distribution)
+monero-daemon-rpc = { git = "https://github.com/sneurlax/monero-oxide", rev = "f9afcdda9e463ed2a94821265929acf60fa57346" }
+wownero-daemon-rpc = { path = "../../deps/wownero-oxide/monero-oxide/interface/daemon" }
+
+# RNG (needed for OutputWithDecoys::new and sign)
+rand = { workspace = true }
+rand_core = { workspace = true }
+
+# SHA-256 for outgoing view key derivation
+sha2 = { workspace = true }
+
+[dev-dependencies]
+xmr-wow-crypto = { workspace = true }
+axum = { workspace = true }

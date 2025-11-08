@@ -2,3 +2,7 @@ target/
 Cargo.lock
 *.swp
 .DS_Store
+*.db
+*.secret
+swap-*.log
+swap-state-*.json

@@ -1,0 +1,23 @@
+[package]
+name = "wownero-primitives"
+version = "0.1.0"
+description = "Primitives for the Monero protocol"
+license = "MIT"
+repository = "https://github.com/monero-oxide/monero-oxide/tree/main/monero-oxide/primitives"
+authors = ["Luke Parker <lukeparker5132@gmail.com>"]
+edition = "2021"
+rust-version = "1.60"
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[dependencies]
+sha3 = { version = "0.10", default-features = false }
+curve25519-dalek = { version = "4", default-features = false }
+
+[features]
+std = [
+  "sha3/std",
+]
+default = ["std"]

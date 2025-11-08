@@ -1,0 +1,23 @@
+[package]
+name = "wownero-oxide-no-std-tests"
+version = "0.1.0"
+description = "A crate to test no-std builds of monero-oxide crates work"
+license = "MIT"
+repository = "https://github.com/monero-oxide/monero-oxide/tree/main/tests/no-std"
+authors = ["Luke Parker <lukeparker5132@gmail.com>"]
+keywords = ["nostd", "no_std", "alloc"]
+edition = "2021"
+publish = false
+rust-version = "1.79"
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[dependencies]
+monero-epee = { package = "wownero-epee", path = "../../monero-oxide/epee" }
+monero-wallet = { package = "wownero-wallet", path = "../../monero-oxide/wallet", default-features = false, features = ["compile-time-generators"], optional = true }
+monero-daemon-rpc = { package = "wownero-daemon-rpc", path = "../../monero-oxide/interface/daemon", default-features = false, optional = true }
+
+[features]
+alloc = ["monero-wallet", "monero-daemon-rpc"]
