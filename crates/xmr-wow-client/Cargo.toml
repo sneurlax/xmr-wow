@@ -30,3 +30,13 @@ tracing            = { workspace = true }
 tracing-subscriber = { workspace = true }
 rusqlite           = { workspace = true }
 rand               = { workspace = true }
+rand_core          = { workspace = true }
+curve25519-dalek   = { workspace = true }
+argon2             = { workspace = true }
+aes-gcm            = { workspace = true }
+base64             = { workspace = true }
+rpassword          = { workspace = true }
+xmr-wow-wallet     = { workspace = true }
+
+[dev-dependencies]
+axum = { workspace = true }

@@ -1,0 +1,76 @@
+use std::sync::Arc;
+
+use tokio::{net::TcpListener, task::JoinHandle};
+use xmr_wow_client::node_client::NodeClient;
+use xmr_wow_sharechain::{
+    merge_mining_router, Difficulty, EscrowCommitment, EscrowOp, SwapChain,
+};
+
+struct TestServer {
+    url: String,
+    handle: JoinHandle<()>,
+}
+
+impl Drop for TestServer {
+    fn drop(&mut self) {
+        self.handle.abort();
+    }
+}
+
+async fn spawn_rpc_server(chain: Arc<SwapChain>) -> TestServer {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let router = merge_mining_router(chain);
+    let handle = tokio::spawn(async move {
+        axum::serve(listener, router).await.unwrap();
+    });
+
+    TestServer {
+        url: format!("http://{}", addr),
+        handle,
+    }
+}
+
+fn sample_open_op(swap_id: [u8; 32]) -> EscrowOp {
+    EscrowOp::Open(EscrowCommitment {
+        swap_id,
+        alice_sc_pubkey: [0xA1; 32],
+        bob_sc_pubkey: [0xB2; 32],
+        k_b_expected: [0xC3; 32],
+        k_b_prime: [0xD4; 32],
+        claim_timelock: 100,
+        refund_timelock: 200,
+        amount: 12345,
+    })
+}
+
+#[tokio::test]
+async fn node_client_round_trips_against_sharechain_rpc() {
+    let chain = Arc::new(SwapChain::new(Difficulty::from_u64(1)));
+    let server = spawn_rpc_server(chain).await;
+    let client = NodeClient::new(&server.url);
+    let swap_id = [0x11; 32];
+
+    let height = client.get_chain_height().await.unwrap();
+    assert_eq!(height, 0);
+
+    let missing = client.get_swap_status(&swap_id).await.unwrap_err().to_string();
+    assert!(missing.contains("swap not found"));
+
+    client.submit_escrow_op(&sample_open_op(swap_id)).await.unwrap();
+
+    let status = client.get_swap_status(&swap_id).await.unwrap();
+    assert_eq!(status.state, "Open");
+    assert_eq!(status.k_b, None);
+
+    let claim = EscrowOp::Claim {
+        swap_id,
+        k_b: [0xC3; 32],
+    };
+    client.submit_escrow_op(&claim).await.unwrap();
+
+    let claimed = client.get_swap_status(&swap_id).await.unwrap();
+    let expected_k_b = hex::encode([0xC3; 32]);
+    assert_eq!(claimed.state, "Claimed");
+    assert_eq!(claimed.k_b.as_deref(), Some(expected_k_b.as_str()));
+}

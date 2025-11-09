@@ -15,10 +15,15 @@ xmr-wow-crypto     = { workspace = true }
 xmr-wow-script     = { workspace = true, features = ["stub-crypto"] }
 xmr-wow-sharechain = { workspace = true }
 xmr-wow-client     = { workspace = true }
+xmr-wow-wallet     = { workspace = true }
 
 tokio              = { workspace = true }
+axum               = { workspace = true }
+tower              = "0.5"
 serde_json         = { workspace = true }
 hex                = { workspace = true }
 anyhow             = { workspace = true }
 tracing            = { workspace = true }
 rand               = { workspace = true }
+curve25519-dalek   = { workspace = true }
+bytes              = { workspace = true }
