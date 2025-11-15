@@ -1,0 +1,22 @@
+[package]
+name = "monero-simnet"
+version = "0.1.0"
+edition = "2021"
+description = "High-level Monero wallet testing harness backed by cuprate-simnet"
+
+[workspace]
+
+[patch."https://github.com/monero-oxide/monero-oxide.git"]
+monero-address = { git = "https://github.com/sneurlax/monero-oxide", rev = "f9afcdda9e463ed2a94821265929acf60fa57346" }
+monero-interface = { git = "https://github.com/sneurlax/monero-oxide", rev = "f9afcdda9e463ed2a94821265929acf60fa57346" }
+monero-oxide = { git = "https://github.com/sneurlax/monero-oxide", rev = "f9afcdda9e463ed2a94821265929acf60fa57346" }
+monero-wallet = { git = "https://github.com/sneurlax/monero-oxide", rev = "f9afcdda9e463ed2a94821265929acf60fa57346" }
+
+[dependencies]
+cuprate-simnet = { path = "../cuprate-simnet" }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
+anyhow = "1"
+tracing = "0.1"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
