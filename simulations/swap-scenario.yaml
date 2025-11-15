@@ -1,0 +1,135 @@
+# XMR-WOW Atomic Swap Simulation Scenario
+#
+# Models a happy-path atomic swap between Alice and Bob using monerosim/Shadow.
+#
+# Since Shadow runs real monerod binaries, we model the swap as two separate
+# Monero networks (one representing XMR, one representing WOW). Both chains
+# use the same monerod binary but run independently. The swap_agent Python
+# script coordinates the cross-chain protocol steps.
+#
+# Swap Protocol Phases:
+#   Phase 1: Mine maturity blocks (76 blocks) on both chains
+#   Phase 2: Alice generates keys, sends init message to Bob
+#   Phase 3: Bob receives, generates response
+#   Phase 4: Alice locks XMR (chain A)
+#   Phase 5: Bob verifies Alice's lock, locks WOW (chain B)
+#   Phase 6: Alice claims WOW, revealing secret
+#   Phase 7: Bob uses revealed secret to claim XMR
+#
+# Timeline:
+#   t=0s:       Miners start on both chains
+#   t=1m:       Alice and Bob wallet agents spawn
+#   t=2.5h:     Maturity reached (~76 blocks at 120s/block)
+#   t=2.5h+:    Swap protocol begins (key exchange, lock, claim)
+#   t=4h:       Simulation ends (buffer for protocol completion)
+
+metadata:
+  scenario: xmr_wow_atomic_swap
+  generator: manual
+  version: '1.0'
+  purpose: 'Happy-path atomic swap between Alice (XMR) and Bob (WOW)'
+  agents:
+    total: 6
+    miners: 2
+    users: 4
+  timing:
+    duration_s: 14400
+    bootstrap_end_s: 9000
+    activity_start_s: 9000
+
+general:
+  stop_time: 4h
+  parallelism: 0
+  simulation_seed: 42
+  enable_dns_server: true
+  shadow_log_level: warning
+  bootstrap_end_time: 2.5h
+  progress: true
+  runahead: 100ms
+  process_threads: 2
+  daemon_defaults:
+    log-level: 1
+    max-log-file-size: 0
+    db-sync-mode: fastest
+    no-zmq: true
+    non-interactive: true
+    disable-rpc-ban: true
+    allow-local-ip: true
+  wallet_defaults:
+    log-level: 1
+
+network:
+  type: 1_gbit_switch
+  latency: 100ms
+  peer_mode: Dynamic
+
+agents:
+  # --- Chain A (XMR) ---
+  # Miner producing blocks on the XMR-side chain.
+  xmr-miner:
+    daemon: monerod
+    wallet: 'monero-wallet-rpc'
+    script: agents.autonomous_miner
+    start_time: 0s
+    hashrate: 100
+    can_receive_distributions: true
+
+  # Alice: initiates the swap, locks XMR, claims WOW.
+  alice:
+    daemon: monerod
+    wallet: 'monero-wallet-rpc'
+    script: agents.swap_agent
+    start_time: 60s
+    activity_start_time: 9000
+    attributes:
+      role: alice
+      swap_amount: '1.0'
+      counterparty: bob
+      chain: xmr
+      lock_confirmations: '10'
+      refund_timeout_blocks: '76'
+
+  # --- Chain B (WOW) ---
+  # Miner producing blocks on the WOW-side chain.
+  wow-miner:
+    daemon: monerod
+    wallet: 'monero-wallet-rpc'
+    script: agents.autonomous_miner
+    start_time: 0s
+    hashrate: 100
+    can_receive_distributions: true
+
+  # Bob: responds to swap, locks WOW, claims XMR after secret is revealed.
+  bob:
+    daemon: monerod
+    wallet: 'monero-wallet-rpc'
+    script: agents.swap_agent
+    start_time: 60s
+    activity_start_time: 9000
+    attributes:
+      role: bob
+      swap_amount: '1.0'
+      counterparty: alice
+      chain: wow
+      lock_confirmations: '10'
+      refund_timeout_blocks: '76'
+
+  # Distributor: funds Alice and Bob wallets from miner coinbase rewards.
+  miner-distributor:
+    script: agents.miner_distributor
+    wait_time: 9000
+    initial_wait_time: 0
+    max_transaction_amount: '5.0'
+    min_transaction_amount: '2.0'
+    transaction_frequency: 30
+    md_n_recipients: 2
+    md_out_per_tx: 2
+    md_output_amount: 10.0
+
+  # Monitor: logs simulation health and status.
+  simulation-monitor:
+    script: agents.simulation_monitor
+    poll_interval: 60
+    detailed_logging: false
+    enable_alerts: false
+    status_file: monerosim_monitor.log

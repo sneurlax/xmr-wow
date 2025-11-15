@@ -1,0 +1,75 @@
+# Shadow / monerosim network-partition scenario for refund-path validation.
+#
+# Uses the CLI-driving agent so the simulated failure and recovery path exercise
+# `resume` and `refund` behavior in the real client binary.
+
+metadata:
+  scenario: shadow_xmr_wow_cli_partition
+  generator: manual
+  version: '1.0'
+  purpose: 'Counterparty disappearance and refund after timelock through xmr-wow CLI'
+
+general:
+  stop_time: 6h
+  parallelism: 0
+  simulation_seed: 314
+  enable_dns_server: true
+  shadow_log_level: warning
+  bootstrap_end_time: 2.5h
+  progress: true
+  runahead: 100ms
+  process_threads: 2
+
+network:
+  type: 1_gbit_switch
+  latency: 100ms
+  peer_mode: Dynamic
+
+agents:
+  xmr-miner:
+    daemon: monerod
+    wallet: 'monero-wallet-rpc'
+    script: agents.autonomous_miner
+    start_time: 0s
+    hashrate: 100
+    can_receive_distributions: true
+
+  wow-miner:
+    daemon: monerod
+    wallet: 'monero-wallet-rpc'
+    script: agents.autonomous_miner
+    start_time: 0s
+    hashrate: 100
+    can_receive_distributions: true
+
+  alice:
+    daemon: monerod
+    wallet: 'monero-wallet-rpc'
+    script: agents.xmr_wow_cli_agent
+    start_time: 60s
+    attributes:
+      role: alice
+      counterparty: bob
+      binary: target/release/xmr-wow
+      db: /tmp/alice-shadow-refund.db
+      password: shadow-test
+      amount_xmr: '1000000000000'
+      amount_wow: '500000000000'
+      xmr_lock_blocks: '120'
+      wow_lock_blocks: '260'
+      destination: 'SHADOW_ALICE_REFUND_DESTINATION'
+      mode: refund_test
+
+  bob:
+    daemon: monerod
+    wallet: 'monero-wallet-rpc'
+    script: agents.xmr_wow_cli_agent
+    start_time: 60s
+    attributes:
+      role: bob
+      counterparty: alice
+      binary: target/release/xmr-wow
+      db: /tmp/bob-shadow-refund.db
+      password: shadow-test
+      destination: 'SHADOW_BOB_REFUND_DESTINATION'
+      mode: refund_test

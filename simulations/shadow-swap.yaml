@@ -1,0 +1,85 @@
+# Shadow / monerosim scenario that drives the real `xmr-wow` CLI binary.
+#
+# This is intentionally distinct from `swap-scenario.yaml`, which models the
+# protocol at the wallet-RPC layer. The goal here is to exercise the client
+# binary itself as a subprocess inside the simulation.
+
+metadata:
+  scenario: shadow_xmr_wow_cli_swap
+  generator: manual
+  version: '1.0'
+  purpose: 'Happy-path atomic swap through the xmr-wow CLI binary'
+
+general:
+  stop_time: 4h
+  parallelism: 0
+  simulation_seed: 142
+  enable_dns_server: true
+  shadow_log_level: warning
+  bootstrap_end_time: 2.5h
+  progress: true
+  runahead: 100ms
+  process_threads: 2
+
+network:
+  type: 1_gbit_switch
+  latency: 100ms
+  peer_mode: Dynamic
+
+agents:
+  xmr-miner:
+    daemon: monerod
+    wallet: 'monero-wallet-rpc'
+    script: agents.autonomous_miner
+    start_time: 0s
+    hashrate: 100
+    can_receive_distributions: true
+
+  wow-miner:
+    daemon: monerod
+    wallet: 'monero-wallet-rpc'
+    script: agents.autonomous_miner
+    start_time: 0s
+    hashrate: 100
+    can_receive_distributions: true
+
+  alice:
+    daemon: monerod
+    wallet: 'monero-wallet-rpc'
+    script: agents.xmr_wow_cli_agent
+    start_time: 60s
+    attributes:
+      role: alice
+      counterparty: bob
+      binary: target/release/xmr-wow
+      db: /tmp/alice-shadow.db
+      password: shadow-test
+      amount_xmr: '1000000000000'
+      amount_wow: '500000000000'
+      xmr_lock_blocks: '120'
+      wow_lock_blocks: '260'
+      destination: 'SHADOW_ALICE_DESTINATION'
+
+  bob:
+    daemon: monerod
+    wallet: 'monero-wallet-rpc'
+    script: agents.xmr_wow_cli_agent
+    start_time: 60s
+    attributes:
+      role: bob
+      counterparty: alice
+      binary: target/release/xmr-wow
+      db: /tmp/bob-shadow.db
+      password: shadow-test
+      destination: 'SHADOW_BOB_DESTINATION'
+
+  miner-distributor:
+    script: agents.miner_distributor
+    wait_time: 9000
+    initial_wait_time: 0
+    max_transaction_amount: '5.0'
+    min_transaction_amount: '2.0'
+    transaction_frequency: 30
+    md_n_recipients: 2
+    md_out_per_tx: 2
+    md_output_amount: 10.0
