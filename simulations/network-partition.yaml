@@ -1,0 +1,138 @@
+# XMR-WOW Network Partition / Refund Path Simulation
+#
+# Tests the refund path of the atomic swap protocol when the counterparty
+# goes offline after Alice locks funds. This validates safety requirements:
+#
+#   Alice can refund XMR if Bob disappears after Alice locks
+#   Bob never loses WOW if he never locks (he goes offline before locking)
+#   Timelock prevents premature refund (Alice must wait for block height)
+#   No funds are permanently lost under network partition
+#
+# Scenario:
+#   1. Both chains mine maturity blocks (76 blocks)
+#   2. Alice and Bob exchange keys
+#   3. Alice locks XMR on chain A
+#   4. Bob goes offline (simulated by stopping Bob's daemon/wallet processes)
+#   5. Alice waits for refund timelock height
+#   6. Alice refunds locked XMR
+#
+# Timeline:
+#   t=0s:       Miners start on both chains
+#   t=1m:       Alice and Bob wallet agents spawn
+#   t=2.5h:     Maturity reached, swap protocol begins
+#   t=2.5h+5m:  Alice locks XMR
+#   t=2.5h+10m: Bob goes offline (network partition)
+#   t=5h:       Refund timelock reached, Alice refunds
+#   t=6h:       Simulation ends
+
+metadata:
+  scenario: xmr_wow_refund_partition
+  generator: manual
+  version: '1.0'
+  purpose: 'Refund path testing when counterparty goes offline after lock'
+  agents:
+    total: 6
+    miners: 2
+    users: 4
+  timing:
+    duration_s: 21600
+    bootstrap_end_s: 9000
+    activity_start_s: 9000
+
+general:
+  stop_time: 6h
+  parallelism: 0
+  simulation_seed: 99
+  enable_dns_server: true
+  shadow_log_level: warning
+  bootstrap_end_time: 2.5h
+  progress: true
+  runahead: 100ms
+  process_threads: 2
+  daemon_defaults:
+    log-level: 1
+    max-log-file-size: 0
+    db-sync-mode: fastest
+    no-zmq: true
+    non-interactive: true
+    disable-rpc-ban: true
+    allow-local-ip: true
+  wallet_defaults:
+    log-level: 1
+
+network:
+  type: 1_gbit_switch
+  latency: 100ms
+  peer_mode: Dynamic
+
+agents:
+  # --- Chain A (XMR) ---
+  xmr-miner:
+    daemon: monerod
+    wallet: 'monero-wallet-rpc'
+    script: agents.autonomous_miner
+    start_time: 0s
+    hashrate: 100
+    can_receive_distributions: true
+
+  # Alice: initiates swap, locks XMR, then must refund when Bob disappears.
+  alice:
+    daemon: monerod
+    wallet: 'monero-wallet-rpc'
+    script: agents.swap_agent
+    start_time: 60s
+    activity_start_time: 9000
+    attributes:
+      role: alice
+      swap_amount: '1.0'
+      counterparty: bob
+      chain: xmr
+      lock_confirmations: '10'
+      refund_timeout_blocks: '76'
+      mode: refund_test
+
+  # --- Chain B (WOW) ---
+  wow-miner:
+    daemon: monerod
+    wallet: 'monero-wallet-rpc'
+    script: agents.autonomous_miner
+    start_time: 0s
+    hashrate: 100
+    can_receive_distributions: true
+
+  # Bob: participates in key exchange, then goes offline before locking.
+  # The swap_agent in refund_test mode will stop Bob's wallet after key exchange.
+  bob:
+    daemon: monerod
+    wallet: 'monero-wallet-rpc'
+    script: agents.swap_agent
+    start_time: 60s
+    activity_start_time: 9000
+    attributes:
+      role: bob
+      swap_amount: '1.0'
+      counterparty: alice
+      chain: wow
+      lock_confirmations: '10'
+      refund_timeout_blocks: '76'
+      mode: refund_test
+
+  # Distributor: funds Alice and Bob wallets from miner coinbase rewards.
+  miner-distributor:
+    script: agents.miner_distributor
+    wait_time: 9000
+    initial_wait_time: 0
+    max_transaction_amount: '5.0'
+    min_transaction_amount: '2.0'
+    transaction_frequency: 30
+    md_n_recipients: 2
+    md_out_per_tx: 2
+    md_output_amount: 10.0
+
+  # Monitor: logs simulation health and status.
+  simulation-monitor:
+    script: agents.simulation_monitor
+    poll_interval: 60
+    detailed_logging: false
+    enable_alerts: false
+    status_file: monerosim_monitor.log
