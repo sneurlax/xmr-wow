@@ -1,0 +1,40 @@
+[package]
+name    = "simnet-testbed"
+version = "0.1.0"
+edition = "2021"
+description = "Dual-chain simnet testbed for XMR-WOW atomic swap integration testing"
+license = "MIT"
+
+# Standalone workspace: depends on cuprate-simnet and wownero-simnet.
+# Direct monero-oxide deps point at upstream GitHub, while the patch below
+# redirects the whole source to the published compatibility fork.
+# It stays standalone to keep the simnet/testbed build graph isolated.
+[workspace]
+
+[patch."https://github.com/monero-oxide/monero-oxide.git"]
+monero-address = { git = "https://github.com/sneurlax/monero-oxide", rev = "f9afcdda9e463ed2a94821265929acf60fa57346" }
+monero-interface = { git = "https://github.com/sneurlax/monero-oxide", rev = "f9afcdda9e463ed2a94821265929acf60fa57346" }
+monero-oxide = { git = "https://github.com/sneurlax/monero-oxide", rev = "f9afcdda9e463ed2a94821265929acf60fa57346" }
+monero-wallet = { git = "https://github.com/sneurlax/monero-oxide", rev = "f9afcdda9e463ed2a94821265929acf60fa57346" }
+
+[dependencies]
+cuprate-simnet  = { path = "../cuprate-simnet" }
+wownero-simnet  = { path = "../wownero-simnet" }
+# monero-wallet/address pinned to the same upstream GitHub revision as the simnet crates.
+monero-wallet  = { git = "https://github.com/monero-oxide/monero-oxide", rev = "a941dfff1a5333b6349d9a1ee5de49c158b0e3d2", features = ["std"], default-features = false }
+monero-address = { git = "https://github.com/monero-oxide/monero-oxide", rev = "a941dfff1a5333b6349d9a1ee5de49c158b0e3d2", features = ["std"], default-features = false }
+curve25519-dalek = { version = "4", features = ["alloc", "zeroize"] }
+rand      = "0.8"
+rand_core = { version = "0.6", features = ["std", "getrandom"] }
+zeroize   = { version = "1", features = ["zeroize_derive"] }
+tokio    = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
+tracing  = { version = "0.1", features = ["std"] }
+thiserror = "2"
+tiny-keccak = { version = "2", features = ["keccak"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+hex = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

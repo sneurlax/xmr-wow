@@ -1,0 +1,62 @@
+[package]
+name    = "cuprate-simnet"
+version = "0.1.0"
+edition = "2021"
+description = "Programmatic in-process Monero simulation network for development and testing"
+license = "MIT"
+
+# Standalone workspace: cuprate-simnet keeps its own lockfile and build graph.
+# Direct monero-oxide deps point at upstream GitHub, while the patch below
+# redirects the whole source to the published compatibility fork.
+[workspace]
+
+[patch."https://github.com/monero-oxide/monero-oxide.git"]
+monero-address = { git = "https://github.com/sneurlax/monero-oxide", rev = "f9afcdda9e463ed2a94821265929acf60fa57346" }
+monero-interface = { git = "https://github.com/sneurlax/monero-oxide", rev = "f9afcdda9e463ed2a94821265929acf60fa57346" }
+monero-oxide = { git = "https://github.com/sneurlax/monero-oxide", rev = "f9afcdda9e463ed2a94821265929acf60fa57346" }
+monero-wallet = { git = "https://github.com/sneurlax/monero-oxide", rev = "f9afcdda9e463ed2a94821265929acf60fa57346" }
+
+# Cuprate crates pinned to the compatibility commit in sneurlax/cuprate.
+[dependencies]
+cuprate-blockchain        = { git = "https://github.com/sneurlax/cuprate", rev = "f460b2dbd648e76c148bdaa0512f048500b7a504" }
+cuprate-database          = { git = "https://github.com/sneurlax/cuprate", rev = "f460b2dbd648e76c148bdaa0512f048500b7a504" }
+cuprate-database-service  = { git = "https://github.com/sneurlax/cuprate", rev = "f460b2dbd648e76c148bdaa0512f048500b7a504" }
+cuprate-consensus         = { git = "https://github.com/sneurlax/cuprate", rev = "f460b2dbd648e76c148bdaa0512f048500b7a504" }
+cuprate-consensus-context = { git = "https://github.com/sneurlax/cuprate", rev = "f460b2dbd648e76c148bdaa0512f048500b7a504" }
+cuprate-consensus-rules   = { git = "https://github.com/sneurlax/cuprate", rev = "f460b2dbd648e76c148bdaa0512f048500b7a504", features = ["rayon"] }
+cuprate-types             = { git = "https://github.com/sneurlax/cuprate", rev = "f460b2dbd648e76c148bdaa0512f048500b7a504", features = ["blockchain"] }
+cuprate-helper            = { git = "https://github.com/sneurlax/cuprate", rev = "f460b2dbd648e76c148bdaa0512f048500b7a504", features = ["std", "fs", "asynch", "net"] }
+cuprate-constants         = { git = "https://github.com/sneurlax/cuprate", rev = "f460b2dbd648e76c148bdaa0512f048500b7a504" }
+
+# monero-oxide shared via a pinned upstream GitHub revision.
+monero-oxide  = { git = "https://github.com/monero-oxide/monero-oxide", rev = "a941dfff1a5333b6349d9a1ee5de49c158b0e3d2", default-features = false, features = ["std"] }
+# merge-mining keeps a renamed handle but now resolves from the same upstream pin.
+monero-oxide-mm = { package = "monero-oxide", git = "https://github.com/monero-oxide/monero-oxide", rev = "a941dfff1a5333b6349d9a1ee5de49c158b0e3d2", default-features = false, features = ["std"], optional = true }
+monero-wallet = { git = "https://github.com/monero-oxide/monero-oxide", rev = "a941dfff1a5333b6349d9a1ee5de49c158b0e3d2", features = ["std"], default-features = false }
+monero-address = { git = "https://github.com/monero-oxide/monero-oxide", rev = "a941dfff1a5333b6349d9a1ee5de49c158b0e3d2", features = ["std"], default-features = false }
+curve25519-dalek = { version = "4", features = ["alloc", "zeroize"] }
+rand      = "0.8"
+rand_core = { version = "0.6", features = ["std", "getrandom"] }
+zeroize   = { version = "1", features = ["zeroize_derive"] }
+axum      = "0.7"
+serde     = { version = "1", features = ["derive"] }
+serde_json = "1"
+bytes     = "1"
+indexmap  = "2"
+hex      = "0.4"
+tokio    = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net"] }
+tower    = { version = "0.5", features = ["util"] }
+tracing  = { version = "0.1", features = ["std"] }
+tempfile = "3"
+thiserror = "2"
+anyhow   = "1"
+rayon    = "1"
+
+[features]
+default = []
+merge-mining = ["monero-oxide-mm"]
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+reqwest = { version = "0.12", features = ["json"] }
