@@ -17,12 +17,12 @@
 
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
-use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::Engine;
 
 use xmr_wow_crypto::{AdaptorSignature, CompletedSignature, DleqProof};
 
-use crate::swap_state::SwapError;
+use crate::swap_state::{RefundTimingObservation, SwapError};
 
 /// Protocol message prefix for all XMR-WOW swap messages.
 const PROTOCOL_PREFIX: &str = "xmrwow1:";
@@ -42,22 +42,17 @@ pub enum ProtocolMessage {
         amount_wow: u64,
         xmr_refund_height: u64,
         wow_refund_height: u64,
+        #[serde(default)]
+        refund_timing: Option<RefundTimingObservation>,
     },
     /// Bob -> Alice: response with pubkey and proof.
-    Response {
-        pubkey: [u8; 32],
-        proof: DleqProof,
-    },
+    Response { pubkey: [u8; 32], proof: DleqProof },
     /// Adaptor pre-signature exchange (both parties send after locking).
-    AdaptorPreSig {
-        pre_sig: AdaptorSignature,
-    },
+    AdaptorPreSig { pre_sig: AdaptorSignature },
     /// Claim proof via completed adaptor signature.
     ///
     /// The counterparty extracts the secret using `pre_sig.extract_secret(completed)`.
-    ClaimProof {
-        completed_sig: CompletedSignature,
-    },
+    ClaimProof { completed_sig: CompletedSignature },
     /// Share secret scalar for cooperative refund tx construction.
     ///
     /// Sent when both parties agree to cancel the swap. The combined key
@@ -86,10 +81,7 @@ pub fn encode_message<T: Serialize>(msg: &T) -> String {
 /// Returns `SwapError::InvalidMessage` on any failure.
 pub fn decode_message<T: DeserializeOwned>(encoded: &str) -> Result<T, SwapError> {
     let payload = encoded.strip_prefix(PROTOCOL_PREFIX).ok_or_else(|| {
-        SwapError::InvalidMessage(format!(
-            "missing protocol prefix '{}'",
-            PROTOCOL_PREFIX
-        ))
+        SwapError::InvalidMessage(format!("missing protocol prefix '{}'", PROTOCOL_PREFIX))
     })?;
 
     let bytes = BASE64
@@ -103,8 +95,9 @@ pub fn decode_message<T: DeserializeOwned>(encoded: &str) -> Result<T, SwapError
 #[cfg(test)]
 mod tests {
     use super::*;
-    use xmr_wow_crypto::{DleqProof, KeyContribution};
     use rand::rngs::OsRng;
+    use crate::swap_state::RefundTimingSource;
+    use xmr_wow_crypto::{DleqProof, KeyContribution};
 
     fn make_test_init() -> ProtocolMessage {
         let contrib = KeyContribution::generate(&mut OsRng);
@@ -121,6 +114,13 @@ mod tests {
             amount_wow: 500_000_000_000_000,
             xmr_refund_height: 2000,
             wow_refund_height: 1000,
+            refund_timing: Some(RefundTimingObservation {
+                xmr_base_height: 1950,
+                wow_base_height: 700,
+                xmr_lock_blocks: 50,
+                wow_lock_blocks: 300,
+                source: RefundTimingSource::DaemonHeightQuery,
+            }),
         }
     }
 
@@ -152,11 +152,50 @@ mod tests {
         let decoded: ProtocolMessage = decode_message(&encoded).unwrap();
         match (&msg, &decoded) {
             (
-                ProtocolMessage::Init { pubkey: a, amount_xmr: ax, .. },
-                ProtocolMessage::Init { pubkey: b, amount_xmr: bx, .. },
+                ProtocolMessage::Init {
+                    pubkey: a,
+                    amount_xmr: ax,
+                    refund_timing: at,
+                    ..
+                },
+                ProtocolMessage::Init {
+                    pubkey: b,
+                    amount_xmr: bx,
+                    refund_timing: bt,
+                    ..
+                },
             ) => {
                 assert_eq!(a, b);
                 assert_eq!(ax, bx);
+                assert_eq!(at, bt);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn phase13_init_message_round_trips_refund_timing_observation() {
+        let msg = make_test_init();
+        let encoded = encode_message(&msg);
+        let decoded: ProtocolMessage = decode_message(&encoded).unwrap();
+
+        match decoded {
+            ProtocolMessage::Init {
+                refund_timing,
+                xmr_refund_height,
+                wow_refund_height,
+                ..
+            } => {
+                let refund_timing =
+                    refund_timing.expect("Phase 13 init should carry refund timing");
+                assert_eq!(
+                    refund_timing.xmr_base_height + refund_timing.xmr_lock_blocks,
+                    xmr_refund_height
+                );
+                assert_eq!(
+                    refund_timing.wow_base_height + refund_timing.wow_lock_blocks,
+                    wow_refund_height
+                );
             }
             _ => panic!("wrong variant"),
         }
