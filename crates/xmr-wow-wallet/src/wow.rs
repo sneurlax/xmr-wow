@@ -37,7 +37,7 @@ use zeroize::Zeroizing;
 use tracing;
 
 use crate::error::WalletError;
-use crate::trait_def::{ConfirmationStatus, CryptoNoteWallet, ScanResult, TxHash};
+use crate::trait_def::{ConfirmationStatus, CryptoNoteWallet, RefundChain, ScanResult, TxHash};
 
 /// WOW mainnet default JSON-RPC port.
 /// Note: 34567 is the P2P port, 34568 is the JSON-RPC port.
@@ -543,6 +543,10 @@ impl WowWallet {
 
 #[async_trait::async_trait]
 impl CryptoNoteWallet for WowWallet {
+    fn refund_chain(&self) -> RefundChain {
+        RefundChain::Wow
+    }
+
     /// Lock funds to the joint address derived from (spend_point, view_scalar).
     ///
     /// Builds a transaction sending `amount` wowoshi to the CryptoNote

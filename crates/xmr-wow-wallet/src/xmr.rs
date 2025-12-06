@@ -34,7 +34,7 @@ use monero_rust::rpc_serai::NativeRpcClient;
 use monero_rust::abstractions::RpcClient;
 
 use crate::error::WalletError;
-use crate::trait_def::{ConfirmationStatus, CryptoNoteWallet, ScanResult, TxHash};
+use crate::trait_def::{ConfirmationStatus, CryptoNoteWallet, RefundChain, ScanResult, TxHash};
 
 /// XMR wallet adapter for Monero stagenet.
 ///
@@ -541,6 +541,10 @@ impl XmrWallet {
 
 #[async_trait::async_trait]
 impl CryptoNoteWallet for XmrWallet {
+    fn refund_chain(&self) -> RefundChain {
+        RefundChain::Xmr
+    }
+
     /// Lock funds to the joint address derived from (spend_point, view_scalar).
     ///
     /// Builds a transaction sending `amount` atomic units to the CryptoNote
