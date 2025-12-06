@@ -16,8 +16,8 @@ use rand::rngs::OsRng;
 use serde_json::{json, Value};
 use tokio::{net::TcpListener, task::JoinHandle};
 use xmr_wow_wallet::{
-    verify_lock, ConfirmationStatus, CryptoNoteWallet, ReqwestTransport, ScanResult, TxHash,
-    WalletError, WowWallet, XmrWallet,
+    verify_lock, ConfirmationStatus, CryptoNoteWallet, RefundArtifact, RefundChain,
+    ReqwestTransport, ScanResult, TxHash, WalletError, WowWallet, XmrWallet,
 };
 
 #[derive(Clone)]
@@ -107,11 +107,18 @@ fn sample_keys() -> (EdwardsPoint, Scalar, Scalar, Scalar) {
 }
 
 struct FakeWallet {
+    chain: RefundChain,
     results: Vec<ScanResult>,
+    timelocked_artifact: Option<(TxHash, Vec<u8>)>,
+    broadcast_tx_hash: Option<TxHash>,
 }
 
 #[async_trait]
 impl CryptoNoteWallet for FakeWallet {
+    fn refund_chain(&self) -> RefundChain {
+        self.chain
+    }
+
     async fn lock(
         &self,
         _spend_point: &EdwardsPoint,
@@ -154,11 +161,14 @@ impl CryptoNoteWallet for FakeWallet {
         _destination: &str,
         _refund_height: u64,
     ) -> Result<(TxHash, Vec<u8>), WalletError> {
-        Err(WalletError::RpcRequest("unused".into()))
+        self.timelocked_artifact
+            .clone()
+            .ok_or_else(|| WalletError::RpcRequest("unused".into()))
     }
 
     async fn broadcast_raw_tx(&self, _tx_bytes: &[u8]) -> Result<TxHash, WalletError> {
-        Err(WalletError::RpcRequest("unused".into()))
+        self.broadcast_tx_hash
+            .ok_or_else(|| WalletError::RpcRequest("unused".into()))
     }
 
     async fn get_current_height(&self) -> Result<u64, WalletError> {
@@ -200,6 +210,7 @@ async fn reqwest_transport_supports_both_daemon_traits() {
 #[tokio::test]
 async fn verify_lock_returns_largest_matching_output() {
     let wallet = FakeWallet {
+        chain: RefundChain::Xmr,
         results: vec![
             ScanResult {
                 found: true,
@@ -216,6 +227,8 @@ async fn verify_lock_returns_largest_matching_output() {
                 block_height: 11,
             },
         ],
+        timelocked_artifact: None,
+        broadcast_tx_hash: None,
     };
     let spend_point = Scalar::random(&mut OsRng) * G;
     let view_scalar = Scalar::random(&mut OsRng);
@@ -228,6 +241,7 @@ async fn verify_lock_returns_largest_matching_output() {
 #[tokio::test]
 async fn verify_lock_fails_when_total_is_too_small() {
     let wallet = FakeWallet {
+        chain: RefundChain::Xmr,
         results: vec![ScanResult {
             found: true,
             amount: 3,
@@ -235,12 +249,112 @@ async fn verify_lock_fails_when_total_is_too_small() {
             output_index: 0,
             block_height: 5,
         }],
+        timelocked_artifact: None,
+        broadcast_tx_hash: None,
     };
     let spend_point = Scalar::random(&mut OsRng) * G;
     let view_scalar = Scalar::random(&mut OsRng);
 
     let err = verify_lock(&wallet, &spend_point, &view_scalar, 4, 0).await.unwrap_err();
     assert!(matches!(err, WalletError::InsufficientFunds { need: 4, have: 3 }));
+}
+
+#[tokio::test]
+async fn phase14_build_refund_artifact_binds_metadata_and_payload_hash() {
+    let wallet = FakeWallet {
+        chain: RefundChain::Wow,
+        results: Vec::new(),
+        timelocked_artifact: Some(([0xAB; 32], b"typed-refund-artifact".to_vec())),
+        broadcast_tx_hash: Some([0xAB; 32]),
+    };
+    let lock_tx_hash = [0x44; 32];
+    let destination = "wow-destination";
+    let refund_height = 1234;
+
+    let artifact = wallet
+        .build_refund_artifact(
+            &Scalar::random(&mut OsRng),
+            &Scalar::random(&mut OsRng),
+            destination,
+            refund_height,
+            lock_tx_hash,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(artifact.metadata.chain, RefundChain::Wow);
+    assert_eq!(artifact.metadata.lock_tx_hash, lock_tx_hash);
+    assert_eq!(artifact.metadata.destination, destination);
+    assert_eq!(artifact.metadata.refund_height, refund_height);
+    assert_eq!(
+        artifact.metadata.payload_hash,
+        RefundArtifact::payload_hash(&artifact.tx_bytes)
+    );
+    assert_eq!(artifact.tx_hash, [0xAB; 32]);
+}
+
+#[tokio::test]
+async fn phase14_tampered_refund_artifact_is_rejected() {
+    let wallet = FakeWallet {
+        chain: RefundChain::Xmr,
+        results: Vec::new(),
+        timelocked_artifact: Some(([0xCD; 32], b"artifact-payload".to_vec())),
+        broadcast_tx_hash: Some([0xCD; 32]),
+    };
+    let base_artifact = wallet
+        .build_refund_artifact(
+            &Scalar::random(&mut OsRng),
+            &Scalar::random(&mut OsRng),
+            "xmr-destination",
+            777,
+            [0x55; 32],
+        )
+        .await
+        .unwrap();
+
+    let mut payload_tampered = base_artifact.clone();
+    payload_tampered.tx_bytes.push(0xFF);
+    let err = wallet
+        .validate_refund_artifact(&payload_tampered)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("payload hash mismatch"), "error: {err}");
+
+    let mut metadata_tampered = base_artifact.clone();
+    metadata_tampered.metadata.destination = "other-destination".into();
+    let err = metadata_tampered
+        .validate_binding(RefundChain::Xmr, [0x55; 32], "xmr-destination", 777)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("destination mismatch"), "error: {err}");
+}
+
+#[tokio::test]
+async fn phase14_xmr_and_wow_wallets_share_the_same_artifact_contract() {
+    let xmr_wallet = XmrWallet::new("http://127.0.0.1:1");
+    let wow_wallet = WowWallet::new("http://127.0.0.1:1");
+
+    let xmr_artifact = RefundArtifact::new(
+        RefundChain::Xmr,
+        [0x11; 32],
+        "xmr-destination",
+        100,
+        [0x21; 32],
+        b"xmr-refund".to_vec(),
+    );
+    let wow_artifact = RefundArtifact::new(
+        RefundChain::Wow,
+        [0x12; 32],
+        "wow-destination",
+        200,
+        [0x22; 32],
+        b"wow-refund".to_vec(),
+    );
+
+    xmr_wallet.validate_refund_artifact(&xmr_artifact).unwrap();
+    wow_wallet.validate_refund_artifact(&wow_artifact).unwrap();
+    assert_eq!(xmr_wallet.refund_chain(), RefundChain::Xmr);
+    assert_eq!(wow_wallet.refund_chain(), RefundChain::Wow);
 }
 
 #[tokio::test]
