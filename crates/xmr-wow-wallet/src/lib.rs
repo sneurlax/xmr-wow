@@ -18,7 +18,10 @@ pub mod wow;
 
 pub use error::WalletError;
 pub use rpc_transport::ReqwestTransport;
-pub use trait_def::{ConfirmationStatus, CryptoNoteWallet, ScanResult, TxHash};
+pub use trait_def::{
+    ConfirmationStatus, CryptoNoteWallet, RefundArtifact, RefundArtifactMetadata, RefundChain,
+    ScanResult, TxHash,
+};
 pub use view_key::verify_lock;
 pub use xmr::XmrWallet;
 pub use wow::WowWallet;

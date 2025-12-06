@@ -34,4 +34,7 @@ pub enum WalletError {
 
     #[error("transaction building failed: {0}")]
     TxBuildFailed(String),
+
+    #[error("refund artifact invalid: {0}")]
+    ArtifactInvalid(String),
 }
