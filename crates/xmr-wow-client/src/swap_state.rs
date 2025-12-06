@@ -1,5 +1,6 @@
 /// Swap state and timelock rules for the XMR<->WOW protocol.
 use serde::{Deserialize, Serialize};
+use xmr_wow_wallet::{RefundArtifact, RefundArtifactMetadata, RefundChain, TxHash};
 use xmr_wow_crypto::{
     combine_public_keys, derive_view_key, joint_address, keccak256, AdaptorSignature,
     CompletedSignature, DleqProof, KeyContribution, Network,
@@ -148,6 +149,50 @@ pub struct JointAddresses {
     pub swap_id: [u8; 32],
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PersistedRefundArtifact {
+    pub metadata: RefundArtifactMetadata,
+    pub tx_hash: TxHash,
+    pub tx_bytes: Vec<u8>,
+}
+
+impl PersistedRefundArtifact {
+    pub fn to_wallet_artifact(&self) -> RefundArtifact {
+        RefundArtifact {
+            metadata: self.metadata.clone(),
+            tx_hash: self.tx_hash,
+            tx_bytes: self.tx_bytes.clone(),
+        }
+    }
+
+    pub fn validate_binding(
+        &self,
+        expected_chain: RefundChain,
+        expected_lock_tx_hash: TxHash,
+        expected_destination: &str,
+        expected_refund_height: u64,
+    ) -> Result<(), SwapError> {
+        self.to_wallet_artifact()
+            .validate_binding(
+                expected_chain,
+                expected_lock_tx_hash,
+                expected_destination,
+                expected_refund_height,
+            )
+            .map_err(|e| SwapError::InvalidRefundArtifact(e.to_string()))
+    }
+}
+
+impl From<RefundArtifact> for PersistedRefundArtifact {
+    fn from(value: RefundArtifact) -> Self {
+        Self {
+            metadata: value.metadata,
+            tx_hash: value.tx_hash,
+            tx_bytes: value.tx_bytes,
+        }
+    }
+}
+
 /// Persisted swap state.
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(tag = "phase", rename_all = "snake_case")]
@@ -198,8 +243,9 @@ pub enum SwapState {
         counterparty_pre_sig: Option<AdaptorSignature>,
         /// Counterparty pubkey used as the adaptor point.
         adaptor_point: [u8; 32],
-        /// Pre-signed XMR refund transaction bytes.
-        xmr_refund_tx: Option<Vec<u8>>,
+        /// Stored XMR refund artifact.
+        #[serde(default)]
+        refund_artifact: Option<PersistedRefundArtifact>,
         #[serde(skip)]
         secret_bytes: [u8; 32],
     },
@@ -214,8 +260,9 @@ pub enum SwapState {
         my_adaptor_pre_sig: AdaptorSignature,
         counterparty_pre_sig: Option<AdaptorSignature>,
         adaptor_point: [u8; 32],
-        /// Pre-signed WOW refund transaction bytes.
-        wow_refund_tx: Option<Vec<u8>>,
+        /// Stored WOW refund artifact.
+        #[serde(default)]
+        refund_artifact: Option<PersistedRefundArtifact>,
         #[serde(skip)]
         secret_bytes: [u8; 32],
     },
@@ -247,6 +294,8 @@ pub enum SwapError {
     InvalidMessage(String),
     #[error("invalid timelock: {0}")]
     InvalidTimelock(String),
+    #[error("invalid refund artifact: {0}")]
+    InvalidRefundArtifact(String),
     #[error("decryption failed: {0}")]
     DecryptionFailed(String),
 }
@@ -409,7 +458,7 @@ impl SwapState {
                 my_adaptor_pre_sig,
                 counterparty_pre_sig,
                 adaptor_point,
-                xmr_refund_tx: None,
+                refund_artifact: None,
                 secret_bytes,
             }),
             SwapState::JointAddress {
@@ -449,7 +498,7 @@ impl SwapState {
                     my_adaptor_pre_sig,
                     counterparty_pre_sig: None,
                     adaptor_point: counterparty_pubkey,
-                    xmr_refund_tx: None,
+                    refund_artifact: None,
                     secret_bytes,
                 })
             }
@@ -501,7 +550,7 @@ impl SwapState {
                     my_adaptor_pre_sig,
                     counterparty_pre_sig: None,
                     adaptor_point: counterparty_pubkey,
-                    wow_refund_tx: None,
+                    refund_artifact: None,
                     secret_bytes,
                 })
             }
@@ -531,7 +580,7 @@ impl SwapState {
                 counterparty_pubkey,
                 my_adaptor_pre_sig,
                 adaptor_point,
-                xmr_refund_tx,
+                refund_artifact,
                 secret_bytes,
                 ..
             } => {
@@ -561,7 +610,7 @@ impl SwapState {
                     my_adaptor_pre_sig,
                     counterparty_pre_sig: Some(pre_sig),
                     adaptor_point,
-                    xmr_refund_tx,
+                    refund_artifact,
                     secret_bytes,
                 })
             }
@@ -574,7 +623,7 @@ impl SwapState {
                 counterparty_pubkey,
                 my_adaptor_pre_sig,
                 adaptor_point,
-                wow_refund_tx,
+                refund_artifact,
                 secret_bytes,
                 ..
             } => {
@@ -602,7 +651,7 @@ impl SwapState {
                     my_adaptor_pre_sig,
                     counterparty_pre_sig: Some(pre_sig),
                     adaptor_point,
-                    wow_refund_tx,
+                    refund_artifact,
                     secret_bytes,
                 })
             }
@@ -812,6 +861,140 @@ impl SwapState {
         }
     }
 
+    fn expected_refund_binding_owned(
+        &self,
+    ) -> Result<(RefundChain, TxHash, String, u64), SwapError> {
+        match self {
+            SwapState::XmrLocked {
+                params,
+                xmr_lock_tx,
+                ..
+            } => {
+                let destination = params.alice_refund_address.clone().ok_or_else(|| {
+                    SwapError::InvalidRefundArtifact(
+                        "alice_refund_address missing for XMR refund artifact".into(),
+                    )
+                })?;
+                Ok((
+                    RefundChain::Xmr,
+                    *xmr_lock_tx,
+                    destination,
+                    params.xmr_refund_height,
+                ))
+            }
+            SwapState::WowLocked {
+                params,
+                wow_lock_tx,
+                ..
+            } => {
+                let destination = params.bob_refund_address.clone().ok_or_else(|| {
+                    SwapError::InvalidRefundArtifact(
+                        "bob_refund_address missing for WOW refund artifact".into(),
+                    )
+                })?;
+                Ok((
+                    RefundChain::Wow,
+                    *wow_lock_tx,
+                    destination,
+                    params.wow_refund_height,
+                ))
+            }
+            _ => Err(SwapError::InvalidTransition(
+                "refund artifacts only apply to locked swap states".into(),
+            )),
+        }
+    }
+
+    pub fn refund_artifact(&self) -> Option<&PersistedRefundArtifact> {
+        match self {
+            SwapState::XmrLocked { refund_artifact, .. }
+            | SwapState::WowLocked { refund_artifact, .. } => refund_artifact.as_ref(),
+            _ => None,
+        }
+    }
+
+    pub fn require_refund_artifact(&self) -> Result<&PersistedRefundArtifact, SwapError> {
+        self.refund_artifact().ok_or_else(|| {
+            SwapError::InvalidRefundArtifact(
+                "refund artifact missing for locked state".into(),
+            )
+        })
+    }
+
+    pub fn validate_refund_artifact(&self) -> Result<(), SwapError> {
+        let artifact = self.require_refund_artifact()?;
+        let (chain, lock_tx_hash, destination, refund_height) =
+            self.expected_refund_binding_owned()?;
+        artifact.validate_binding(chain, lock_tx_hash, &destination, refund_height)
+    }
+
+    pub fn record_refund_artifact(
+        self,
+        artifact: PersistedRefundArtifact,
+    ) -> Result<SwapState, SwapError> {
+        let (chain, lock_tx_hash, destination, refund_height) =
+            self.expected_refund_binding_owned()?;
+        artifact.validate_binding(chain, lock_tx_hash, &destination, refund_height)?;
+
+        match self {
+            SwapState::XmrLocked {
+                role,
+                params,
+                addresses,
+                wow_lock_tx,
+                xmr_lock_tx,
+                my_pubkey,
+                counterparty_pubkey,
+                my_adaptor_pre_sig,
+                counterparty_pre_sig,
+                adaptor_point,
+                secret_bytes,
+                ..
+            } => Ok(SwapState::XmrLocked {
+                role,
+                params,
+                addresses,
+                wow_lock_tx,
+                xmr_lock_tx,
+                my_pubkey,
+                counterparty_pubkey,
+                my_adaptor_pre_sig,
+                counterparty_pre_sig,
+                adaptor_point,
+                refund_artifact: Some(artifact),
+                secret_bytes,
+            }),
+            SwapState::WowLocked {
+                role,
+                params,
+                addresses,
+                wow_lock_tx,
+                my_pubkey,
+                counterparty_pubkey,
+                my_adaptor_pre_sig,
+                counterparty_pre_sig,
+                adaptor_point,
+                secret_bytes,
+                ..
+            } => Ok(SwapState::WowLocked {
+                role,
+                params,
+                addresses,
+                wow_lock_tx,
+                my_pubkey,
+                counterparty_pubkey,
+                my_adaptor_pre_sig,
+                counterparty_pre_sig,
+                adaptor_point,
+                refund_artifact: Some(artifact),
+                secret_bytes,
+            }),
+            _ => Err(SwapError::InvalidTransition(
+                "refund artifacts only apply to locked swap states".into(),
+            )),
+        }
+    }
+
     /// The swap ID if available.
     pub fn swap_id(&self) -> Option<[u8; 32]> {
         match self {
@@ -915,7 +1098,7 @@ pub fn restore_secret_into_state(
             my_adaptor_pre_sig,
             counterparty_pre_sig,
             adaptor_point,
-            xmr_refund_tx,
+            refund_artifact,
             ..
         } => {
             let computed = (scalar * G).compress().to_bytes();
@@ -933,7 +1116,7 @@ pub fn restore_secret_into_state(
                 my_adaptor_pre_sig,
                 counterparty_pre_sig,
                 adaptor_point,
-                xmr_refund_tx,
+                refund_artifact,
                 secret_bytes: secret,
             })
         }
@@ -947,7 +1130,7 @@ pub fn restore_secret_into_state(
             my_adaptor_pre_sig,
             counterparty_pre_sig,
             adaptor_point,
-            wow_refund_tx,
+            refund_artifact,
             ..
         } => {
             let computed = (scalar * G).compress().to_bytes();
@@ -964,7 +1147,7 @@ pub fn restore_secret_into_state(
                 my_adaptor_pre_sig,
                 counterparty_pre_sig,
                 adaptor_point,
-                wow_refund_tx,
+                refund_artifact,
                 secret_bytes: secret,
             })
         }
