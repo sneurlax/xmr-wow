@@ -15,5 +15,6 @@ pub use protocol_message::{decode_message, encode_message, ProtocolMessage};
 pub use store::SwapStore;
 pub use swap_state::{
     build_observed_refund_timing, restore_secret_into_state, validate_timelocks, JointAddresses,
-    RefundTimingObservation, RefundTimingSource, SwapError, SwapParams, SwapRole, SwapState,
+    PersistedRefundArtifact, RefundTimingObservation, RefundTimingSource, SwapError, SwapParams,
+    SwapRole, SwapState,
 };
