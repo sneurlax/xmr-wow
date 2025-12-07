@@ -44,9 +44,16 @@ pub enum ProtocolMessage {
         wow_refund_height: u64,
         #[serde(default)]
         refund_timing: Option<RefundTimingObservation>,
+        #[serde(default)]
+        alice_refund_address: Option<String>,
     },
     /// Bob -> Alice: response with pubkey and proof.
-    Response { pubkey: [u8; 32], proof: DleqProof },
+    Response {
+        pubkey: [u8; 32],
+        proof: DleqProof,
+        #[serde(default)]
+        bob_refund_address: Option<String>,
+    },
     /// Adaptor pre-signature exchange (both parties send after locking).
     AdaptorPreSig { pre_sig: AdaptorSignature },
     /// Claim proof via completed adaptor signature.
@@ -121,6 +128,7 @@ mod tests {
                 wow_lock_blocks: 300,
                 source: RefundTimingSource::DaemonHeightQuery,
             }),
+            alice_refund_address: Some("alice-refund-address".into()),
         }
     }
 
@@ -135,6 +143,7 @@ mod tests {
         ProtocolMessage::Response {
             pubkey: contrib.public_bytes(),
             proof,
+            bob_refund_address: Some("bob-refund-address".into()),
         }
     }
 
@@ -156,18 +165,21 @@ mod tests {
                     pubkey: a,
                     amount_xmr: ax,
                     refund_timing: at,
+                    alice_refund_address: aa,
                     ..
                 },
                 ProtocolMessage::Init {
                     pubkey: b,
                     amount_xmr: bx,
                     refund_timing: bt,
+                    alice_refund_address: ba,
                     ..
                 },
             ) => {
                 assert_eq!(a, b);
                 assert_eq!(ax, bx);
                 assert_eq!(at, bt);
+                assert_eq!(aa, ba);
             }
             _ => panic!("wrong variant"),
         }
@@ -208,12 +220,52 @@ mod tests {
         let decoded: ProtocolMessage = decode_message(&encoded).unwrap();
         match (&msg, &decoded) {
             (
-                ProtocolMessage::Response { pubkey: a, .. },
-                ProtocolMessage::Response { pubkey: b, .. },
+                ProtocolMessage::Response {
+                    pubkey: a,
+                    bob_refund_address: ar,
+                    ..
+                },
+                ProtocolMessage::Response {
+                    pubkey: b,
+                    bob_refund_address: br,
+                    ..
+                },
             ) => {
                 assert_eq!(a, b);
+                assert_eq!(ar, br);
             }
             _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn phase15_init_and_response_messages_round_trip_refund_destinations() {
+        let init = make_test_init();
+        let encoded_init = encode_message(&init);
+        let decoded_init: ProtocolMessage = decode_message(&encoded_init).unwrap();
+        match decoded_init {
+            ProtocolMessage::Init {
+                alice_refund_address,
+                ..
+            } => assert_eq!(
+                alice_refund_address.as_deref(),
+                Some("alice-refund-address")
+            ),
+            _ => panic!("wrong init variant"),
+        }
+
+        let response = make_test_response();
+        let encoded_response = encode_message(&response);
+        let decoded_response: ProtocolMessage = decode_message(&encoded_response).unwrap();
+        match decoded_response {
+            ProtocolMessage::Response {
+                bob_refund_address,
+                ..
+            } => assert_eq!(
+                bob_refund_address.as_deref(),
+                Some("bob-refund-address")
+            ),
+            _ => panic!("wrong response variant"),
         }
     }
 

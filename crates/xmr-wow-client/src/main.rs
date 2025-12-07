@@ -56,12 +56,18 @@ enum Command {
         /// WOW lock period in blocks
         #[arg(long, default_value = "500")]
         wow_lock_blocks: u64,
+        /// Alice refund destination for her XMR if the swap fails
+        #[arg(long)]
+        alice_refund_address: String,
     },
     /// Bob: respond to Alice's swap initiation
     InitBob {
         /// Alice's xmrwow1: initiation message
         #[arg(long)]
         message: String,
+        /// Bob refund destination for his WOW if the swap fails
+        #[arg(long)]
+        bob_refund_address: String,
     },
     /// Import counterparty's response message to advance swap state
     Import {
@@ -522,6 +528,7 @@ async fn main() -> anyhow::Result<()> {
             wow_daemon,
             xmr_lock_blocks,
             wow_lock_blocks,
+            alice_refund_address,
         } => {
             // Validate amounts (ERR-02)
             if amount_xmr == 0 {
@@ -565,7 +572,7 @@ async fn main() -> anyhow::Result<()> {
                 xmr_refund_height,
                 wow_refund_height,
                 refund_timing: Some(refund_timing.clone()),
-                alice_refund_address: None,
+                alice_refund_address: Some(alice_refund_address.clone()),
                 bob_refund_address: None,
             };
 
@@ -601,6 +608,7 @@ async fn main() -> anyhow::Result<()> {
                 xmr_refund_height,
                 wow_refund_height,
                 refund_timing: Some(refund_timing.clone()),
+                alice_refund_address: Some(alice_refund_address.clone()),
             };
             let encoded = encode_message(&msg);
 
@@ -619,7 +627,10 @@ async fn main() -> anyhow::Result<()> {
             println!("{}", encoded);
         }
 
-        Command::InitBob { message } => {
+        Command::InitBob {
+            message,
+            bob_refund_address,
+        } => {
             let password = get_password(cli.password.as_deref())?;
             let salt = store.get_or_create_salt()?;
             let enc_key = derive_key(password.as_bytes(), &salt);
@@ -634,6 +645,7 @@ async fn main() -> anyhow::Result<()> {
                 xmr_refund_height,
                 wow_refund_height,
                 refund_timing,
+                alice_refund_address,
             ) = match init_msg {
                 ProtocolMessage::Init {
                     pubkey,
@@ -643,6 +655,7 @@ async fn main() -> anyhow::Result<()> {
                     xmr_refund_height,
                     wow_refund_height,
                     refund_timing,
+                    alice_refund_address,
                 } => (
                     pubkey,
                     proof,
@@ -651,6 +664,7 @@ async fn main() -> anyhow::Result<()> {
                     xmr_refund_height,
                     wow_refund_height,
                     refund_timing,
+                    alice_refund_address,
                 ),
                 _ => anyhow::bail!("Expected Init message from Alice"),
             };
@@ -660,6 +674,11 @@ async fn main() -> anyhow::Result<()> {
                     "Phase 13 timing basis missing: legacy init transcripts without refund_timing are unsupported"
                 )
             })?;
+            let alice_refund_address = alice_refund_address.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Phase 15 transcript missing: legacy init transcripts without alice_refund_address are unsupported"
+                )
+            })?;
 
             let params = SwapParams {
                 amount_xmr,
@@ -667,8 +686,8 @@ async fn main() -> anyhow::Result<()> {
                 xmr_refund_height,
                 wow_refund_height,
                 refund_timing: Some(refund_timing.clone()),
-                alice_refund_address: None,
-                bob_refund_address: None,
+                alice_refund_address: Some(alice_refund_address.clone()),
+                bob_refund_address: Some(bob_refund_address.clone()),
             };
             params
                 .validate_observed_refund_timing()
@@ -714,6 +733,7 @@ async fn main() -> anyhow::Result<()> {
             let response = ProtocolMessage::Response {
                 pubkey: my_pubkey,
                 proof: my_proof,
+                bob_refund_address: Some(bob_refund_address.clone()),
             };
             let encoded = encode_message(&response);
 
@@ -759,14 +779,47 @@ async fn main() -> anyhow::Result<()> {
 
             // Decode Bob's response
             let response_msg: ProtocolMessage = decode_message(&message)?;
-            let (bob_pubkey, bob_proof) = match response_msg {
-                ProtocolMessage::Response { pubkey, proof } => (pubkey, proof),
+            let (bob_pubkey, bob_proof, bob_refund_address) = match response_msg {
+                ProtocolMessage::Response {
+                    pubkey,
+                    proof,
+                    bob_refund_address,
+                } => (pubkey, proof, bob_refund_address),
                 _ => anyhow::bail!("Expected Response message from Bob"),
             };
+            let bob_refund_address = bob_refund_address.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Phase 15 transcript missing: legacy response messages without bob_refund_address are unsupported"
+                )
+            })?;
 
             // Verify and advance state
             let state = state.receive_counterparty_key(bob_pubkey, &bob_proof)?;
             let state = state.derive_joint_addresses()?;
+            let state = match state {
+                SwapState::JointAddress {
+                    role,
+                    mut params,
+                    addresses,
+                    my_pubkey,
+                    counterparty_pubkey,
+                    before_wow_lock_checkpoint,
+                    secret_bytes,
+                } => {
+                    params.bob_refund_address = Some(bob_refund_address.clone());
+                    SwapState::JointAddress {
+                        role,
+                        params,
+                        addresses,
+                        my_pubkey,
+                        counterparty_pubkey,
+                        before_wow_lock_checkpoint,
+                        secret_bytes,
+                    }
+                    .refresh_refund_readiness()?
+                }
+                other => other,
+            };
 
             let (real_swap_id, xmr_address, wow_address) = match &state {
                 SwapState::JointAddress { addresses, .. } => (
