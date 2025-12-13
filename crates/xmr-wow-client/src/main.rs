@@ -9,9 +9,9 @@ use curve25519_dalek::scalar::Scalar;
 use rand::rngs::OsRng;
 use xmr_wow_client::{
     build_observed_refund_timing, decode_message, decrypt_secret, derive_key, encode_message,
-    encrypt_secret, guarantee_decision, guidance_decision, restore_secret_into_state,
-    validate_pre_risk_entry, GuaranteeDecision, GuaranteeMode, GuaranteeStatus, ProtocolMessage,
-    SwapParams, SwapRole, SwapState, SwapStore,
+    encrypt_secret, guarantee_decision, restore_secret_into_state, GuaranteeDecision,
+    GuaranteeMode, ProtocolMessage, RefundCheckpointName, SwapParams, SwapRole, SwapState,
+    SwapStore,
 };
 use xmr_wow_crypto::{
     derive_view_key, encode_address, keccak256, mnemonic_to_scalar, scalar_to_mnemonic,
@@ -378,25 +378,6 @@ fn guarantee_failure(command: &str, decision: GuaranteeDecision) -> anyhow::Erro
     )
 }
 
-fn require_supported_command(command: &str, decision: GuaranteeDecision) -> anyhow::Result<()> {
-    if decision.status != GuaranteeStatus::Supported {
-        return Err(guarantee_failure(command, decision));
-    }
-    Ok(())
-}
-
-fn pre_risk_command_entry(
-    state: &SwapState,
-    command: &str,
-    mode: GuaranteeMode,
-) -> anyhow::Result<GuaranteeDecision> {
-    let params = params_for_state(state)
-        .ok_or_else(|| anyhow::anyhow!("`{}` requires swap timing parameters", command))?;
-    let decision = validate_pre_risk_entry(params, mode).map_err(|e| anyhow::anyhow!("{}", e))?;
-    require_supported_command(command, decision)?;
-    Ok(decision)
-}
-
 fn print_refund_timing(params: &SwapParams) {
     match &params.refund_timing {
         Some(refund_timing) => {
@@ -416,10 +397,43 @@ fn print_refund_timing(params: &SwapParams) {
     }
 }
 
-fn print_phase13_guidance(state: &SwapState) {
-    if let Some(decision) = guidance_decision(state) {
-        println!("Phase 13 guarantee status: {}", decision.status.label());
-        println!("Reason: {}", decision.reason);
+fn require_checkpoint_ready(
+    state: &SwapState,
+    name: RefundCheckpointName,
+    command: &str,
+) -> anyhow::Result<()> {
+    state
+        .require_checkpoint_ready(name)
+        .map_err(|e| anyhow::anyhow!("Phase 15: `{}` blocked. {}", command, e))
+}
+
+fn print_refund_checkpoints(state: &SwapState) {
+    if let Some(checkpoint) = state.before_wow_lock_checkpoint() {
+        println!("Checkpoint {}:", checkpoint.name.label());
+        println!("  Status:             {}", checkpoint.status.label());
+        println!("  Chain:              {:?}", checkpoint.chain);
+        println!(
+            "  Refund address:     {}",
+            checkpoint.refund_address.as_deref().unwrap_or("<missing>")
+        );
+        println!("  Refund height:      {}", checkpoint.refund_height);
+        println!("  Artifact present:   {}", checkpoint.artifact_present);
+        println!("  Artifact validated: {}", checkpoint.artifact_validated);
+        println!("  Reason:             {}", checkpoint.reason);
+    }
+
+    if let Some(checkpoint) = state.before_xmr_lock_checkpoint() {
+        println!("Checkpoint {}:", checkpoint.name.label());
+        println!("  Status:             {}", checkpoint.status.label());
+        println!("  Chain:              {:?}", checkpoint.chain);
+        println!(
+            "  Refund address:     {}",
+            checkpoint.refund_address.as_deref().unwrap_or("<missing>")
+        );
+        println!("  Refund height:      {}", checkpoint.refund_height);
+        println!("  Artifact present:   {}", checkpoint.artifact_present);
+        println!("  Artifact validated: {}", checkpoint.artifact_validated);
+        println!("  Reason:             {}", checkpoint.reason);
     }
 }
 
@@ -849,6 +863,7 @@ async fn main() -> anyhow::Result<()> {
             match store.load(&id)? {
                 Some(state_json) => {
                     let state: SwapState = serde_json::from_str(&state_json)?;
+                    let state = state.refresh_refund_readiness()?;
                     validate_persisted_timing(&state)?;
                     println!("Swap ID: {}", swap_id);
                     println!("Phase:   {}", phase_name(&state));
@@ -884,7 +899,10 @@ async fn main() -> anyhow::Result<()> {
                         }
                     }
 
-                    print_phase13_guidance(&state);
+                    print_refund_checkpoints(&state);
+                    println!();
+                    println!("--- Next Safe Action ---");
+                    println!("{}", state.next_safe_action());
                 }
                 None => {
                     println!("Swap {} not found.", swap_id);
@@ -935,6 +953,7 @@ async fn main() -> anyhow::Result<()> {
 
             let id = parse_swap_id(&swap_id)?;
             let (state, secret_bytes, _) = load_and_decrypt_state(&store, &id, &enc_key)?;
+            let state = state.refresh_refund_readiness()?;
             validate_persisted_timing(&state)?;
 
             // Verify state is WowLocked (primary) or JointAddress (fallback) and role is Alice
@@ -961,11 +980,7 @@ async fn main() -> anyhow::Result<()> {
             if role != SwapRole::Alice {
                 anyhow::bail!("lock-xmr is for Alice only (you are Bob)");
             }
-            pre_risk_command_entry(
-                &state,
-                "lock-xmr",
-                GuaranteeMode::CurrentSingleSignerPreLockArtifact,
-            )?;
+            require_checkpoint_ready(&state, RefundCheckpointName::BeforeXmrLock, "lock-xmr")?;
 
             // Compute joint spend point and view scalar
             let (joint_spend, view_scalar) =
@@ -1077,11 +1092,7 @@ async fn main() -> anyhow::Result<()> {
             if role != SwapRole::Bob {
                 anyhow::bail!("lock-wow is for Bob only (you are Alice)");
             }
-            pre_risk_command_entry(
-                &state,
-                "lock-wow",
-                GuaranteeMode::CurrentSingleSignerPreLockArtifact,
-            )?;
+            require_checkpoint_ready(&state, RefundCheckpointName::BeforeWowLock, "lock-wow")?;
 
             // Compute joint keys
             let (joint_spend, view_scalar) =
@@ -1579,60 +1590,12 @@ async fn main() -> anyhow::Result<()> {
                 }
             }
 
+            print_refund_checkpoints(&state);
+
             // Print next action guidance
             println!();
-            println!("--- Next Action ---");
-            if let Some(decision) = guidance_decision(&state) {
-                println!("Phase 13 guarantee status: {}", decision.status.label());
-                println!("Reason: {}", decision.reason);
-            } else {
-                match &state {
-                    SwapState::KeyGeneration { role, .. } => match role {
-                        SwapRole::Alice => println!("Send the init message to Bob and wait for his response, then run import."),
-                        SwapRole::Bob => println!("Send the response message to Alice."),
-                    },
-                    SwapState::DleqExchange { role, .. } => match role {
-                        SwapRole::Alice => println!("Run import with Bob's response message."),
-                        SwapRole::Bob => println!("Run import with Alice's init message."),
-                    },
-                    SwapState::JointAddress { role, .. } => match role {
-                        SwapRole::Alice => println!("Wait for Bob to run lock-wow, then run lock-xmr --swap-id {}.", swap_id),
-                        SwapRole::Bob => println!("Run lock-wow --swap-id {} to lock WOW first.", swap_id),
-                    },
-                    SwapState::XmrLocked { role, counterparty_pre_sig, .. } => match role {
-                        SwapRole::Alice => {
-                            if counterparty_pre_sig.is_none() {
-                                println!("Send your pre-sig to Bob and run exchange-pre-sig with Bob's pre-sig.");
-                            } else {
-                                println!("Wait for Bob to lock WOW.");
-                            }
-                        }
-                        SwapRole::Bob => println!("Run lock-wow --swap-id {} to lock WOW.", swap_id),
-                    },
-                    SwapState::WowLocked { role, counterparty_pre_sig, .. } => match role {
-                        SwapRole::Alice => {
-                            if counterparty_pre_sig.is_none() {
-                                println!("Run exchange-pre-sig to import counterparty's adaptor pre-signature.");
-                            } else {
-                                println!("Wait for Bob's claim proof, then run claim-wow.");
-                            }
-                        }
-                        SwapRole::Bob => {
-                            if counterparty_pre_sig.is_none() {
-                                println!("Run exchange-pre-sig to import counterparty's adaptor pre-signature.");
-                            } else {
-                                println!("Run claim-xmr to send your claim proof and claim XMR.");
-                            }
-                        }
-                    },
-                    SwapState::Complete { .. } => {
-                        println!("Swap completed successfully. No further action needed.");
-                    }
-                    SwapState::Refunded { .. } => {
-                        println!("Swap was refunded. No further action needed.");
-                    }
-                }
-            }
+            println!("--- Next Safe Action ---");
+            println!("{}", state.next_safe_action());
         }
 
         Command::GenerateWallet { network, mnemonic } => {
