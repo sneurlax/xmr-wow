@@ -20,15 +20,15 @@ monero-wallet = { git = "https://github.com/sneurlax/monero-oxide", rev = "f9afc
 # Cuprate crates pinned to the compatibility commit in sneurlax/cuprate.
 # The cuprate consensus engine is chain-agnostic for block structure.
 [dependencies]
-cuprate-blockchain        = { git = "https://github.com/sneurlax/cuprate", rev = "f460b2dbd648e76c148bdaa0512f048500b7a504" }
-cuprate-database          = { git = "https://github.com/sneurlax/cuprate", rev = "f460b2dbd648e76c148bdaa0512f048500b7a504" }
-cuprate-database-service  = { git = "https://github.com/sneurlax/cuprate", rev = "f460b2dbd648e76c148bdaa0512f048500b7a504" }
-cuprate-consensus         = { git = "https://github.com/sneurlax/cuprate", rev = "f460b2dbd648e76c148bdaa0512f048500b7a504" }
-cuprate-consensus-context = { git = "https://github.com/sneurlax/cuprate", rev = "f460b2dbd648e76c148bdaa0512f048500b7a504" }
-cuprate-consensus-rules   = { git = "https://github.com/sneurlax/cuprate", rev = "f460b2dbd648e76c148bdaa0512f048500b7a504", features = ["rayon"] }
-cuprate-types             = { git = "https://github.com/sneurlax/cuprate", rev = "f460b2dbd648e76c148bdaa0512f048500b7a504", features = ["blockchain"] }
-cuprate-helper            = { git = "https://github.com/sneurlax/cuprate", rev = "f460b2dbd648e76c148bdaa0512f048500b7a504", features = ["std", "fs", "asynch", "net"] }
-cuprate-constants         = { git = "https://github.com/sneurlax/cuprate", rev = "f460b2dbd648e76c148bdaa0512f048500b7a504" }
+cuprate-blockchain        = { git = "https://github.com/sneurlax/cuprate", rev = "7b2e472d0467e1520c7c5252742fb5a463e60a5d" }
+cuprate-database          = { git = "https://github.com/sneurlax/cuprate", rev = "7b2e472d0467e1520c7c5252742fb5a463e60a5d" }
+cuprate-database-service  = { git = "https://github.com/sneurlax/cuprate", rev = "7b2e472d0467e1520c7c5252742fb5a463e60a5d" }
+cuprate-consensus         = { git = "https://github.com/sneurlax/cuprate", rev = "7b2e472d0467e1520c7c5252742fb5a463e60a5d" }
+cuprate-consensus-context = { git = "https://github.com/sneurlax/cuprate", rev = "7b2e472d0467e1520c7c5252742fb5a463e60a5d" }
+cuprate-consensus-rules   = { git = "https://github.com/sneurlax/cuprate", rev = "7b2e472d0467e1520c7c5252742fb5a463e60a5d", features = ["rayon"] }
+cuprate-types             = { git = "https://github.com/sneurlax/cuprate", rev = "7b2e472d0467e1520c7c5252742fb5a463e60a5d", features = ["blockchain"] }
+cuprate-helper            = { git = "https://github.com/sneurlax/cuprate", rev = "7b2e472d0467e1520c7c5252742fb5a463e60a5d", features = ["std", "fs", "asynch", "net"] }
+cuprate-constants         = { git = "https://github.com/sneurlax/cuprate", rev = "7b2e472d0467e1520c7c5252742fb5a463e60a5d" }
 
 # wownero-oxide is vendored in-tree and already uses renamed package names:
 # `wownero-oxide`, `wownero-wallet`, and `wownero-address`.
