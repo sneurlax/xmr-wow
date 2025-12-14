@@ -27,3 +27,7 @@ tracing            = { workspace = true }
 rand               = { workspace = true }
 curve25519-dalek   = { workspace = true }
 bytes              = { workspace = true }
+
+[dev-dependencies]
+simnet-testbed     = { path = "../../deps/simnet-testbed" }
+tempfile           = "3"

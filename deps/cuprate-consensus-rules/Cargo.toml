@@ -1,0 +1,38 @@
+[package]
+name = "cuprate-consensus-rules"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["Boog900"]
+
+[features]
+default = []
+proptest = ["cuprate-types/proptest"]
+rayon = ["dep:rayon"]
+
+[dependencies]
+cuprate-constants = { git = "https://github.com/sneurlax/cuprate", rev = "7b2e472d0467e1520c7c5252742fb5a463e60a5d", default-features = false, features = ["block"] }
+cuprate-helper = { git = "https://github.com/sneurlax/cuprate", rev = "7b2e472d0467e1520c7c5252742fb5a463e60a5d", default-features = false, features = ["std", "cast"] }
+cuprate-types = { git = "https://github.com/sneurlax/cuprate", rev = "7b2e472d0467e1520c7c5252742fb5a463e60a5d", default-features = false }
+cuprate-cryptonight = { git = "https://github.com/sneurlax/cuprate", rev = "7b2e472d0467e1520c7c5252742fb5a463e60a5d", default-features = false }
+
+monero-oxide = { git = "https://github.com/sneurlax/monero-oxide", rev = "f9afcdda9e463ed2a94821265929acf60fa57346", default-features = false, features = ["std"] }
+curve25519-dalek = { version = "4", default-features = false, features = ["alloc", "zeroize", "precomputed-tables"] }
+
+rand = { version = "0.8", default-features = false, features = ["std", "std_rng"] }
+
+indexmap = { version = "2", default-features = false, features = ["std"] }
+hex = { version = "0.4", default-features = false, features = ["std"] }
+hex-literal = { version = "1", default-features = false }
+crypto-bigint = { version = "0.6", default-features = false }
+
+cfg-if = { version = "1", default-features = false }
+tracing = { version = "0.1", default-features = false, features = ["std"] }
+thiserror = { version = "2", default-features = false }
+
+rayon = { version = "1", default-features = false, optional = true }
+
+[dev-dependencies]
+proptest = "1"
+proptest-derive = "0.6"
+tokio = { version = "1.35.0", features = ["rt-multi-thread", "macros"] }

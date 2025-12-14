@@ -10,6 +10,11 @@ members = [
     "crates/wownero-rust",
     "crates/xmr-wow-wallet",
 ]
+exclude = [
+    "deps/cuprate-simnet",
+    "deps/wownero-simnet",
+    "deps/simnet-testbed",
+]
 resolver = "2"
 
 [workspace.package]
@@ -93,3 +98,12 @@ crc              = "3"
 
 # Testing
 proptest         = "1"
+
+[patch."https://github.com/sneurlax/cuprate"]
+cuprate-consensus-rules = { path = "deps/cuprate-consensus-rules" }
+
+[patch."https://github.com/monero-oxide/monero-oxide.git"]
+monero-address = { git = "https://github.com/sneurlax/monero-oxide", rev = "f9afcdda9e463ed2a94821265929acf60fa57346" }
+monero-interface = { git = "https://github.com/sneurlax/monero-oxide", rev = "f9afcdda9e463ed2a94821265929acf60fa57346" }
+monero-oxide = { git = "https://github.com/sneurlax/monero-oxide", rev = "f9afcdda9e463ed2a94821265929acf60fa57346" }
+monero-wallet = { git = "https://github.com/sneurlax/monero-oxide", rev = "f9afcdda9e463ed2a94821265929acf60fa57346" }
