@@ -14,11 +14,17 @@ use curve25519_dalek::{
 };
 use rand::rngs::OsRng;
 use serde_json::{json, Value};
+use simnet_testbed::{
+    cuprate_simnet::SimnetWallet,
+    wownero_simnet::WowSimnetWallet,
+    SimnetTestbed,
+};
 use tokio::{net::TcpListener, task::JoinHandle};
 use xmr_wow_wallet::{
     verify_lock, ConfirmationStatus, CryptoNoteWallet, RefundArtifact, RefundChain,
     ReqwestTransport, ScanResult, TxHash, WalletError, WowWallet, XmrWallet,
 };
+use xmr_wow_crypto::{combine_public_keys, derive_view_key};
 
 #[derive(Clone)]
 struct MockDaemonState {
@@ -104,6 +110,19 @@ fn sample_keys() -> (EdwardsPoint, Scalar, Scalar, Scalar) {
     let sender_spend = Scalar::random(&mut OsRng);
     let sender_view = Scalar::random(&mut OsRng);
     (spend_point, view_scalar, sender_spend, sender_view)
+}
+
+fn sample_joint_keys() -> (Scalar, EdwardsPoint, Scalar) {
+    let alice_secret = Scalar::random(&mut OsRng);
+    let bob_secret = Scalar::random(&mut OsRng);
+    let alice_pub = alice_secret * G;
+    let bob_pub = bob_secret * G;
+    let joint_spend_point = combine_public_keys(&alice_pub, &bob_pub);
+    let joint_spend_secret = alice_secret + bob_secret;
+    let joint_view_scalar =
+        derive_view_key(&Scalar::from_bytes_mod_order(joint_spend_point.compress().to_bytes()));
+
+    (joint_spend_secret, joint_spend_point, joint_view_scalar)
 }
 
 struct FakeWallet {
@@ -447,4 +466,142 @@ async fn wow_wallet_methods_are_covered_without_live_daemons() {
 
     let height = funded.get_current_height().await.unwrap();
     assert_eq!(height, 18);
+}
+
+#[tokio::test]
+async fn phase16_xmr_wallet_refund_artifact_round_trip_on_simnet() {
+    let testbed = SimnetTestbed::new().await.unwrap();
+    let sender = SimnetWallet::generate();
+    let destination = SimnetWallet::generate();
+    let (joint_spend_secret, joint_spend_point, joint_view_scalar) = sample_joint_keys();
+    let lock_amount = 500_000_000_000u64;
+
+    {
+        let mut node = testbed.xmr_node().lock().await;
+        node.mine_to(&sender.spend_pub, &sender.view_scalar, 2).await.unwrap();
+        node.mine_blocks(66).await.unwrap();
+    }
+
+    let xmr_wallet =
+        XmrWallet::with_sender_keys(testbed.xmr_rpc_url(), *sender.spend_scalar, *sender.view_scalar);
+    let lock_tx_hash = xmr_wallet
+        .lock(&joint_spend_point, &joint_view_scalar, lock_amount)
+        .await
+        .unwrap();
+    testbed.mine_xmr(1).await.unwrap();
+
+    let refund_height = testbed.xmr_height().await.unwrap() + 5;
+    let sweep_wallet = XmrWallet::new(testbed.xmr_rpc_url());
+    let destination_addr = destination
+        .address(monero_wallet::address::Network::Mainnet)
+        .to_string();
+    let artifact = sweep_wallet
+        .build_refund_artifact(
+            &joint_spend_secret,
+            &joint_view_scalar,
+            &destination_addr,
+            refund_height,
+            lock_tx_hash,
+        )
+        .await
+        .unwrap();
+    sweep_wallet.validate_refund_artifact(&artifact).unwrap();
+
+    let premature = sweep_wallet
+        .broadcast_refund_artifact(&artifact)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        premature.contains("unlock_time") || premature.contains("not yet satisfied"),
+        "premature error: {premature}"
+    );
+
+    testbed.mine_xmr(5).await.unwrap();
+    let refund_tx_hash = sweep_wallet.broadcast_refund_artifact(&artifact).await.unwrap();
+    assert_eq!(refund_tx_hash, artifact.tx_hash);
+
+    testbed.mine_xmr(1).await.unwrap();
+    let status = sweep_wallet.poll_confirmation(&refund_tx_hash, 1).await.unwrap();
+    assert!(status.confirmed, "refund tx should confirm after mining");
+
+    let verified = verify_lock(
+        &XmrWallet::new(testbed.xmr_rpc_url()),
+        &destination.spend_pub,
+        &destination.view_scalar,
+        1,
+        0,
+    )
+    .await
+    .unwrap();
+    assert_eq!(verified.tx_hash, refund_tx_hash);
+}
+
+#[tokio::test]
+async fn phase16_wow_wallet_refund_artifact_round_trip_on_simnet() {
+    let testbed = SimnetTestbed::new().await.unwrap();
+    let sender = WowSimnetWallet::generate();
+    let destination = WowSimnetWallet::generate();
+    let (joint_spend_secret, joint_spend_point, joint_view_scalar) = sample_joint_keys();
+    let lock_amount = 500_000_000_000u64;
+
+    {
+        let mut node = testbed.wow_node().lock().await;
+        node.mine_to(&sender.spend_pub, &sender.view_scalar, 2).await.unwrap();
+        node.mine_blocks(100).await.unwrap();
+    }
+
+    let wow_wallet =
+        WowWallet::with_sender_keys(testbed.wow_rpc_url(), *sender.spend_scalar, *sender.view_scalar);
+    let lock_tx_hash = wow_wallet
+        .lock(&joint_spend_point, &joint_view_scalar, lock_amount)
+        .await
+        .unwrap();
+    testbed.mine_wow(1).await.unwrap();
+
+    let refund_height = testbed.wow_height().await.unwrap() + 5;
+    let sweep_wallet = WowWallet::new(testbed.wow_rpc_url());
+    let destination_addr = destination
+        .address(wownero_wallet::address::Network::Mainnet)
+        .to_string();
+    let artifact = sweep_wallet
+        .build_refund_artifact(
+            &joint_spend_secret,
+            &joint_view_scalar,
+            &destination_addr,
+            refund_height,
+            lock_tx_hash,
+        )
+        .await
+        .unwrap();
+    sweep_wallet.validate_refund_artifact(&artifact).unwrap();
+
+    let premature = sweep_wallet
+        .broadcast_refund_artifact(&artifact)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        premature.contains("unlock_time") || premature.contains("not yet satisfied"),
+        "premature error: {premature}"
+    );
+
+    testbed.mine_wow(5).await.unwrap();
+    let refund_tx_hash = sweep_wallet.broadcast_refund_artifact(&artifact).await.unwrap();
+    assert_eq!(refund_tx_hash, artifact.tx_hash);
+
+    testbed.mine_wow(1).await.unwrap();
+    let status = sweep_wallet.poll_confirmation(&refund_tx_hash, 1).await.unwrap();
+    assert!(status.confirmed, "refund tx should confirm after mining");
+
+    let verified = verify_lock(
+        &WowWallet::new(testbed.wow_rpc_url()),
+        &destination.spend_pub,
+        &destination.view_scalar,
+        1,
+        0,
+    )
+    .await
+    .unwrap();
+    assert_eq!(verified.tx_hash, refund_tx_hash);
 }

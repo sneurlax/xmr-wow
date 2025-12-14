@@ -43,9 +43,15 @@ impl ReqwestTransport {
         response_size_limit: Option<usize>,
     ) -> Result<Vec<u8>, String> {
         let url = format!("{}/{}", self.url, route);
+        let content_type = if route.ends_with(".bin") {
+            "application/octet-stream"
+        } else {
+            "application/json"
+        };
         let resp = self
             .client
             .post(&url)
+            .header(reqwest::header::CONTENT_TYPE, content_type)
             .body(body)
             .send()
             .await

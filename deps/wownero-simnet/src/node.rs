@@ -8,7 +8,13 @@ use tower::{util::MapErr, Service, ServiceExt};
 use zeroize::Zeroizing;
 
 use monero_oxide::transaction::{Input, Transaction as ConsensusTransaction};
-use wownero_oxide::transaction::{Pruned, Transaction as WowneroTransaction};
+use wownero_oxide::{
+    io::VarInt,
+    transaction::{
+        Pruned, Timelock as WowneroTimelock, Transaction as WowneroTransaction,
+        TransactionPrefix as WowneroTransactionPrefix,
+    },
+};
 use wownero_wallet::{
     interface::{EvaluateUnlocked, InterfaceError, ScannableBlock, TransactionsError},
     Scanner, ViewPair, WalletOutput,
@@ -40,8 +46,39 @@ use crate::{
 #[derive(Clone)]
 pub struct PendingTx {
     pub tx: ConsensusTransaction,
-    pub tx_blob: Vec<u8>,
+    pub consensus_tx_blob: Vec<u8>,
+    pub rpc_tx_blob: Vec<u8>,
     pub tx_hash: [u8; 32],
+}
+
+fn tx_uses_scaled_decoy_commitments(tx_blob: &[u8]) -> Result<bool, String> {
+    let tx = WowneroTransaction::<Pruned>::read(&mut tx_blob.as_ref())
+        .map_err(|e| format!("failed to parse Wownero tx blob: {e}"))?;
+    Ok(matches!(
+        tx,
+        WowneroTransaction::V2 {
+            proofs: Some(ref proofs),
+            ..
+        } if proofs.rct_type == wownero_oxide::ringct::RctType::WowneroClsagBulletproofPlus
+    ))
+}
+
+fn normalize_wallet_decoy_commitment_bytes(
+    stored_commitment: [u8; 32],
+    tx_blob: Option<&[u8]>,
+) -> Result<[u8; 32], String> {
+    let Some(tx_blob) = tx_blob else {
+        return Ok(stored_commitment);
+    };
+
+    if !tx_uses_scaled_decoy_commitments(tx_blob)? {
+        return Ok(stored_commitment);
+    }
+
+    let point = curve25519_dalek::edwards::CompressedEdwardsY(stored_commitment)
+        .decompress()
+        .ok_or_else(|| "invalid stored WOW type-8 commitment".to_string())?;
+    Ok(point.mul_by_cofactor().compress().to_bytes())
 }
 
 fn map_db_err(e: RuntimeError) -> tower::BoxError {
@@ -88,9 +125,8 @@ impl WowSimnetNode {
             .data_directory(tmp.path().to_owned())
             .build();
 
-        let (mut read_handle, mut write_handle, env) =
-            cuprate_blockchain::service::init(db_config)
-                .map_err(|e| SimnetError::Consensus(e.into()))?;
+        let (mut read_handle, mut write_handle, env) = cuprate_blockchain::service::init(db_config)
+            .map_err(|e| SimnetError::Consensus(e.into()))?;
 
         if read_handle
             .ready()
@@ -116,18 +152,20 @@ impl WowSimnetNode {
             write_handle
                 .ready()
                 .await?
-                .call(BlockchainWriteRequest::WriteBlock(VerifiedBlockInformation {
-                    block_blob: genesis.serialize(),
-                    txs: vec![],
-                    block_hash: genesis.hash(),
-                    pow_hash: [0u8; 32],
-                    height: 0,
-                    generated_coins: genesis_reward,
-                    weight: genesis_weight,
-                    long_term_weight: genesis_weight,
-                    cumulative_difficulty: 1,
-                    block: genesis,
-                }))
+                .call(BlockchainWriteRequest::WriteBlock(
+                    VerifiedBlockInformation {
+                        block_blob: genesis.serialize(),
+                        txs: vec![],
+                        block_hash: genesis.hash(),
+                        pow_hash: [0u8; 32],
+                        height: 0,
+                        generated_coins: genesis_reward,
+                        weight: genesis_weight,
+                        long_term_weight: genesis_weight,
+                        cumulative_difficulty: 1,
+                        block: genesis,
+                    },
+                ))
                 .await?;
         }
 
@@ -160,7 +198,7 @@ impl WowSimnetNode {
                 let tx_weight = p.tx.weight();
                 VerifiedTransactionInformation {
                     tx: p.tx,
-                    tx_blob: p.tx_blob,
+                    tx_blob: p.consensus_tx_blob,
                     tx_weight,
                     fee: 0,
                     tx_hash: p.tx_hash,
@@ -251,12 +289,16 @@ impl WowSimnetNode {
 
     fn record_confirmed(&mut self, pending: &[PendingTx]) {
         for tx in pending {
-            self.confirmed_txs.insert(tx.tx_hash, tx.tx_blob.clone());
+            self.confirmed_txs
+                .insert(tx.tx_hash, tx.rpc_tx_blob.clone());
         }
     }
 
     /// Read the block at `height` from the DB and wrap it in a `ScannableBlock`.
-    pub async fn scannable_block_at(&mut self, height: usize) -> Result<ScannableBlock, SimnetError> {
+    pub async fn scannable_block_at(
+        &mut self,
+        height: usize,
+    ) -> Result<ScannableBlock, SimnetError> {
         let BlockchainResponse::Block(block) = self
             .read_handle
             .ready()
@@ -328,7 +370,9 @@ impl WowSimnetNode {
             .call(BlockchainReadRequest::ChainHeight)
             .await?
         else {
-            return Err(SimnetError::Consensus("wrong response to ChainHeight".into()));
+            return Err(SimnetError::Consensus(
+                "wrong response to ChainHeight".into(),
+            ));
         };
         Ok(h as u64)
     }
@@ -342,7 +386,9 @@ impl WowSimnetNode {
             .call(BlockchainReadRequest::ChainHeight)
             .await?
         else {
-            return Err(SimnetError::Consensus("wrong response to ChainHeight".into()));
+            return Err(SimnetError::Consensus(
+                "wrong response to ChainHeight".into(),
+            ));
         };
         Ok((h as u64, hash))
     }
@@ -370,7 +416,9 @@ impl WowSimnetNode {
             .call(BlockchainReadRequest::BlockByHash(hash))
             .await?
         else {
-            return Err(SimnetError::Consensus("wrong response to BlockByHash".into()));
+            return Err(SimnetError::Consensus(
+                "wrong response to BlockByHash".into(),
+            ));
         };
         Ok(block.serialize())
     }
@@ -440,7 +488,9 @@ impl WowSimnetNode {
             })
             .await?
         else {
-            return Err(SimnetError::Consensus("wrong response to OutputsVec".into()));
+            return Err(SimnetError::Consensus(
+                "wrong response to OutputsVec".into(),
+            ));
         };
         let mut result = Vec::new();
         for (_, outs) in resp {
@@ -486,7 +536,9 @@ impl WowSimnetNode {
             .read_handle
             .ready()
             .await?
-            .call(BlockchainReadRequest::Transactions { tx_hashes: hash_set })
+            .call(BlockchainReadRequest::Transactions {
+                tx_hashes: hash_set,
+            })
             .await?
         else {
             return Err(SimnetError::Consensus(
@@ -522,6 +574,30 @@ impl WowSimnetNode {
         Ok(merged)
     }
 
+    pub(crate) fn normalized_wallet_decoy_commitment_bytes(
+        &self,
+        out: &cuprate_types::OutputOnChain,
+    ) -> Result<[u8; 32], SimnetError> {
+        let tx_blob = out
+            .txid
+            .and_then(|txid| self.confirmed_txs.get(&txid).map(Vec::as_slice));
+        normalize_wallet_decoy_commitment_bytes(out.commitment.to_bytes(), tx_blob)
+            .map_err(|e| SimnetError::Consensus(e.into()))
+    }
+
+    /// Return the cumulative RingCT output distribution for an inclusive height range.
+    pub fn rct_output_distribution_range(&self, from_height: u64, to_height: u64) -> Vec<u64> {
+        let last = self.rct_counts.last().copied().unwrap_or(0);
+        (from_height..=to_height)
+            .map(|height| {
+                self.rct_counts
+                    .get(height as usize)
+                    .copied()
+                    .unwrap_or(last)
+            })
+            .collect()
+    }
+
     /// Extract all key images from a transaction's inputs (skips `Input::Gen`).
     fn extract_key_images(tx: &ConsensusTransaction) -> Vec<[u8; 32]> {
         tx.prefix()
@@ -548,13 +624,83 @@ impl WowSimnetNode {
         }
     }
 
+    /// Return daemon-style spent-status codes for the supplied key images.
+    ///
+    /// `0` = unspent, `1` = spent on-chain, `2` = spent in the mempool.
+    pub fn key_image_spent_statuses(&self, key_images: &[[u8; 32]]) -> Vec<u64> {
+        key_images
+            .iter()
+            .map(|key_image| {
+                if self.spent_key_images.contains(key_image) {
+                    1
+                } else if self
+                    .mempool
+                    .iter()
+                    .flat_map(|pending| Self::extract_key_images(&pending.tx))
+                    .any(|pending_key_image| pending_key_image == *key_image)
+                {
+                    2
+                } else {
+                    0
+                }
+            })
+            .collect()
+    }
+
+    fn consensus_tx_from_rpc_blob(
+        tx_blob: &[u8],
+    ) -> Result<(ConsensusTransaction, Vec<u8>), SimnetError> {
+        let mut reader = tx_blob;
+        let version = VarInt::read(&mut reader)
+            .map_err(|e| SimnetError::Consensus(format!("invalid tx version: {e}").into()))?;
+        if version != 2 {
+            let tx = ConsensusTransaction::read(&mut tx_blob.as_ref())
+                .map_err(|e| SimnetError::Consensus(format!("invalid tx: {e}").into()))?;
+            return Ok((tx, tx_blob.to_vec()));
+        }
+
+        WowneroTransactionPrefix::read(&mut reader, version)
+            .map_err(|e| SimnetError::Consensus(format!("invalid tx prefix: {e}").into()))?;
+
+        let type_offset = tx_blob.len().saturating_sub(reader.len());
+        let mut consensus_blob = tx_blob.to_vec();
+        if consensus_blob.get(type_offset) == Some(&8) {
+            consensus_blob[type_offset] = 6;
+        }
+
+        let tx = ConsensusTransaction::read(&mut consensus_blob.as_slice())
+            .map_err(|e| SimnetError::Consensus(format!("invalid tx: {e}").into()))?;
+        Ok((tx, consensus_blob))
+    }
+
     /// Submit a raw transaction blob to the mempool. Returns the tx hash.
     ///
     /// Returns [`SimnetError::DoubleSpend`] if any key image in the transaction
     /// has already been spent in a confirmed block or is already in the mempool.
     pub fn submit_tx(&mut self, tx_blob: Vec<u8>) -> Result<[u8; 32], SimnetError> {
-        let tx = ConsensusTransaction::read(&mut tx_blob.as_slice())
+        let wow_tx = WowneroTransaction::read(&mut tx_blob.as_slice())
             .map_err(|e| SimnetError::Consensus(format!("invalid tx: {e}").into()))?;
+        let (tx, consensus_tx_blob) = Self::consensus_tx_from_rpc_blob(&tx_blob)?;
+        let current_height = self.context_svc.blockchain_context().chain_height;
+
+        match wow_tx.prefix().additional_timelock {
+            WowneroTimelock::None => {}
+            WowneroTimelock::Block(height) if height <= current_height => {}
+            WowneroTimelock::Block(height) => {
+                return Err(SimnetError::Consensus(
+                    format!(
+                        "transaction unlock_time {} not yet satisfied at height {}",
+                        height, current_height
+                    )
+                    .into(),
+                ));
+            }
+            WowneroTimelock::Time(time) => {
+                return Err(SimnetError::Consensus(
+                    format!("time-based unlock_time {} not supported by simnet", time).into(),
+                ));
+            }
+        }
 
         // Collect key images from the incoming tx.
         let key_images = Self::extract_key_images(&tx);
@@ -575,8 +721,13 @@ impl WowSimnetNode {
             }
         }
 
-        let tx_hash = tx.hash();
-        self.mempool.push(PendingTx { tx, tx_blob, tx_hash });
+        let tx_hash = wow_tx.hash();
+        self.mempool.push(PendingTx {
+            tx,
+            consensus_tx_blob,
+            rpc_tx_blob: tx_blob,
+            tx_hash,
+        });
         Ok(tx_hash)
     }
 
@@ -628,7 +779,7 @@ impl WowSimnetNode {
             wownero_oxide::ed25519::Point::from(spend_pub),
             Zeroizing::new(wownero_oxide::ed25519::Scalar::from(*view_scalar)),
         )
-            .map_err(|e| SimnetError::Consensus(format!("ViewPair error: {e}").into()))?;
+        .map_err(|e| SimnetError::Consensus(format!("ViewPair error: {e}").into()))?;
         Ok(Scanner::new(vp))
     }
 
@@ -640,6 +791,7 @@ impl WowSimnetNode {
     pub fn decoy_rpc(&self) -> WowSimnetDecoyRpc {
         WowSimnetDecoyRpc {
             read_handle: self.read_handle.clone(),
+            confirmed_txs: Arc::new(self.confirmed_txs.clone()),
             rct_counts: Arc::new(self.rct_counts.clone()),
         }
     }
@@ -666,6 +818,7 @@ impl WowSimnetNode {
 #[derive(Clone)]
 pub struct WowSimnetDecoyRpc {
     read_handle: BlockchainReadHandle,
+    confirmed_txs: Arc<HashMap<[u8; 32], Vec<u8>>>,
     /// Snapshot of rct_counts at the time of creation, used to distinguish
     /// coinbase outputs (4-block lock for WOW) from non-coinbase outputs.
     rct_counts: Arc<Vec<u64>>,
@@ -686,8 +839,21 @@ impl WowSimnetDecoyRpc {
 
         match resp {
             BlockchainResponse::ChainHeight(h, _) => Ok(h.saturating_sub(1)),
-            _ => Err(InterfaceError::InternalError("wrong response to ChainHeight".into())),
+            _ => Err(InterfaceError::InternalError(
+                "wrong response to ChainHeight".into(),
+            )),
         }
+    }
+
+    fn normalized_wallet_decoy_commitment_bytes(
+        &self,
+        out: &cuprate_types::OutputOnChain,
+    ) -> Result<[u8; 32], InterfaceError> {
+        let tx_blob = out
+            .txid
+            .and_then(|txid| self.confirmed_txs.get(&txid).map(Vec::as_slice));
+        normalize_wallet_decoy_commitment_bytes(out.commitment.to_bytes(), tx_blob)
+            .map_err(InterfaceError::InvalidInterface)
     }
 }
 
@@ -752,8 +918,10 @@ impl wownero_wallet::interface::ProvidesUnvalidatedDecoys for WowSimnetDecoyRpc 
         &self,
         indexes: &[u64],
         evaluate_unlocked: EvaluateUnlocked,
-    ) -> impl Send + std::future::Future<Output = Result<Vec<Option<[wownero_oxide::ed25519::Point; 2]>>, TransactionsError>>
-    {
+    ) -> impl Send
+           + std::future::Future<
+        Output = Result<Vec<Option<[wownero_oxide::ed25519::Point; 2]>>, TransactionsError>,
+    > {
         let mut rh = self.read_handle.clone();
         let rct_counts = self.rct_counts.clone();
         let indexes = indexes.to_vec();
@@ -774,22 +942,23 @@ impl wownero_wallet::interface::ProvidesUnvalidatedDecoys for WowSimnetDecoyRpc 
                 .map_err(|e| InterfaceError::InternalError(e.to_string()))?;
 
             let BlockchainResponse::Outputs(cache) = resp else {
-                return Err(InterfaceError::InternalError("wrong response to Outputs".into()).into());
+                return Err(
+                    InterfaceError::InternalError("wrong response to Outputs".into()).into(),
+                );
             };
 
             let evaluation_height = match evaluate_unlocked {
-                EvaluateUnlocked::Normal => {
-                    Self::latest_block_number_inner(rh.clone()).await?.saturating_add(1)
-                }
+                EvaluateUnlocked::Normal => Self::latest_block_number_inner(rh.clone())
+                    .await?
+                    .saturating_add(1),
                 EvaluateUnlocked::FingerprintableDeterministic { block_number } => {
                     block_number.saturating_add(1)
                 }
             };
 
             // Build a set of global indices that are coinbase outputs.
-            let coinbase_indices: std::collections::HashSet<u64> = (1..rct_counts.len())
-                .map(|h| rct_counts[h - 1])
-                .collect();
+            let coinbase_indices: std::collections::HashSet<u64> =
+                (1..rct_counts.len()).map(|h| rct_counts[h - 1]).collect();
 
             indexes
                 .iter()
@@ -810,19 +979,20 @@ impl wownero_wallet::interface::ProvidesUnvalidatedDecoys for WowSimnetDecoyRpc 
                     }
 
                     let Some(key) =
-                        wownero_oxide::ed25519::CompressedPoint::from(out.key.to_bytes()).decompress()
+                        wownero_oxide::ed25519::CompressedPoint::from(out.key.to_bytes())
+                            .decompress()
                     else {
                         return Ok(None);
                     };
-                    let commitment = wownero_oxide::ed25519::CompressedPoint::from(
-                        out.commitment.to_bytes(),
-                    )
-                    .decompress()
-                    .ok_or_else(|| {
-                        InterfaceError::InvalidInterface(format!(
-                            "output {global_idx} has invalid commitment point"
-                        ))
-                    })?;
+                    let commitment_bytes = self.normalized_wallet_decoy_commitment_bytes(out)?;
+                    let commitment =
+                        wownero_oxide::ed25519::CompressedPoint::from(commitment_bytes)
+                            .decompress()
+                            .ok_or_else(|| {
+                                InterfaceError::InvalidInterface(format!(
+                                    "output {global_idx} has invalid commitment point"
+                                ))
+                            })?;
                     Ok(Some([key, commitment]))
                 })
                 .collect()

@@ -17,8 +17,10 @@
 //! - `POST /get_height`
 //! - `POST /send_raw_transaction`
 //! - `POST /get_transactions`
-//! - `POST /get_outputs.bin`   (binary epee — RCT output queries)
-//! - `POST /get_blocks.bin`    (binary epee — block sync)
+//! - `POST /is_key_image_spent`
+//! - `POST /get_outputs.bin` / `POST /get_outs.bin`   (binary epee - RCT output queries)
+//! - `POST /get_output_distribution.bin`
+//! - `POST /get_blocks.bin`    (binary epee - block sync)
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -37,11 +39,11 @@ use tokio::sync::Mutex;
 
 use crate::{error::SimnetError, node::WowSimnetNode};
 
-// ─── shared state ─────────────────────────────────────────────────────────────
+// --- shared state -------------------------------------------------------------
 
 type SharedNode = Arc<Mutex<WowSimnetNode>>;
 
-// ─── error helpers ────────────────────────────────────────────────────────────
+// --- error helpers ------------------------------------------------------------
 
 fn jsonrpc_error(id: Value, code: i64, message: impl Into<String>) -> Json<Value> {
     Json(json!({
@@ -55,7 +57,7 @@ fn jsonrpc_ok(id: Value, result: Value) -> Json<Value> {
     Json(json!({ "id": id, "jsonrpc": "2.0", "result": result }))
 }
 
-// ─── JSON-RPC types ───────────────────────────────────────────────────────────
+// --- JSON-RPC types -----------------------------------------------------------
 
 #[derive(Deserialize)]
 struct JsonRpcRequest {
@@ -66,12 +68,18 @@ struct JsonRpcRequest {
     params: Value,
 }
 
-// ─── /json_rpc dispatcher ─────────────────────────────────────────────────────
+// --- /json_rpc dispatcher -----------------------------------------------------
 
-async fn json_rpc(
-    State(node): State<SharedNode>,
-    Json(req): Json<JsonRpcRequest>,
-) -> impl IntoResponse {
+async fn json_rpc(State(node): State<SharedNode>, Json(payload): Json<Value>) -> impl IntoResponse {
+    if payload.is_array() {
+        return jsonrpc_error(Value::Null, -32700, "batch requests unsupported");
+    }
+
+    let req: JsonRpcRequest = match serde_json::from_value(payload) {
+        Ok(req) => req,
+        Err(_) => return jsonrpc_error(Value::Null, -32600, "invalid request"),
+    };
+
     let id = req.id.clone();
     match req.method.as_str() {
         "get_block_count" => handle_get_block_count(node, id).await,
@@ -90,7 +98,10 @@ async fn json_rpc(
 async fn handle_get_block_count(node: SharedNode, id: Value) -> Json<Value> {
     let mut n = node.lock().await;
     match n.height().await {
-        Ok(h) => jsonrpc_ok(id, json!({ "count": h, "status": "OK", "untrusted": false })),
+        Ok(h) => jsonrpc_ok(
+            id,
+            json!({ "count": h, "status": "OK", "untrusted": false }),
+        ),
         Err(e) => jsonrpc_error(id, -1, e.to_string()),
     }
 }
@@ -101,7 +112,10 @@ async fn handle_get_last_block_header(node: SharedNode, id: Value) -> Json<Value
         Ok((height, _top_hash)) => {
             let tip = (height as usize).saturating_sub(1);
             match build_block_header_json(&mut n, tip).await {
-                Ok(hdr) => jsonrpc_ok(id, json!({ "block_header": hdr, "status": "OK", "untrusted": false })),
+                Ok(hdr) => jsonrpc_ok(
+                    id,
+                    json!({ "block_header": hdr, "status": "OK", "untrusted": false }),
+                ),
                 Err(e) => jsonrpc_error(id, -1, e.to_string()),
             }
         }
@@ -120,7 +134,10 @@ async fn handle_get_block_header_by_height(
     };
     let mut n = node.lock().await;
     match build_block_header_json(&mut n, height).await {
-        Ok(hdr) => jsonrpc_ok(id, json!({ "block_header": hdr, "status": "OK", "untrusted": false })),
+        Ok(hdr) => jsonrpc_ok(
+            id,
+            json!({ "block_header": hdr, "status": "OK", "untrusted": false }),
+        ),
         Err(e) => jsonrpc_error(id, -1, e.to_string()),
     }
 }
@@ -160,26 +177,31 @@ async fn build_block_header_json(
     }))
 }
 
-/// Handle `get_block` JSON-RPC — returns the block blob for a given block hash.
+/// Handle `get_block` JSON-RPC - returns the block blob for a given block hash.
 ///
 /// This is called by `monero-serai`'s `HttpRpc::get_block()` which underpins
 /// `scan_block_for_outputs` in `monero-rust` / `monero-wallet-rs`.
 async fn handle_get_block(node: SharedNode, id: Value, params: Value) -> Json<Value> {
-    let hash_hex = match params.get("hash").and_then(|v| v.as_str()) {
-        Some(h) => h.to_string(),
-        None => return jsonrpc_error(id, -32602, "missing 'hash' param"),
-    };
-    let hash_bytes = match hex::decode(&hash_hex) {
-        Ok(b) if b.len() == 32 => {
-            let mut arr = [0u8; 32];
-            arr.copy_from_slice(&b);
-            arr
-        }
-        _ => return jsonrpc_error(id, -32602, format!("invalid hash: {hash_hex}")),
+    let mut n = node.lock().await;
+    let blob = if let Some(height) = params.get("height").and_then(|v| v.as_u64()) {
+        n.block_blob_at(height as usize).await
+    } else {
+        let hash_hex = match params.get("hash").and_then(|v| v.as_str()) {
+            Some(h) => h.to_string(),
+            None => return jsonrpc_error(id, -32602, "missing 'hash' or 'height' param"),
+        };
+        let hash_bytes = match hex::decode(&hash_hex) {
+            Ok(b) if b.len() == 32 => {
+                let mut arr = [0u8; 32];
+                arr.copy_from_slice(&b);
+                arr
+            }
+            _ => return jsonrpc_error(id, -32602, format!("invalid hash: {hash_hex}")),
+        };
+        n.block_blob_by_hash(hash_bytes).await
     };
 
-    let mut n = node.lock().await;
-    match n.block_blob_by_hash(hash_bytes).await {
+    match blob {
         Ok(blob) => jsonrpc_ok(
             id,
             json!({
@@ -192,11 +214,7 @@ async fn handle_get_block(node: SharedNode, id: Value, params: Value) -> Json<Va
     }
 }
 
-async fn handle_generate_blocks(
-    node: SharedNode,
-    id: Value,
-    params: Value,
-) -> Json<Value> {
+async fn handle_generate_blocks(node: SharedNode, id: Value, params: Value) -> Json<Value> {
     let count = params
         .get("amount_of_blocks")
         .and_then(|v| v.as_u64())
@@ -225,7 +243,10 @@ async fn handle_generate_blocks(
         Ok(h) => h,
         Err(e) => return jsonrpc_error(id, -1, e.to_string()),
     };
-    jsonrpc_ok(id, json!({ "blocks": hashes, "height": new_height, "status": "OK" }))
+    jsonrpc_ok(
+        id,
+        json!({ "blocks": hashes, "height": new_height, "status": "OK" }),
+    )
 }
 
 async fn handle_get_info(node: SharedNode, id: Value) -> Json<Value> {
@@ -234,63 +255,69 @@ async fn handle_get_info(node: SharedNode, id: Value) -> Json<Value> {
         Ok(v) => v,
         Err(e) => return jsonrpc_error(id, -1, e.to_string()),
     };
-    jsonrpc_ok(id, json!({
-        "adjusted_time": 0u64,
-        "alt_blocks_count": 0u64,
-        "block_size_limit": 600000u64,
-        "block_size_median": 300000u64,
-        "block_weight_limit": 600000u64,
-        "block_weight_median": 300000u64,
-        "bootstrap_daemon_address": "",
-        "busy_syncing": false,
-        "credits": 0u64,
-        "cumulative_difficulty": height,
-        "cumulative_difficulty_top64": 0u64,
-        "database_size": 0u64,
-        "difficulty": 1u64,
-        "difficulty_top64": 0u64,
-        "free_space": 0u64,
-        "grey_peerlist_size": 0u64,
-        "height": height,
-        "height_without_bootstrap": height,
-        "incoming_connections_count": 0u64,
-        "mainnet": false,
-        "nettype": "fakechain",
-        "offline": true,
-        "outgoing_connections_count": 0u64,
-        "rpc_connections_count": 0u64,
-        "stagenet": false,
-        "start_time": 0u64,
-        "status": "OK",
-        "synchronized": true,
-        "target": 1u64,
-        "target_height": 0u64,
-        "testnet": false,
-        "top_block_hash": hex::encode(top_hash),
-        "top_hash": hex::encode(top_hash),
-        "tx_count": 0u64,
-        "tx_pool_size": 0u64,
-        "untrusted": false,
-        "update_available": false,
-        "version": "0.18.4.0-cuprate-simnet",
-        "was_bootstrap_ever_used": false,
-        "white_peerlist_size": 0u64,
-        "wide_cumulative_difficulty": format!("0x{height:x}"),
-        "wide_difficulty": "0x1",
-    }))
+    jsonrpc_ok(
+        id,
+        json!({
+            "adjusted_time": 0u64,
+            "alt_blocks_count": 0u64,
+            "block_size_limit": 600000u64,
+            "block_size_median": 300000u64,
+            "block_weight_limit": 600000u64,
+            "block_weight_median": 300000u64,
+            "bootstrap_daemon_address": "",
+            "busy_syncing": false,
+            "credits": 0u64,
+            "cumulative_difficulty": height,
+            "cumulative_difficulty_top64": 0u64,
+            "database_size": 0u64,
+            "difficulty": 1u64,
+            "difficulty_top64": 0u64,
+            "free_space": 0u64,
+            "grey_peerlist_size": 0u64,
+            "height": height,
+            "height_without_bootstrap": height,
+            "incoming_connections_count": 0u64,
+            "mainnet": false,
+            "nettype": "fakechain",
+            "offline": true,
+            "outgoing_connections_count": 0u64,
+            "rpc_connections_count": 0u64,
+            "stagenet": false,
+            "start_time": 0u64,
+            "status": "OK",
+            "synchronized": true,
+            "target": 1u64,
+            "target_height": 0u64,
+            "testnet": false,
+            "top_block_hash": hex::encode(top_hash),
+            "top_hash": hex::encode(top_hash),
+            "tx_count": 0u64,
+            "tx_pool_size": 0u64,
+            "untrusted": false,
+            "update_available": false,
+            "version": "0.18.4.0-cuprate-simnet",
+            "was_bootstrap_ever_used": false,
+            "white_peerlist_size": 0u64,
+            "wide_cumulative_difficulty": format!("0x{height:x}"),
+            "wide_difficulty": "0x1",
+        }),
+    )
 }
 
 async fn handle_get_fee_estimate(id: Value) -> Json<Value> {
-    jsonrpc_ok(id, json!({
-        "fee": 20000u64,
-        "fees": [20000u64, 80000u64, 320000u64, 4000000u64],
-        "quantization_mask": 10000u64,
-        "status": "OK",
-        "untrusted": false,
-    }))
+    jsonrpc_ok(
+        id,
+        json!({
+            "fee": 20000u64,
+            "fees": [20000u64, 80000u64, 320000u64, 4000000u64],
+            "quantization_mask": 10000u64,
+            "status": "OK",
+            "untrusted": false,
+        }),
+    )
 }
 
-// ─── REST: /get_height ────────────────────────────────────────────────────────
+// --- REST: /get_height --------------------------------------------------------
 
 async fn get_height(State(node): State<SharedNode>) -> impl IntoResponse {
     let mut n = node.lock().await;
@@ -310,7 +337,7 @@ async fn get_height(State(node): State<SharedNode>) -> impl IntoResponse {
     }
 }
 
-// ─── REST: /send_raw_transaction ──────────────────────────────────────────────
+// --- REST: /send_raw_transaction ----------------------------------------------
 
 #[derive(Deserialize)]
 struct SendRawTxRequest {
@@ -362,7 +389,7 @@ async fn send_raw_transaction(
     }
 }
 
-// ─── REST: /get_transactions ──────────────────────────────────────────────────
+// --- REST: /get_transactions --------------------------------------------------
 
 #[derive(Deserialize)]
 struct GetTransactionsRequest {
@@ -373,6 +400,11 @@ struct GetTransactionsRequest {
     prune: bool,
 }
 
+#[derive(Deserialize)]
+struct IsKeyImageSpentRequest {
+    key_images: Vec<String>,
+}
+
 async fn get_transactions(
     State(node): State<SharedNode>,
     Json(req): Json<GetTransactionsRequest>,
@@ -381,7 +413,10 @@ async fn get_transactions(
         .txs_hashes
         .iter()
         .map(|s| {
-            hex::decode(s).ok().and_then(|b| b.try_into().ok()).ok_or(())
+            hex::decode(s)
+                .ok()
+                .and_then(|b| b.try_into().ok())
+                .ok_or(())
         })
         .collect();
 
@@ -398,8 +433,7 @@ async fn get_transactions(
     let _ = req.prune;
     match n.transactions(hashes).await {
         Ok(txs) => {
-            let txs_as_hex: Vec<String> =
-                txs.iter().map(|t| hex::encode(&t.tx_blob)).collect();
+            let txs_as_hex: Vec<String> = txs.iter().map(|t| hex::encode(&t.tx_blob)).collect();
             Json(json!({
                 "txs_as_hex": txs_as_hex,
                 "status": "OK",
@@ -422,13 +456,49 @@ async fn get_transactions(
             }))
             .into_response()
         }
-        Err(e) => {
-            Json(json!({ "status": "Failed", "reason": e.to_string() })).into_response()
-        }
+        Err(e) => Json(json!({ "status": "Failed", "reason": e.to_string() })).into_response(),
     }
 }
 
-// ─── Binary RPC: /get_outputs.bin ─────────────────────────────────────────────
+async fn is_key_image_spent(
+    State(node): State<SharedNode>,
+    Json(req): Json<IsKeyImageSpentRequest>,
+) -> impl IntoResponse {
+    let key_images: Result<Vec<[u8; 32]>, _> = req
+        .key_images
+        .iter()
+        .map(|key_image| {
+            hex::decode(key_image)
+                .ok()
+                .and_then(|bytes| bytes.try_into().ok())
+                .ok_or(())
+        })
+        .collect();
+
+    let key_images = match key_images {
+        Ok(key_images) => key_images,
+        Err(()) => {
+            return Json(json!({
+                "status": "Failed",
+                "reason": "invalid key image",
+                "spent_status": [],
+                "untrusted": false,
+            }))
+            .into_response()
+        }
+    };
+
+    let n = node.lock().await;
+    let spent_status = n.key_image_spent_statuses(&key_images);
+    Json(json!({
+        "status": "OK",
+        "spent_status": spent_status,
+        "untrusted": false,
+    }))
+    .into_response()
+}
+
+// --- Binary RPC: /get_outputs.bin ---------------------------------------------
 //
 // The wallet sends an epee-encoded COMMAND_RPC_GET_OUTPUTS_BIN request and
 // expects an epee-encoded response.  We parse the request manually (it's a
@@ -447,10 +517,7 @@ async fn get_transactions(
 // directly.  Epee is a simple tag-length-value binary format; the fields we
 // need map cleanly to a hand-rolled parser.
 
-async fn get_outputs_bin(
-    State(node): State<SharedNode>,
-    body: Bytes,
-) -> impl IntoResponse {
+async fn get_outputs_bin(State(node): State<SharedNode>, body: Bytes) -> impl IntoResponse {
     // Parse the request using minimal epee helpers.
     let indexes = match parse_get_outputs_request(&body) {
         Ok(v) => v,
@@ -466,7 +533,22 @@ async fn get_outputs_bin(
     let mut n = node.lock().await;
     match n.rct_outputs_at_indexes(indexes).await {
         Ok(outs) => {
-            let resp = build_get_outputs_response(&outs);
+            let mut wallet_outs = Vec::with_capacity(outs.len());
+            for (idx, out) in outs {
+                let mask = match n.normalized_wallet_decoy_commitment_bytes(&out) {
+                    Ok(mask) => mask,
+                    Err(e) => {
+                        return (
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            build_get_outputs_error_response(&e.to_string()),
+                        )
+                            .into_response();
+                    }
+                };
+                wallet_outs.push((idx, out, mask));
+            }
+
+            let resp = build_get_outputs_response(&wallet_outs);
             ([(header::CONTENT_TYPE, "application/octet-stream")], resp).into_response()
         }
         Err(e) => (
@@ -477,12 +559,30 @@ async fn get_outputs_bin(
     }
 }
 
-// ─── Binary RPC: /get_blocks.bin ──────────────────────────────────────────────
-
-async fn get_blocks_bin(
+async fn get_output_distribution_bin(
     State(node): State<SharedNode>,
     body: Bytes,
 ) -> impl IntoResponse {
+    let (from_height, to_height) = match parse_get_output_distribution_request(&body) {
+        Ok(range) => range,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                build_error_response_bytes(&format!("parse error: {e}")),
+            )
+                .into_response();
+        }
+    };
+
+    let n = node.lock().await;
+    let distribution = n.rct_output_distribution_range(from_height, to_height);
+    let resp = build_get_output_distribution_response(from_height, &distribution);
+    ([(header::CONTENT_TYPE, "application/octet-stream")], resp).into_response()
+}
+
+// --- Binary RPC: /get_blocks.bin ----------------------------------------------
+
+async fn get_blocks_bin(State(node): State<SharedNode>, body: Bytes) -> impl IntoResponse {
     let start_height = match parse_get_blocks_request(&body) {
         Ok(h) => h,
         Err(e) => {
@@ -519,11 +619,10 @@ async fn get_blocks_bin(
         };
 
         // Extract non-coinbase tx hashes from the block.
-        let tx_hashes: Vec<[u8; 32]> = wownero_oxide::block::Block::read(
-            &mut block_blob.as_slice(),
-        )
-        .map(|b| b.transactions.to_vec())
-        .unwrap_or_default();
+        let tx_hashes: Vec<[u8; 32]> =
+            wownero_oxide::block::Block::read(&mut block_blob.as_slice())
+                .map(|b| b.transactions.to_vec())
+                .unwrap_or_default();
 
         let tx_blobs = if tx_hashes.is_empty() {
             vec![]
@@ -544,7 +643,7 @@ async fn get_blocks_bin(
     ([(header::CONTENT_TYPE, "application/octet-stream")], resp).into_response()
 }
 
-// ─── Minimal epee binary helpers ─────────────────────────────────────────────
+// --- Minimal epee binary helpers ---------------------------------------------
 //
 // Epee format:
 //   header: 0x01 0x11 0x01 0x01 0x01 0x01 0x02 0x01 0x01 (9 bytes)
@@ -558,10 +657,17 @@ async fn get_blocks_bin(
 const EPEE_HEADER: &[u8] = &[0x01, 0x11, 0x01, 0x01, 0x01, 0x01, 0x02, 0x01, 0x01];
 
 // Epee type tags
+const EPEE_INT64: u8 = 0x01;
+const EPEE_INT32: u8 = 0x02;
+const EPEE_INT16: u8 = 0x03;
+const EPEE_INT8: u8 = 0x04;
 const EPEE_STRING: u8 = 0x0A;
-const EPEE_UINT64: u8 = 0x08;
+const EPEE_UINT64: u8 = 0x05;
 const EPEE_UINT32: u8 = 0x06;
-const EPEE_BOOL: u8 = 0x01; // actually 0x0B for bool in some versions; use u8 alias
+const EPEE_UINT16: u8 = 0x07;
+const EPEE_UINT8: u8 = 0x08;
+const EPEE_DOUBLE: u8 = 0x09;
+const EPEE_BOOL: u8 = 0x0B;
 const EPEE_ARRAY_FLAG: u8 = 0x80;
 const EPEE_OBJECT: u8 = 0x0C;
 
@@ -581,31 +687,45 @@ fn write_varint(v: u64, out: &mut Vec<u8>) {
         out.push(((enc >> 24) & 0xff) as u8);
     } else {
         let enc = (v << 2) | 3; // tag 11 = 8 bytes
-        for i in 0..8 { out.push(((enc >> (i * 8)) & 0xff) as u8); }
+        for i in 0..8 {
+            out.push(((enc >> (i * 8)) & 0xff) as u8);
+        }
     }
 }
 
 /// Read an epee varint from a byte slice.  Returns (value, bytes_consumed).
 fn read_varint(data: &[u8]) -> Result<(u64, usize), &'static str> {
-    if data.is_empty() { return Err("empty varint"); }
+    if data.is_empty() {
+        return Err("empty varint");
+    }
     let tag = data[0] & 0x03;
     match tag {
         0 => Ok(((data[0] >> 2) as u64, 1)),
         1 => {
-            if data.len() < 2 { return Err("varint too short"); }
+            if data.len() < 2 {
+                return Err("varint too short");
+            }
             let v = (data[0] as u64) | ((data[1] as u64) << 8);
             Ok((v >> 2, 2))
         }
         2 => {
-            if data.len() < 4 { return Err("varint too short"); }
-            let v = (data[0] as u64) | ((data[1] as u64) << 8)
-                | ((data[2] as u64) << 16) | ((data[3] as u64) << 24);
+            if data.len() < 4 {
+                return Err("varint too short");
+            }
+            let v = (data[0] as u64)
+                | ((data[1] as u64) << 8)
+                | ((data[2] as u64) << 16)
+                | ((data[3] as u64) << 24);
             Ok((v >> 2, 4))
         }
         3 => {
-            if data.len() < 8 { return Err("varint too short"); }
+            if data.len() < 8 {
+                return Err("varint too short");
+            }
             let mut v = 0u64;
-            for i in 0..8 { v |= (data[i] as u64) << (i * 8); }
+            for i in 0..8 {
+                v |= (data[i] as u64) << (i * 8);
+            }
             Ok((v >> 2, 8))
         }
         _ => unreachable!(),
@@ -632,12 +752,11 @@ fn write_u64(name: &[u8], value: u64, out: &mut Vec<u8>) {
     out.extend_from_slice(&value.to_le_bytes());
 }
 
-/// Write a string field (length-prefixed u32).
+/// Write a string field (varint length + bytes).
 fn write_string(name: &[u8], value: &[u8], out: &mut Vec<u8>) {
     write_key(name, out);
     out.push(EPEE_STRING);
-    let len = value.len() as u32;
-    out.extend_from_slice(&len.to_le_bytes());
+    write_varint(value.len() as u64, out);
     out.extend_from_slice(value);
 }
 
@@ -648,7 +767,7 @@ fn write_bool(name: &[u8], value: bool, out: &mut Vec<u8>) {
     out.push(if value { 1 } else { 0 });
 }
 
-// ─── parse_get_outputs_request ────────────────────────────────────────────────
+// --- parse_get_outputs_request ------------------------------------------------
 
 /// Parse `COMMAND_RPC_GET_OUTPUTS_BIN::request`.
 ///
@@ -672,13 +791,19 @@ fn parse_get_outputs_request(data: &[u8]) -> Result<Vec<u64>, String> {
     pos += n;
 
     for _ in 0..field_count {
-        if pos >= data.len() { break; }
+        if pos >= data.len() {
+            break;
+        }
         let name_len = data[pos] as usize;
         pos += 1;
-        if pos + name_len > data.len() { return Err("name oob".into()); }
+        if pos + name_len > data.len() {
+            return Err("name oob".into());
+        }
         let name = &data[pos..pos + name_len];
         pos += name_len;
-        if pos >= data.len() { return Err("no type byte".into()); }
+        if pos >= data.len() {
+            return Err("no type byte".into());
+        }
         let type_byte = data[pos];
         pos += 1;
 
@@ -696,23 +821,43 @@ fn parse_get_outputs_request(data: &[u8]) -> Result<Vec<u64>, String> {
                 pos += n;
                 let mut index = 0u64;
                 for _ in 0..obj_fields {
-                    if pos >= data.len() { break; }
+                    if pos >= data.len() {
+                        break;
+                    }
                     let fn_len = data[pos] as usize;
                     pos += 1;
-                    if pos + fn_len > data.len() { return Err("field name oob".into()); }
+                    if pos + fn_len > data.len() {
+                        return Err("field name oob".into());
+                    }
                     let fname = &data[pos..pos + fn_len];
                     pos += fn_len;
-                    if pos >= data.len() { return Err("no field type".into()); }
+                    if pos >= data.len() {
+                        return Err("no field type".into());
+                    }
                     let ftype = data[pos];
                     pos += 1;
-                    if ftype == EPEE_UINT64 {
-                        if pos + 8 > data.len() { return Err("u64 oob".into()); }
-                        let val = u64::from_le_bytes(data[pos..pos+8].try_into().unwrap());
-                        pos += 8;
-                        if fname == b"index" { index = val; }
-                        // "amount" ignored
-                    } else {
-                        return Err(format!("unexpected field type {ftype:#x} in output entry"));
+                    match ftype {
+                        EPEE_UINT64 => {
+                            if pos + 8 > data.len() {
+                                return Err("u64 oob".into());
+                            }
+                            let val = u64::from_le_bytes(data[pos..pos + 8].try_into().unwrap());
+                            pos += 8;
+                            if fname == b"index" {
+                                index = val;
+                            }
+                        }
+                        EPEE_UINT8 => {
+                            if pos >= data.len() {
+                                return Err("u8 oob".into());
+                            }
+                            pos += 1;
+                        }
+                        _ => {
+                            return Err(format!(
+                                "unexpected field type {ftype:#x} in output entry"
+                            ));
+                        }
                     }
                 }
                 indexes.push(index);
@@ -739,39 +884,55 @@ fn skip_epee_value(data: &[u8], mut pos: usize, type_byte: u8) -> Result<usize, 
         return Ok(pos);
     }
     match base_type {
-        EPEE_UINT64 => { pos += 8; }
-        EPEE_UINT32 => { pos += 4; }
-        0x05 => { pos += 2; } // u16
-        0x04 => { pos += 1; } // u8
-        EPEE_BOOL => { pos += 1; }
-        0x09 => { pos += 8; } // i64
-        0x07 => { pos += 4; } // i32
+        EPEE_INT64 | EPEE_UINT64 | EPEE_DOUBLE => {
+            pos += 8;
+        }
+        EPEE_UINT32 => {
+            pos += 4;
+        }
+        EPEE_INT32 => {
+            pos += 4;
+        }
+        EPEE_UINT16 | EPEE_INT16 => {
+            pos += 2;
+        }
+        EPEE_UINT8 | EPEE_INT8 => {
+            pos += 1;
+        }
+        EPEE_BOOL => {
+            pos += 1;
+        }
         EPEE_STRING => {
-            if pos + 4 > data.len() { return Err("string len oob".into()); }
-            let len = u32::from_le_bytes(data[pos..pos+4].try_into().unwrap()) as usize;
-            pos += 4 + len;
+            let (len, n) = read_varint(&data[pos..]).map_err(|e| e.to_string())?;
+            pos += n + len as usize;
         }
         EPEE_OBJECT => {
             let (fc, n) = read_varint(&data[pos..]).map_err(|e| e.to_string())?;
             pos += n;
             for _ in 0..fc {
-                if pos >= data.len() { break; }
-                let nl = data[pos] as usize; pos += 1 + nl;
-                if pos >= data.len() { break; }
-                let ft = data[pos]; pos += 1;
+                if pos >= data.len() {
+                    break;
+                }
+                let nl = data[pos] as usize;
+                pos += 1 + nl;
+                if pos >= data.len() {
+                    break;
+                }
+                let ft = data[pos];
+                pos += 1;
                 pos = skip_epee_value(data, pos, ft)?;
             }
         }
-        _ => { return Err(format!("unknown type {base_type:#x} in skip")); }
+        _ => {
+            return Err(format!("unknown type {base_type:#x} in skip"));
+        }
     }
     Ok(pos)
 }
 
-// ─── build_get_outputs_response ───────────────────────────────────────────────
+// --- build_get_outputs_response -----------------------------------------------
 
-fn build_get_outputs_response(
-    outs: &[(u64, cuprate_types::OutputOnChain)],
-) -> Vec<u8> {
+fn build_get_outputs_response(outs: &[(u64, cuprate_types::OutputOnChain, [u8; 32])]) -> Vec<u8> {
     let mut body = Vec::new();
     // Root object: 2 fields: "outs" (array of objects) and "status" (string)
     begin_section(2, &mut body);
@@ -780,11 +941,11 @@ fn build_get_outputs_response(
     write_key(b"outs", &mut body);
     body.push(EPEE_OBJECT | EPEE_ARRAY_FLAG);
     write_varint(outs.len() as u64, &mut body);
-    for (_idx, out) in outs {
+    for (_idx, out, mask) in outs {
         // Each out: { "key": [u8;32], "mask": [u8;32], "unlocked": bool, "height": u64, "txid": [u8;32] }
         write_varint(5, &mut body); // 5 fields
         write_string(b"key", out.key.as_bytes(), &mut body);
-        write_string(b"mask", out.commitment.as_bytes(), &mut body);
+        write_string(b"mask", mask, &mut body);
         write_bool(b"unlocked", true, &mut body);
         write_u64(b"height", out.height as u64, &mut body);
         let txid = out.txid.unwrap_or([0u8; 32]);
@@ -797,6 +958,72 @@ fn build_get_outputs_response(
     body
 }
 
+fn parse_get_output_distribution_request(data: &[u8]) -> Result<(u64, u64), String> {
+    if data.len() < EPEE_HEADER.len() {
+        return Err("too short".into());
+    }
+    if &data[..EPEE_HEADER.len()] != EPEE_HEADER {
+        return Err("bad epee header".into());
+    }
+
+    let mut pos = EPEE_HEADER.len();
+    let (field_count, n) = read_varint(&data[pos..]).map_err(|e| e.to_string())?;
+    pos += n;
+
+    let mut from_height = None;
+    let mut to_height = None;
+    for _ in 0..field_count {
+        if pos >= data.len() {
+            break;
+        }
+        let name_len = data[pos] as usize;
+        pos += 1;
+        if pos + name_len > data.len() {
+            return Err("name oob".into());
+        }
+        let name = &data[pos..pos + name_len];
+        pos += name_len;
+        if pos >= data.len() {
+            return Err("no type byte".into());
+        }
+        let type_byte = data[pos];
+        pos += 1;
+
+        if type_byte == EPEE_UINT64 && pos + 8 <= data.len() {
+            let value = u64::from_le_bytes(data[pos..pos + 8].try_into().unwrap());
+            pos += 8;
+            match name {
+                b"from_height" => from_height = Some(value),
+                b"to_height" => to_height = Some(value),
+                _ => {}
+            }
+        } else {
+            pos = skip_epee_value(data, pos, type_byte)?;
+        }
+    }
+
+    Ok((from_height.unwrap_or(0), to_height.unwrap_or(0)))
+}
+
+fn build_get_output_distribution_response(start_height: u64, distribution: &[u64]) -> Vec<u8> {
+    let mut body = Vec::new();
+    begin_section(2, &mut body);
+
+    write_key(b"distributions", &mut body);
+    body.push(EPEE_OBJECT);
+    write_varint(2, &mut body);
+    write_u64(b"start_height", start_height, &mut body);
+
+    let mut encoded_distribution = Vec::with_capacity(distribution.len() * 8);
+    for value in distribution {
+        encoded_distribution.extend_from_slice(&value.to_le_bytes());
+    }
+    write_string(b"distribution", &encoded_distribution, &mut body);
+
+    write_string(b"status", b"OK", &mut body);
+    body
+}
+
 fn build_get_outputs_error_response(msg: &str) -> Vec<u8> {
     let mut body = Vec::new();
     begin_section(2, &mut body);
@@ -805,7 +1032,7 @@ fn build_get_outputs_error_response(msg: &str) -> Vec<u8> {
     body
 }
 
-// ─── parse_get_blocks_request ─────────────────────────────────────────────────
+// --- parse_get_blocks_request -------------------------------------------------
 
 /// Parse `COMMAND_RPC_GET_BLOCKS_FAST::request`.
 /// We only extract `start_height` for our simplified implementation.
@@ -820,18 +1047,26 @@ fn parse_get_blocks_request(data: &[u8]) -> Result<u64, String> {
     let (field_count, n) = read_varint(&data[pos..]).map_err(|e| e.to_string())?;
     pos += n;
     for _ in 0..field_count {
-        if pos >= data.len() { break; }
+        if pos >= data.len() {
+            break;
+        }
         let name_len = data[pos] as usize;
         pos += 1;
-        if pos + name_len > data.len() { return Err("name oob".into()); }
+        if pos + name_len > data.len() {
+            return Err("name oob".into());
+        }
         let name = &data[pos..pos + name_len];
         pos += name_len;
-        if pos >= data.len() { return Err("no type".into()); }
+        if pos >= data.len() {
+            return Err("no type".into());
+        }
         let type_byte = data[pos];
         pos += 1;
         if name == b"start_height" && type_byte == EPEE_UINT64 {
-            if pos + 8 > data.len() { return Err("u64 oob".into()); }
-            let v = u64::from_le_bytes(data[pos..pos+8].try_into().unwrap());
+            if pos + 8 > data.len() {
+                return Err("u64 oob".into());
+            }
+            let v = u64::from_le_bytes(data[pos..pos + 8].try_into().unwrap());
             return Ok(v);
         } else {
             pos = skip_epee_value(data, pos, type_byte)?;
@@ -851,7 +1086,7 @@ fn build_get_blocks_response(
     let mut body = Vec::new();
     begin_section(4, &mut body);
 
-    // "blocks" — array of BlockCompleteEntry objects
+    // "blocks" - array of BlockCompleteEntry objects
     write_key(b"blocks", &mut body);
     body.push(EPEE_OBJECT | EPEE_ARRAY_FLAG);
     write_varint(entries.len() as u64, &mut body);
@@ -860,7 +1095,7 @@ fn build_get_blocks_response(
         write_varint(2u64, &mut body);
         write_string(b"block", block_blob, &mut body);
 
-        // "txs" — array of EPEE_STRING, each element prefixed with u32 LE length.
+        // "txs" - array of EPEE_STRING, each element prefixed with u32 LE length.
         write_key(b"txs", &mut body);
         body.push(EPEE_STRING | EPEE_ARRAY_FLAG);
         write_varint(tx_blobs.len() as u64, &mut body);
@@ -884,21 +1119,25 @@ fn build_error_response_bytes(msg: &str) -> Vec<u8> {
     body
 }
 
-// ─── server startup ───────────────────────────────────────────────────────────
+// --- server startup -----------------------------------------------------------
 
 /// Start the monerod-compatible RPC server in the background.
 ///
 /// Returns the actual bound `SocketAddr`.
-pub async fn start_rpc_server(
-    node: SharedNode,
-    port: u16,
-) -> Result<SocketAddr, SimnetError> {
+pub async fn start_rpc_server(node: SharedNode, port: u16) -> Result<SocketAddr, SimnetError> {
     let app = Router::new()
         .route("/json_rpc", post(json_rpc))
         .route("/get_height", post(get_height))
         .route("/send_raw_transaction", post(send_raw_transaction))
+        .route("/sendrawtransaction", post(send_raw_transaction))
         .route("/get_transactions", post(get_transactions))
+        .route("/is_key_image_spent", post(is_key_image_spent))
         .route("/get_outputs.bin", post(get_outputs_bin))
+        .route("/get_outs.bin", post(get_outputs_bin))
+        .route(
+            "/get_output_distribution.bin",
+            post(get_output_distribution_bin),
+        )
         .route("/get_blocks.bin", post(get_blocks_bin))
         .with_state(node);
 

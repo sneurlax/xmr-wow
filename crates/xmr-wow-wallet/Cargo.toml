@@ -46,3 +46,4 @@ sha2 = { workspace = true }
 [dev-dependencies]
 xmr-wow-crypto = { workspace = true }
 axum = { workspace = true }
+simnet-testbed = { path = "../../deps/simnet-testbed" }

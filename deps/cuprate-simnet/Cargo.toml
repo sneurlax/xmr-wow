@@ -5,16 +5,18 @@ edition = "2021"
 description = "Programmatic in-process Monero simulation network for development and testing"
 license = "MIT"
 
-# Standalone workspace: cuprate-simnet keeps its own lockfile and build graph.
-# Direct monero-oxide deps point at upstream GitHub, while the patch below
-# redirects the whole source to the published compatibility fork.
-[workspace]
+# Standalone excluded package: root workspace excludes this crate so it keeps
+# its own lockfile/build graph when invoked directly, while remaining usable as
+# a path dependency from workspace members.
 
 [patch."https://github.com/monero-oxide/monero-oxide.git"]
 monero-address = { git = "https://github.com/sneurlax/monero-oxide", rev = "f9afcdda9e463ed2a94821265929acf60fa57346" }
 monero-interface = { git = "https://github.com/sneurlax/monero-oxide", rev = "f9afcdda9e463ed2a94821265929acf60fa57346" }
 monero-oxide = { git = "https://github.com/sneurlax/monero-oxide", rev = "f9afcdda9e463ed2a94821265929acf60fa57346" }
 monero-wallet = { git = "https://github.com/sneurlax/monero-oxide", rev = "f9afcdda9e463ed2a94821265929acf60fa57346" }
+
+[patch."https://github.com/sneurlax/cuprate"]
+cuprate-consensus-rules = { path = "../cuprate-consensus-rules" }
 
 # Cuprate crates pinned to the compatibility commit in sneurlax/cuprate.
 [dependencies]

@@ -509,6 +509,14 @@ impl SimnetNode {
         Ok(merged)
     }
 
+    /// Return the cumulative RingCT output distribution for an inclusive height range.
+    pub fn rct_output_distribution_range(&self, from_height: u64, to_height: u64) -> Vec<u64> {
+        let last = self.rct_counts.last().copied().unwrap_or(0);
+        (from_height..=to_height)
+            .map(|height| self.rct_counts.get(height as usize).copied().unwrap_or(last))
+            .collect()
+    }
+
     /// Extract all key images from a transaction's inputs (skips `Input::Gen`).
     fn extract_key_images(tx: &Transaction) -> Vec<[u8; 32]> {
         tx.prefix()
@@ -535,6 +543,29 @@ impl SimnetNode {
         }
     }
 
+    /// Return Monero daemon spent-status codes for the supplied key images.
+    ///
+    /// `0` = unspent, `1` = spent on-chain, `2` = spent in the mempool.
+    pub fn key_image_spent_statuses(&self, key_images: &[[u8; 32]]) -> Vec<u64> {
+        key_images
+            .iter()
+            .map(|key_image| {
+                if self.spent_key_images.contains(key_image) {
+                    1
+                } else if self
+                    .mempool
+                    .iter()
+                    .flat_map(|pending| Self::extract_key_images(&pending.tx))
+                    .any(|pending_key_image| pending_key_image == *key_image)
+                {
+                    2
+                } else {
+                    0
+                }
+            })
+            .collect()
+    }
+
     /// Submit a raw transaction blob to the mempool. Returns the tx hash.
     ///
     /// Returns [`SimnetError::DoubleSpend`] if any key image in the transaction
@@ -542,6 +573,26 @@ impl SimnetNode {
     pub fn submit_tx(&mut self, tx_blob: Vec<u8>) -> Result<[u8; 32], SimnetError> {
         let tx = Transaction::read(&mut tx_blob.as_slice())
             .map_err(|e| SimnetError::Consensus(format!("invalid tx: {e}").into()))?;
+        let current_height = self.context_svc.blockchain_context().chain_height;
+
+        match tx.prefix().additional_timelock {
+            monero_oxide::transaction::Timelock::None => {}
+            monero_oxide::transaction::Timelock::Block(height) if height <= current_height => {}
+            monero_oxide::transaction::Timelock::Block(height) => {
+                return Err(SimnetError::Consensus(
+                    format!(
+                        "transaction unlock_time {} not yet satisfied at height {}",
+                        height, current_height
+                    )
+                    .into(),
+                ));
+            }
+            monero_oxide::transaction::Timelock::Time(time) => {
+                return Err(SimnetError::Consensus(
+                    format!("time-based unlock_time {} not supported by simnet", time).into(),
+                ));
+            }
+        }
 
         // Collect key images from the incoming tx.
         let key_images = Self::extract_key_images(&tx);
