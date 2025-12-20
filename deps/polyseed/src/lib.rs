@@ -334,7 +334,7 @@ impl Polyseed {
       entropy,
       checksum: 0,
     };
-    res.checksum = poly_eval(&*res.to_poly());
+    res.checksum = poly_eval(&res.to_poly());
     Ok(res)
   }
 
@@ -552,7 +552,7 @@ impl Polyseed {
     self.entropy[SECRET_SIZE - 1] &= LAST_BYTE_SECRET_BITS_MASK;
 
     self.features ^= ENCRYPTED_MASK;
-    self.checksum = poly_eval(&*self.to_poly());
+    self.checksum = poly_eval(&self.to_poly());
   }
 
   /// This seed's entropy.

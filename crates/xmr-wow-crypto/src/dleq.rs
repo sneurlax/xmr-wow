@@ -27,23 +27,13 @@ use curve25519_dalek::{
 };
 use rand_core::{CryptoRng, RngCore};
 use serde::{Deserialize, Serialize};
-use tiny_keccak::{Hasher, Keccak};
 
 use crate::error::CryptoError;
+use crate::keccak::keccak256;
 
 #[inline(always)]
 fn parse_scalar(bytes: [u8; 32]) -> Option<Scalar> {
     Scalar::from_canonical_bytes(bytes).into()
-}
-
-// --- helpers ----------------------------------------------------------------
-
-fn keccak256(data: &[u8]) -> [u8; 32] {
-    let mut h = Keccak::v256();
-    h.update(data);
-    let mut out = [0u8; 32];
-    h.finalize(&mut out);
-    out
 }
 
 /// Compute the Fiat-Shamir challenge scalar for a single-generator DLEQ proof.
