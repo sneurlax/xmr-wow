@@ -12,6 +12,16 @@
 #   ./scripts/live-refund-path.sh
 set -euo pipefail
 
+if [[ "${ALLOW_UNSUPPORTED_XMR_WOW_LIVE_FLOW:-0}" != "1" ]]; then
+    cat >&2 <<'EOF'
+This script is historical/manual only.
+Supported path: ./scripts/phase16-proof-harness.sh
+Current refund-readiness gating keeps this live flow blocked or unsupported-for-guarantee.
+Set ALLOW_UNSUPPORTED_XMR_WOW_LIVE_FLOW=1 only if you intentionally need the old path.
+EOF
+    exit 1
+fi
+
 XMR_DAEMON="${XMR_DAEMON:-http://127.0.0.1:38081}"
 WOW_DAEMON="${WOW_DAEMON:-http://127.0.0.1:34568}"
 PASSWORD="${SWAP_PASSWORD:-test-swap-password}"
