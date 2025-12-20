@@ -121,7 +121,7 @@ fn classic_mnemonic_to_scalar(mnemonic: &str) -> Result<Scalar, CryptoError> {
 
     // Validate checksum if 25 words
     if words.len() == SEED_LENGTH_WITH_CHECKSUM {
-        let check_idx = checksum_index(&words[..SEED_LENGTH].to_vec());
+        let check_idx = checksum_index(&words[..SEED_LENGTH]);
         let expected_trimmed = trim(&words[check_idx]);
         let actual_trimmed = trim(&words[SEED_LENGTH]);
         if expected_trimmed != actual_trimmed {

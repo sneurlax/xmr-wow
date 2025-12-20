@@ -27,5 +27,6 @@ crc              = { workspace = true }
 polyseed         = { workspace = true }
 
 [dev-dependencies]
-rand = { workspace = true }
-hex  = { workspace = true }
+rand     = { workspace = true }
+hex      = { workspace = true }
+proptest = { workspace = true }
