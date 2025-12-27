@@ -38,5 +38,13 @@ base64             = { workspace = true }
 rpassword          = { workspace = true }
 xmr-wow-wallet     = { workspace = true }
 
+[[test]]
+name = "adversarial_messages"
+path = "tests/adversarial_messages.rs"
+
+[[test]]
+name = "lock_order_enforcement"
+path = "tests/lock_order_enforcement.rs"
+
 [dev-dependencies]
 axum = { workspace = true }
