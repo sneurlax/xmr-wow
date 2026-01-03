@@ -185,6 +185,20 @@ impl SwapShare {
         out
     }
 
+    /// PoW hash: `keccak256(id || nonce_le)`.
+    ///
+    /// Allows nonce grinding: a miner increments `nonce` until
+    /// `difficulty.check_pow(&share.pow_hash())` returns true.
+    pub fn pow_hash(&self) -> [u8; 32] {
+        use tiny_keccak::{Hasher, Keccak};
+        let mut h = Keccak::v256();
+        h.update(&self.id());
+        h.update(&self.nonce.to_le_bytes());
+        let mut out = [0u8; 32];
+        h.finalize(&mut out);
+        out
+    }
+
     /// Full dedup key: `id || nonce_le` (36 bytes).
     pub fn full_id(&self) -> [u8; 36] {
         let mut out = [0u8; 36];

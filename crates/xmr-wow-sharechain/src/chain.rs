@@ -37,6 +37,8 @@ pub enum ChainError {
     DuplicateShare,
     /// An escrow operation embedded in the share was invalid.
     InvalidEscrowOp(String),
+    /// The share's pow_hash does not satisfy its claimed difficulty.
+    InvalidPoW,
 }
 
 impl std::fmt::Display for ChainError {
@@ -50,6 +52,7 @@ impl std::fmt::Display for ChainError {
             }
             ChainError::DuplicateShare => write!(f, "duplicate share"),
             ChainError::InvalidEscrowOp(msg) => write!(f, "invalid escrow op: {msg}"),
+            ChainError::InvalidPoW => write!(f, "invalid proof-of-work"),
         }
     }
 }
@@ -139,6 +142,11 @@ impl SwapChain {
         // 4. Minimum difficulty
         if share.difficulty < self.min_difficulty {
             return Err(ChainError::DifficultyTooLow);
+        }
+
+        // 4b. Proof-of-work check: pow_hash must satisfy claimed difficulty
+        if !share.difficulty.check_pow(&share.pow_hash()) {
+            return Err(ChainError::InvalidPoW);
         }
 
         // 5. Cumulative difficulty consistency
@@ -243,25 +251,91 @@ mod tests {
 
     const MIN_DIFF: Difficulty = Difficulty { lo: 1, hi: 0 };
 
+    /// Grind nonce until the share's pow_hash meets its claimed difficulty.
+    fn grind_nonce(share: &mut SwapShare) {
+        for n in 0u32..=u32::MAX {
+            share.nonce = n;
+            if share.difficulty.check_pow(&share.pow_hash()) {
+                return;
+            }
+        }
+        panic!("could not find valid nonce for difficulty {:?}", share.difficulty);
+    }
+
+    #[test]
+    fn share_without_valid_pow_rejected() {
+        // difficulty=100 means most nonces will NOT satisfy PoW;
+        // nonce=0 almost certainly fails. The test asserts the enforcement is present.
+        let chain = SwapChain::new(Difficulty::from_u64(100));
+        let mut g = SwapShare::genesis(Difficulty::from_u64(100));
+        // Force nonce=0 and check that it fails pow (if by luck it passes, increment until it fails)
+        let mut found_bad = false;
+        for n in 0u32..1000 {
+            g.nonce = n;
+            if !g.difficulty.check_pow(&g.pow_hash()) {
+                found_bad = true;
+                break;
+            }
+        }
+        assert!(found_bad, "expected to find a nonce that fails PoW for difficulty=100");
+        let err = chain.add_share(g).unwrap_err();
+        assert_eq!(err, ChainError::InvalidPoW);
+    }
+
+    #[test]
+    fn share_with_valid_pow_accepted() {
+        let chain = SwapChain::new(Difficulty::from_u64(100));
+        let mut g = SwapShare::genesis(Difficulty::from_u64(100));
+        grind_nonce(&mut g);
+        assert!(chain.add_share(g).is_ok());
+    }
+
+    #[test]
+    fn genesis_share_requires_pow() {
+        let chain = SwapChain::new(Difficulty::from_u64(1));
+        let mut g = SwapShare::genesis(Difficulty::from_u64(1));
+        // difficulty=1 means every hash passes check_pow, so pick any nonce
+        grind_nonce(&mut g);
+        assert!(chain.add_share(g).is_ok());
+        // Now test that a genesis with zero difficulty is still rejected before reaching PoW check
+        let chain2 = SwapChain::new(Difficulty::from_u64(100));
+        let mut bad_g = SwapShare::genesis(Difficulty::from_u64(100));
+        // find a nonce that fails PoW
+        let mut found_bad = false;
+        for n in 0u32..1000 {
+            bad_g.nonce = n;
+            if !bad_g.difficulty.check_pow(&bad_g.pow_hash()) {
+                found_bad = true;
+                break;
+            }
+        }
+        assert!(found_bad);
+        let err = chain2.add_share(bad_g).unwrap_err();
+        assert_eq!(err, ChainError::InvalidPoW);
+    }
+
+    /// Build a share and grind the nonce to satisfy PoW.
     fn make_share(
         parent: Hash,
         height: u64,
         parent_cumulative: Difficulty,
         diff: Difficulty,
-        nonce: u32,
+        _nonce: u32,
     ) -> SwapShare {
-        SwapShare {
+        let mut s = SwapShare {
             parent,
             uncles: Vec::new(),
             height,
             difficulty: diff,
             cumulative_difficulty: parent_cumulative.wrapping_add(diff),
             timestamp: height * 10,
-            nonce,
+            nonce: 0,
             escrow_ops: Vec::new(),
             escrow_merkle_root: [height as u8; 32],
             pow_proof: None,
-        }
+        };
+        grind_nonce(&mut s);
+        s
     }
 
     fn genesis(diff: Difficulty) -> SwapShare {
@@ -330,6 +404,8 @@ mod tests {
             amount:          500_000,
         };
         g.escrow_ops.push(EscrowOp::Open(commitment));
+        // After adding escrow ops the share content changes; re-grind nonce.
+        grind_nonce(&mut g);
         chain.add_share(g).unwrap();
 
         let idx = chain.escrow_index.read();

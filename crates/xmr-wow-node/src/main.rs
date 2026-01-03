@@ -1,6 +1,7 @@
 use clap::Parser;
+use std::net::SocketAddr;
 use std::sync::Arc;
-use xmr_wow_sharechain::{SwapChain, Difficulty, merge_mining_router};
+use xmr_wow_sharechain::{SwapChain, Difficulty, merge_mining_router_with_connect_info};
 
 #[derive(Parser)]
 #[command(name = "xmr-wow-node", about = "XMR\u{2194}WOW swap sharechain node")]
@@ -33,22 +34,23 @@ async fn main() -> anyhow::Result<()> {
 
     let chain = Arc::new(SwapChain::new(Difficulty::from_u64(args.min_difficulty)));
 
-    // Start merge-mining + client JSON-RPC server
-    let rpc_app = merge_mining_router(chain.clone());
+    // RPC server: ConnectInfo router gates submit_escrow_op to loopback
+    let rpc_app = merge_mining_router_with_connect_info(chain.clone());
     let rpc_addr = format!("0.0.0.0:{}", args.rpc_port);
     tracing::info!("RPC listening on {}", rpc_addr);
     let listener = tokio::net::TcpListener::bind(&rpc_addr).await?;
+    let rpc_service = rpc_app.into_make_service_with_connect_info::<SocketAddr>();
 
     if args.rpc_only {
         tracing::info!("Running in RPC-only mode (no P2P)");
-        axum::serve(listener, rpc_app).await?;
+        axum::serve(listener, rpc_service).await?;
     } else {
         // Log bootstrap peers (full P2P is future work ; server stub is available)
         tracing::info!("P2P port: {} (peer discovery active)", args.p2p_port);
         for peer in &args.peer {
             tracing::info!("Bootstrap peer: {}", peer);
         }
-        axum::serve(listener, rpc_app).await?;
+        axum::serve(listener, rpc_service).await?;
     }
 
     Ok(())

@@ -20,8 +20,11 @@ use parking_lot::RwLock;
 use rand::Rng;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, Semaphore};
 use tracing::{debug, error, info, warn};
+
+/// Max simultaneous inbound P2P connections. Prevents connection-flood DoS.
+pub const MAX_INBOUND_CONNECTIONS: usize = 128;
 
 use crate::chain::SwapChain;
 use crate::p2p::handshake::{generate_solution, verify_solution};
@@ -197,18 +200,45 @@ impl P2PServer {
             }
         };
 
+        let semaphore = Arc::new(Semaphore::new(MAX_INBOUND_CONNECTIONS));
+        Self::listen_loop_with_semaphore(listener, peers, chain, our_peer_id, semaphore).await;
+    }
+
+    /// Inner listen loop that takes a pre-bound listener and a shared semaphore.
+    ///
+    /// Exposed for testing so tests can inspect the semaphore state.
+    pub async fn listen_loop_with_semaphore(
+        listener: TcpListener,
+        peers: Arc<RwLock<HashMap<SocketAddr, Peer>>>,
+        chain: Arc<SwapChain>,
+        our_peer_id: u64,
+        semaphore: Arc<Semaphore>,
+    ) {
         loop {
             match listener.accept().await {
                 Ok((stream, remote_addr)) => {
-                    info!("accepted P2P connection from {remote_addr}");
-                    let p = peers.clone();
-                    let c = chain.clone();
-                    tokio::spawn(async move {
-                        Self::handle_connection(
-                            stream, remote_addr, false, p, c, our_peer_id,
-                        )
-                        .await;
-                    });
+                    // enforce connection cap
+                    match semaphore.clone().try_acquire_owned() {
+                        Ok(permit) => {
+                            info!("accepted P2P connection from {remote_addr}");
+                            let p = peers.clone();
+                            let c = chain.clone();
+                            tokio::spawn(async move {
+                                let _permit = permit; // held until task exits
+                                Self::handle_connection(
+                                    stream, remote_addr, false, p, c, our_peer_id,
+                                )
+                                .await;
+                            });
+                        }
+                        Err(_) => {
+                            warn!(
+                                "connection cap ({MAX_INBOUND_CONNECTIONS}) reached; \
+                                 dropping connection from {remote_addr}"
+                            );
+                            drop(stream);
+                        }
+                    }
                 }
                 Err(e) => error!("accept error: {e}"),
             }
@@ -458,6 +488,7 @@ mod tests {
     use super::*;
     use crate::chain::SwapChain;
     use crate::share::{Difficulty, SwapShare};
+    use tokio::net::TcpStream;
 
     fn make_chain() -> Arc<SwapChain> {
         Arc::new(SwapChain::new(Difficulty::from_u64(1)))
@@ -487,5 +518,46 @@ mod tests {
         tokio::spawn(server.run(rx));
         // Give the task a moment to process
         tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+
+    /// Inbound connections must be capped at MAX_INBOUND_CONNECTIONS.
+    #[tokio::test]
+    async fn connection_cap_enforced() {
+        let chain = make_chain();
+        let bind_addr: SocketAddr = "127.0.0.1:0".parse().unwrap();
+        let listener = tokio::net::TcpListener::bind(bind_addr).await.unwrap();
+        let bound_port = listener.local_addr().unwrap().port();
+        let server_addr: SocketAddr = format!("127.0.0.1:{bound_port}").parse().unwrap();
+
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(MAX_INBOUND_CONNECTIONS));
+        {
+            let peers: Arc<RwLock<HashMap<SocketAddr, Peer>>> =
+                Arc::new(RwLock::new(HashMap::new()));
+            let c = chain.clone();
+            let sem = semaphore.clone();
+            tokio::spawn(async move {
+                P2PServer::listen_loop_with_semaphore(listener, peers, c, 0, sem).await;
+            });
+        }
+
+        let over_limit = MAX_INBOUND_CONNECTIONS + 5;
+        let mut conns = Vec::new();
+        for i in 0..over_limit {
+            match TcpStream::connect(server_addr).await {
+                Ok(s) => conns.push(s),
+                Err(_) => {} // connection refused is also acceptable
+            }
+            // yield to let server accept
+            if i % 10 == 9 {
+                tokio::task::yield_now().await;
+            }
+        }
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let available = semaphore.available_permits();
+        assert!(
+            available <= MAX_INBOUND_CONNECTIONS,
+            "semaphore permits ({available}) exceeds MAX ({MAX_INBOUND_CONNECTIONS})"
+        );
     }
 }
