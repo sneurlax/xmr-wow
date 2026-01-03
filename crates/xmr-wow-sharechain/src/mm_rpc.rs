@@ -10,10 +10,11 @@
 //   5. get_chain_height  -> current tip height
 //   6. submit_escrow_op  -> submit an EscrowOp for inclusion in the next share
 
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use axum::{
-    extract::State,
+    extract::{ConnectInfo, State},
     routing::post,
     Json, Router,
 };
@@ -365,7 +366,27 @@ async fn handle_rpc(
     State(state): State<RpcState>,
     Json(req): Json<RpcRequest>,
 ) -> Json<Value> {
+    handle_rpc_inner(state, req, None)
+}
+
+async fn handle_rpc_with_connect_info(
+    State(state): State<RpcState>,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+    Json(req): Json<RpcRequest>,
+) -> Json<Value> {
+    handle_rpc_inner(state, req, Some(addr))
+}
+
+fn handle_rpc_inner(state: RpcState, req: RpcRequest, caller_addr: Option<SocketAddr>) -> Json<Value> {
     let id = req.id.clone();
+    // localhost-only methods are rejected for non-loopback callers
+    if is_localhost_only_method(req.method.as_str()) {
+        let addr = caller_addr.unwrap_or_else(|| "127.0.0.1:0".parse().unwrap());
+        if let Err(rpc_err) = check_loopback(&addr, id.clone()) {
+            return rpc_err;
+        }
+    }
+
     match req.method.as_str() {
         "merge_mining_get_chain_id"     => handle_get_chain_id(id),
         "merge_mining_get_aux_block"    => handle_get_aux_block(&state, id, req.params),
@@ -381,13 +402,40 @@ async fn handle_rpc(
     }
 }
 
+// --- Localhost gating helpers -------------------------------------------------
+
+/// Returns true iff `method` is restricted to loopback-only callers.
+pub fn is_localhost_only_method(method: &str) -> bool {
+    method == "submit_escrow_op"
+}
+
+/// Returns Ok(()) if the caller address is loopback, or an RPC error Json if not.
+pub fn check_loopback(addr: &std::net::SocketAddr, id: serde_json::Value) -> Result<(), Json<Value>> {
+    if addr.ip().is_loopback() {
+        Ok(())
+    } else {
+        Err(err(id, -32003, "submit_escrow_op is restricted to localhost"))
+    }
+}
+
 // --- Public API ---------------------------------------------------------------
 
 /// Build an Axum router exposing all merge-mining and swap-client RPC endpoints.
+///
+/// Without ConnectInfo — for unit tests. submit_escrow_op defaults to localhost.
 pub fn merge_mining_router(chain: Arc<SwapChain>) -> Router {
     let state = RpcState { chain };
     Router::new()
         .route("/json_rpc", post(handle_rpc))
+        .with_state(state)
+}
+
+/// With ConnectInfo — gates submit_escrow_op to loopback.
+/// Serve with `.into_make_service_with_connect_info::<SocketAddr>()`.
+pub fn merge_mining_router_with_connect_info(chain: Arc<SwapChain>) -> Router {
+    let state = RpcState { chain };
+    Router::new()
+        .route("/json_rpc", post(handle_rpc_with_connect_info))
         .with_state(state)
 }
 
@@ -476,11 +524,25 @@ mod tests {
             Value::Null,
         )
         .await;
-        let aux_blob = aux_resp["result"]["aux_blob"].as_str().unwrap().to_string();
+        let aux_blob_hex = aux_resp["result"]["aux_blob"].as_str().unwrap().to_string();
 
-        // Submit the solution (with stub proof data)
+        // Decode the pending share, grind the nonce to satisfy PoW, and re-encode.
+        // (In a real mining setup the miner would grind the Monero block nonce which
+        // translates to the share nonce; here we simulate that step directly.)
+        let aux_blob_bytes = hex::decode(&aux_blob_hex).unwrap();
+        let mut pending = crate::share::SwapShare::deserialize(&aux_blob_bytes).unwrap();
+        // Grind nonce until PoW is satisfied
+        for n in 0u32..=u32::MAX {
+            pending.nonce = n;
+            if pending.difficulty.check_pow(&pending.pow_hash()) {
+                break;
+            }
+        }
+        let aux_blob_valid = hex::encode(pending.serialize());
+
+        // Submit the solution (with stub proof data and valid nonce)
         let params = serde_json::json!({
-            "aux_blob":     aux_blob,
+            "aux_blob":     aux_blob_valid,
             "aux_hash":     "0".repeat(64),
             "blob":         hex::encode(b"fake monero block"),
             "merkle_proof": [],
@@ -509,5 +571,32 @@ mod tests {
         let router = merge_mining_router(chain);
         let resp   = post_rpc(router, "nonexistent_method", Value::Null).await;
         assert!(resp.get("error").is_some(), "should have error field");
+    }
+
+    #[test]
+    fn submit_escrow_op_rejects_non_loopback() {
+        let non_loopback: std::net::SocketAddr = "192.168.1.100:12345".parse().unwrap();
+        let id = serde_json::json!(1);
+        let result = check_loopback(&non_loopback, id);
+        assert!(result.is_err(), "non-loopback caller must be rejected");
+    }
+
+    #[test]
+    fn submit_escrow_op_accepts_loopback() {
+        let loopback_v4: std::net::SocketAddr = "127.0.0.1:12345".parse().unwrap();
+        let id = serde_json::json!(1);
+        assert!(check_loopback(&loopback_v4, id).is_ok(), "127.0.0.1 must be accepted");
+
+        let loopback_v6: std::net::SocketAddr = "[::1]:12345".parse().unwrap();
+        let id2 = serde_json::json!(2);
+        assert!(check_loopback(&loopback_v6, id2).is_ok(), "::1 must be accepted");
+    }
+
+    #[test]
+    fn is_localhost_only_method_gates_submit_escrow_op() {
+        assert!(is_localhost_only_method("submit_escrow_op"));
+        assert!(!is_localhost_only_method("merge_mining_get_chain_id"));
+        assert!(!is_localhost_only_method("get_chain_height"));
+        assert!(!is_localhost_only_method("merge_mining_submit_solution"));
     }
 }
