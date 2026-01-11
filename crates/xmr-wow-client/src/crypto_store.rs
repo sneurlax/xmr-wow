@@ -22,37 +22,27 @@ use aes_gcm::{
     Aes256Gcm, KeyInit, Nonce,
 };
 use argon2::{Algorithm, Argon2, Params, Version};
+use zeroize::Zeroizing;
 
 use crate::swap_state::SwapError;
 
-/// Derive a 32-byte encryption key from a password and salt using Argon2id.
-///
-/// Parameters: 65536 KiB memory, 3 iterations, 1 parallelism lane.
-/// These are conservative defaults suitable for a CLI tool where key
-/// derivation happens infrequently.
-///
-/// * `password` - User-provided password bytes
-/// * `salt` - Random 16-byte salt (stored in config table)
-pub fn derive_key(password: &[u8], salt: &[u8]) -> [u8; 32] {
+/// Derive a 32-byte key from password + salt via Argon2id.
+pub fn derive_key(password: &[u8], salt: &[u8]) -> Zeroizing<[u8; 32]> {
+    // hardcoded params always satisfy argon2 constraints
     let params = Params::new(65536, 3, 1, Some(32)).expect("valid argon2 params");
     let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
-    let mut key = [0u8; 32];
+    let mut key = Zeroizing::new([0u8; 32]);
     argon2
-        .hash_password_into(password, salt, &mut key)
+        .hash_password_into(password, salt, key.as_mut())
         .expect("argon2 hash should not fail with valid params");
     key
 }
 
-/// Encrypt a 32-byte secret using AES-256-GCM.
-///
-/// Returns a 60-byte blob: 12 bytes nonce || 32 bytes ciphertext || 16 bytes tag.
-///
-/// * `key` - 32-byte encryption key (from `derive_key`)
-/// * `secret` - 32-byte secret scalar to encrypt
+/// AES-256-GCM encrypt a 32-byte secret. Returns nonce || ciphertext || tag (60 bytes).
 pub fn encrypt_secret(key: &[u8; 32], secret: &[u8; 32]) -> Vec<u8> {
     let cipher = Aes256Gcm::new(key.into());
     let nonce_bytes: [u8; 12] = rand::random();
-    let nonce = Nonce::from_slice(&nonce_bytes);
+    let nonce = Nonce::from(nonce_bytes);
     let ciphertext = cipher
         .encrypt(nonce, secret.as_ref())
         .expect("AES-256-GCM encryption should not fail");
@@ -63,13 +53,8 @@ pub fn encrypt_secret(key: &[u8; 32], secret: &[u8; 32]) -> Vec<u8> {
     result
 }
 
-/// Decrypt a 32-byte secret from an encrypted blob.
-///
-/// Expects a 60-byte blob: 12 bytes nonce || 48 bytes (ciphertext + tag).
-///
-/// * `key` - 32-byte encryption key (from `derive_key`)
-/// * `encrypted` - 60-byte encrypted blob (from `encrypt_secret`)
-pub fn decrypt_secret(key: &[u8; 32], encrypted: &[u8]) -> Result<[u8; 32], SwapError> {
+/// AES-256-GCM decrypt a 60-byte blob back to the 32-byte secret.
+pub fn decrypt_secret(key: &[u8; 32], encrypted: &[u8]) -> Result<Zeroizing<[u8; 32]>, SwapError> {
     if encrypted.len() < 60 {
         return Err(SwapError::DecryptionFailed(format!(
             "encrypted blob too short: {} bytes (expected 60)",
@@ -79,7 +64,8 @@ pub fn decrypt_secret(key: &[u8; 32], encrypted: &[u8]) -> Result<[u8; 32], Swap
 
     let (nonce_bytes, ciphertext) = encrypted.split_at(12);
     let cipher = Aes256Gcm::new(key.into());
-    let nonce = Nonce::from_slice(nonce_bytes);
+    let nonce_arr: [u8; 12] = nonce_bytes.try_into().expect("nonce is exactly 12 bytes");
+    let nonce = Nonce::from(nonce_arr);
 
     let plaintext = cipher
         .decrypt(nonce, ciphertext)
@@ -92,7 +78,7 @@ pub fn decrypt_secret(key: &[u8; 32], encrypted: &[u8]) -> Result<[u8; 32], Swap
         )));
     }
 
-    let mut secret = [0u8; 32];
+    let mut secret = Zeroizing::new([0u8; 32]);
     secret.copy_from_slice(&plaintext);
     Ok(secret)
 }
@@ -110,7 +96,7 @@ mod tests {
 
         let encrypted = encrypt_secret(&key, &secret);
         let decrypted = decrypt_secret(&key, &encrypted).unwrap();
-        assert_eq!(decrypted, secret);
+        assert_eq!(*decrypted, secret);
     }
 
     #[test]
