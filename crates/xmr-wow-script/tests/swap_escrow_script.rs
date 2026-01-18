@@ -1,13 +1,12 @@
 //! Integration tests for the canonical atomic swap escrow script.
 
 mod helpers;
-use helpers::{bytes32, bytes64, ctx, fail_engine, stub_engine};
+use helpers::{ctx, fail_engine, stub_engine};
 use xmr_wow_script::{
     scripts::swap_escrow::{
         build_swap_escrow_script, claim_witness, refund_witness,
-        serialize_script, deserialize_script,
     },
-    Engine, ScriptError, AlwaysFailBackend,
+    ScriptError,
 };
 
 // -- Test fixtures -------------------------------------------------------------

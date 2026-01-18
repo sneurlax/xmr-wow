@@ -43,7 +43,7 @@ pub enum ConnectionState {
 }
 
 #[derive(Clone)]
-struct Peer {
+pub struct Peer {
     addr:                    SocketAddr,
     peer_id:                 u64,
     state:                   ConnectionState,
@@ -80,7 +80,7 @@ impl Peer {
 /// Commands that can be sent to the P2P server actor.
 pub enum P2PCommand {
     /// Broadcast a newly mined SwapShare to all ready peers.
-    BroadcastShare(SwapShare),
+    BroadcastShare(Box<SwapShare>),
     /// Request a specific share by ID from any peer.
     RequestShare([u8; 32]),
     /// Shut down the server.
@@ -511,7 +511,7 @@ mod tests {
         let tx = server.command_sender();
 
         let genesis = SwapShare::genesis(Difficulty::from_u64(1));
-        tx.send(P2PCommand::BroadcastShare(genesis)).await.unwrap();
+        tx.send(P2PCommand::BroadcastShare(Box::new(genesis))).await.unwrap();
         tx.send(P2PCommand::Shutdown).await.unwrap();
 
         // Drain commands to verify they are received
@@ -543,9 +543,9 @@ mod tests {
         let over_limit = MAX_INBOUND_CONNECTIONS + 5;
         let mut conns = Vec::new();
         for i in 0..over_limit {
-            match TcpStream::connect(server_addr).await {
-                Ok(s) => conns.push(s),
-                Err(_) => {} // connection refused is also acceptable
+            // connection refused is also acceptable
+            if let Ok(s) = TcpStream::connect(server_addr).await {
+                conns.push(s);
             }
             // yield to let server accept
             if i % 10 == 9 {

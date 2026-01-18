@@ -44,7 +44,7 @@ impl NativeRpcClient {
 
         let resp = self
             .client
-            .post(&format!("{}/json_rpc", self.url))
+            .post(format!("{}/json_rpc", self.url))
             .json(&body)
             .send()
             .await
@@ -72,7 +72,7 @@ impl NativeRpcClient {
     ) -> AbResult<serde_json::Value> {
         let resp = self
             .client
-            .post(&format!("{}{}", self.url, path))
+            .post(format!("{}{}", self.url, path))
             .json(&body)
             .send()
             .await

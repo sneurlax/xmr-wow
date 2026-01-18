@@ -2,6 +2,8 @@
 #![doc = include_str!("../README.md")]
 #![deny(missing_docs)]
 #![cfg_attr(not(feature = "std"), no_std)]
+// Vendored upstream code — lints suppressed
+#![allow(clippy::incompatible_msrv, clippy::map_unwrap_or, clippy::unnecessary_map_or, clippy::useless_conversion, clippy::too_many_arguments)]
 
 use core::ops::Deref;
 use std_shims::vec::Vec;

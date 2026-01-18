@@ -1,4 +1,4 @@
-use monero_ed25519::UnreducedScalar;
+use wownero_ed25519::UnreducedScalar;
 
 mod hex;
 

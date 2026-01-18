@@ -919,7 +919,7 @@ async fn main() -> anyhow::Result<()> {
             if swaps.is_empty() {
                 println!("No swaps found.");
             } else {
-                println!("{:<66}  {:<15}  {}", "SWAP ID", "PHASE", "ROLE");
+                println!("{:<66}  {:<15}  ROLE", "SWAP ID", "PHASE");
                 println!("{}", "-".repeat(90));
                 for (id, state_json) in swaps {
                     let id_hex = hex::encode(id);
@@ -935,7 +935,7 @@ async fn main() -> anyhow::Result<()> {
                         }
                         Err(_) if !all => continue,
                         Err(_) => {
-                            println!("{:<66}  {:<15}  {}", id_hex, "???", "???");
+                            println!("{:<66}  {:<15}  ???", id_hex, "???");
                         }
                     }
                 }
@@ -995,7 +995,7 @@ async fn main() -> anyhow::Result<()> {
             let wow_height: u64 =
                 {
                     let resp: serde_json::Value = reqwest::Client::new()
-                    .post(&format!("{}/json_rpc", wow_daemon))
+                    .post(format!("{}/json_rpc", wow_daemon))
                     .json(&serde_json::json!({"jsonrpc":"2.0","id":"0","method":"get_block_count"}))
                     .send().await?.json().await?;
                     resp["result"]["count"].as_u64().unwrap_or(0)

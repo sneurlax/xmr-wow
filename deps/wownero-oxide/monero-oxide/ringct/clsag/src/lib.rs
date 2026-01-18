@@ -3,6 +3,8 @@
 #![deny(missing_docs)]
 #![cfg_attr(not(feature = "std"), no_std)]
 #![allow(non_snake_case)]
+// Vendored upstream code — MSRV lint suppressed
+#![allow(clippy::incompatible_msrv)]
 
 use core::ops::Deref;
 use std_shims::{

@@ -1,4 +1,4 @@
-use monero_ed25519::CompressedPoint;
+use wownero_ed25519::CompressedPoint;
 
 mod hex;
 

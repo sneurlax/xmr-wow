@@ -83,7 +83,7 @@ impl monero_daemon_rpc::HttpTransport for ReqwestTransport {
         async move {
             this.post_inner(&route, body, response_size_limit)
                 .await
-                .map_err(|e| monero_interface::InterfaceError::InterfaceError(e))
+                .map_err(monero_interface::InterfaceError::InterfaceError)
         }
     }
 }
@@ -100,7 +100,7 @@ impl wownero_daemon_rpc::HttpTransport for ReqwestTransport {
         async move {
             this.post_inner(&route, body, response_size_limit)
                 .await
-                .map_err(|e| wownero_interface::InterfaceError::InterfaceError(e))
+                .map_err(wownero_interface::InterfaceError::InterfaceError)
         }
     }
 }

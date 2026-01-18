@@ -77,6 +77,8 @@ pub enum ProtocolMessage {
 /// The value is JSON-serialized, then base64-encoded with the standard alphabet,
 /// then prefixed with `xmrwow1:`.
 pub fn encode_message<T: Serialize>(msg: &T) -> String {
+    // String, Option) and DleqProof/AdaptorSignature which are also fully Serialize-able;
+    // serde_json::to_string cannot fail on these types.
     let json = serde_json::to_string(msg).expect("message serialization should not fail");
     let b64 = BASE64.encode(json.as_bytes());
     format!("{}{}", PROTOCOL_PREFIX, b64)
