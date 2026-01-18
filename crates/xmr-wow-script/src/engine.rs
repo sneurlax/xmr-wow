@@ -438,7 +438,6 @@ fn resolve_control_flow(script: &[Opcode]) -> Result<Vec<ResolvedOp<'_>>, Script
                 if let ResolvedOp::JumpIfFalsy(ref mut t) = resolved[*if_jump_idx] {
                     *t = else_jump_idx + 1;
                 }
-                // Update if_stack entry
                 let entry = if_stack.last_mut().unwrap();
                 entry.1 = Some(else_jump_idx);
             }

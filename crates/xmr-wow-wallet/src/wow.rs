@@ -158,7 +158,7 @@ impl WowWallet {
     /// Fetch current chain height from wownerod.
     async fn get_chain_height(client: &reqwest::Client, daemon_url: &str) -> Result<u64, WalletError> {
         let resp = client
-            .post(&format!("{}/json_rpc", daemon_url))
+            .post(format!("{}/json_rpc", daemon_url))
             .json(&serde_json::json!({
                 "jsonrpc": "2.0", "id": "0",
                 "method": "get_block_count",
@@ -189,7 +189,7 @@ impl WowWallet {
     ) -> Result<wownero_interface::ScannableBlock, WalletError> {
         // Step 1: Fetch block blob via get_block
         let resp = client
-            .post(&format!("{}/json_rpc", daemon_url))
+            .post(format!("{}/json_rpc", daemon_url))
             .json(&serde_json::json!({
                 "jsonrpc": "2.0", "id": "0",
                 "method": "get_block",
@@ -221,7 +221,7 @@ impl WowWallet {
             let tx_hashes: Vec<String> = block.transactions.iter().map(hex::encode).collect();
 
             let tx_resp = client
-                .post(&format!("{}/get_transactions", daemon_url))
+                .post(format!("{}/get_transactions", daemon_url))
                 .json(&serde_json::json!({
                     "txs_hashes": tx_hashes,
                     "decode_as_json": false,
@@ -291,7 +291,7 @@ impl WowWallet {
         let miner_hash = hex::encode(miner_tx.hash());
 
         let resp = client
-            .post(&format!("{}/get_o_indexes.bin", daemon_url))
+            .post(format!("{}/get_o_indexes.bin", daemon_url))
             .header("Content-Type", "application/json")
             .json(&serde_json::json!({ "txid": miner_hash }))
             .send()
@@ -311,7 +311,7 @@ impl WowWallet {
 
         // Fallback: query via get_transactions which may include output_indices
         let tx_resp = client
-            .post(&format!("{}/get_transactions", daemon_url))
+            .post(format!("{}/get_transactions", daemon_url))
             .json(&serde_json::json!({
                 "txs_hashes": [miner_hash],
                 "decode_as_json": true,
@@ -353,7 +353,7 @@ impl WowWallet {
         tx_hex: &str,
     ) -> Result<TxHash, WalletError> {
         let resp = client
-            .post(&format!("{}/sendrawtransaction", daemon_url))
+            .post(format!("{}/sendrawtransaction", daemon_url))
             .json(&serde_json::json!({
                 "tx_as_hex": tx_hex,
                 "do_not_relay": false,
@@ -515,7 +515,7 @@ impl WowWallet {
             .collect();
 
         let resp = client
-            .post(&format!("{}/is_key_image_spent", daemon_url))
+            .post(format!("{}/is_key_image_spent", daemon_url))
             .json(&serde_json::json!({ "key_images": key_images }))
             .send()
             .await
@@ -581,7 +581,7 @@ impl CryptoNoteWallet for WowWallet {
             ))?;
 
         // Derive sender's spend public key
-        let sender_spend_point = &**sender_spend * G;
+        let sender_spend_point = **sender_spend * G;
 
         // Step 1: Scan sender's wallet for spendable outputs
         let client = &self.client;
@@ -591,7 +591,7 @@ impl CryptoNoteWallet for WowWallet {
             &self.client,
             &self.daemon_url,
             &sender_spend_point,
-            &**sender_view,
+            sender_view,
             self.scan_from_height,
             current_height,
         )
@@ -635,7 +635,7 @@ impl CryptoNoteWallet for WowWallet {
         let sender_outputs = Self::filter_unspent(
             client,
             &self.daemon_url,
-            &**sender_spend,
+            sender_spend,
             mature_outputs,
         ).await?;
 
@@ -717,7 +717,7 @@ impl CryptoNoteWallet for WowWallet {
         let payments = vec![(recipient_addr, amount)];
 
         // Change goes back to sender's address
-        let sender_view_point = &**sender_view * G;
+        let sender_view_point = **sender_view * G;
         let oxide_sender_spend = wownero_oxide::ed25519::Point::from(sender_spend_point);
         let oxide_sender_view = wownero_oxide::ed25519::Point::from(sender_view_point);
         let sender_address = wownero_wallet::address::MoneroAddress::new(
@@ -868,7 +868,7 @@ impl CryptoNoteWallet for WowWallet {
 
         // Sweep: send (total - estimated_fee) to destination.
         // Monero requires at least 2 outputs, so change goes to destination.
-        let change = wownero_wallet::send::Change::fingerprintable(Some(dest_addr.clone()));
+        let change = wownero_wallet::send::Change::fingerprintable(Some(dest_addr));
         let estimated_fee = fee_rate.calculate_fee_from_weight(2000);
         let sweep_amount = total_amount.saturating_sub(estimated_fee);
         if sweep_amount == 0 {
@@ -969,7 +969,7 @@ impl CryptoNoteWallet for WowWallet {
 
         // Query /get_transactions for the tx status
         let resp = client
-            .post(&format!("{}/get_transactions", self.daemon_url))
+            .post(format!("{}/get_transactions", self.daemon_url))
             .json(&serde_json::json!({
                 "txs_hashes": [tx_hash_hex],
                 "decode_as_json": true,
@@ -1010,11 +1010,7 @@ impl CryptoNoteWallet for WowWallet {
         // Get current height via JSON-RPC
         let current_height = Self::get_chain_height(client, &self.daemon_url).await?;
 
-        let confirmations = if current_height > tx_height {
-            current_height - tx_height
-        } else {
-            0
-        };
+        let confirmations = current_height.saturating_sub(tx_height);
 
         Ok(ConfirmationStatus {
             confirmed: confirmations >= required_confirmations,
@@ -1125,7 +1121,7 @@ impl CryptoNoteWallet for WowWallet {
             Zeroizing::new(<[u8; 32]>::try_from(&hash[..]).expect("SHA-256 is 32 bytes"))
         };
 
-        let change = wownero_wallet::send::Change::fingerprintable(Some(dest_addr.clone()));
+        let change = wownero_wallet::send::Change::fingerprintable(Some(dest_addr));
         let estimated_fee = fee_rate.calculate_fee_from_weight(2000);
         let sweep_amount = total_amount.saturating_sub(estimated_fee);
         if sweep_amount == 0 {
@@ -1189,7 +1185,7 @@ impl CryptoNoteWallet for WowWallet {
 
         let client = &self.client;
         let resp = client
-            .post(&format!("{}/sendrawtransaction", self.daemon_url))
+            .post(format!("{}/sendrawtransaction", self.daemon_url))
             .json(&serde_json::json!({
                 "tx_as_hex": tx_hex,
                 "do_not_relay": false,

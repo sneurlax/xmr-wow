@@ -6,6 +6,8 @@
 //! `todo!()` -- they will be implemented when the wallet adapters are ready.
 //!
 //! All data types, constants, and utility functions are preserved.
+//!
+// todo!() stubs: deferred until monero-oxide port.
 
 use curve25519_dalek::{constants::ED25519_BASEPOINT_TABLE, edwards::EdwardsPoint, scalar::Scalar};
 use serde::{Deserialize, Serialize};
@@ -194,11 +196,14 @@ pub fn view_key_from_spend_scalar(spend_scalar: &Scalar) -> Scalar {
     Scalar::from_bytes_mod_order(view)
 }
 
+/// A single block entry: (height, block_hash, timestamp, [(tx_hash, tx_blob)])
+pub type BlockEntry = (u64, String, u64, Vec<(String, Vec<u8>)>);
+
 /// Pre-fetched block data for pipelined scanning.
 pub struct FetchedBlocks {
     pub start_height: u64,
     pub count: u64,
-    pub blocks: Vec<(u64, String, u64, Vec<(String, Vec<u8>)>)>, // (height, hash, timestamp, [(tx_hash, tx_blob)])
+    pub blocks: Vec<BlockEntry>,
 }
 
 // ---------------------------------------------------------------------------
@@ -219,7 +224,7 @@ pub async fn get_daemon_height(url: &str) -> Result<u64, String> {
         "method": "get_block_count"
     });
     let resp = client
-        .post(&format!("{}/json_rpc", url))
+        .post(format!("{}/json_rpc", url))
         .json(&body)
         .send()
         .await

@@ -5,7 +5,7 @@
 //! for the engine to error on malformed input before crypto is called.
 
 mod helpers;
-use helpers::{bytes32, bytes64, ctx, fail_engine, stub_engine};
+use helpers::{bytes32, ctx, fail_engine, stub_engine};
 use xmr_wow_script::{Opcode, ScriptError};
 
 // -- CheckKeyPair (non-verify: pushes result) ----------------------------------

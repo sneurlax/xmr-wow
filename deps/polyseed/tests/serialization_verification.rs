@@ -1,3 +1,5 @@
+// Vendored upstream test code — lint suppressed
+#![allow(clippy::needless_borrows_for_generic_args, clippy::manual_div_ceil, clippy::identity_op, clippy::erasing_op, dead_code, unused_variables)]
 //! Serialization verification tests.
 
 use polyseed::{Coin, Language, Polyseed, PolyseedError};

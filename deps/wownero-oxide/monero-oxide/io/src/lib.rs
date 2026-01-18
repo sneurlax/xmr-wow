@@ -2,6 +2,8 @@
 #![doc = include_str!("../README.md")]
 #![deny(missing_docs)]
 #![cfg_attr(not(feature = "std"), no_std)]
+// Vendored upstream code — MSRV lint suppressed
+#![allow(clippy::incompatible_msrv)]
 
 use core::fmt::Debug;
 #[allow(unused_imports)]

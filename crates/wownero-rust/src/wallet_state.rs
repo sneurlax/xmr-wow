@@ -236,6 +236,12 @@ pub struct WalletState {
     spent_by_tx: HashMap<String, String>,
 }
 
+impl Default for WalletState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl WalletState {
     pub fn new() -> Self {
         WalletState {
@@ -434,7 +440,7 @@ impl WalletState {
                 } else if let Some(prev_h) = output.spent_height {
                     // Check if same spending transaction (rescan)
                     let same_tx = !tx_hash.is_empty()
-                        && self.spent_by_tx.get(ki).map_or(false, |prev| prev == tx_hash);
+                        && self.spent_by_tx.get(ki).is_some_and(|prev| prev == tx_hash);
                     if same_tx {
                         // Idempotent rescan ; update height to latest observation
                         output.spent_height = Some(height);
@@ -1166,8 +1172,8 @@ mod tests {
         assert_eq!(history[0].0, 200);
         assert!(history.len() < 30);
         assert_eq!(history.last().unwrap().0, 0);
-        for i in 0..10 {
-            assert_eq!(history[i].0, 200 - i as u64);
+        for (i, entry) in history.iter().enumerate().take(10) {
+            assert_eq!(entry.0, 200 - i as u64);
         }
     }
 

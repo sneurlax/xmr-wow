@@ -1,7 +1,7 @@
 //! Tests for script binary serialization and deserialization.
 
 mod helpers;
-use helpers::{bytes32, ctx, stub_engine};
+use helpers::{ctx, stub_engine};
 use xmr_wow_script::{
     deserialize_script, serialize_script, Opcode, ScriptError,
     scripts::swap_escrow::build_swap_escrow_script,

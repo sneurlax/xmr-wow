@@ -2,6 +2,8 @@
 #![doc = include_str!("../README.md")]
 #![deny(missing_docs)]
 #![cfg_attr(not(test), no_std)]
+// Vendored upstream code — MSRV lint suppressed
+#![allow(clippy::incompatible_msrv)]
 
 use std_shims::prelude::*;
 

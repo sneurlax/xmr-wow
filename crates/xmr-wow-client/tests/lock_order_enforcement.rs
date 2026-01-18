@@ -251,8 +251,7 @@ fn test_wow_lock_only_from_joint_address() {
     let (_, bob3) = make_alice_bob(params.clone());
     let (alice3_pub, alice3_proof) = {
         let (a3, _) = SwapState::generate(SwapRole::Alice, params.clone(), &mut OsRng);
-        let pub_proof = extract_pubkey_and_proof(&a3);
-        pub_proof
+        extract_pubkey_and_proof(&a3)
     };
     let bob3_wow = bob3
         .receive_counterparty_key(alice3_pub, &alice3_proof)

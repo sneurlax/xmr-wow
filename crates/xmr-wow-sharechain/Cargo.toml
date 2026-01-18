@@ -6,6 +6,13 @@ edition.workspace   = true
 license.workspace   = true
 publish.workspace   = true
 
+# cargo-udeps: anyhow, async-trait, curve25519-dalek, ed25519-dalek, futures,
+# xmr-wow-crypto, and xmr-wow-script are scaffolded for the escrow verification
+# layer (sharechain-mediated adaptor-sig and script verification).  They are
+# intentionally unused in the current advisory-only model.
+[package.metadata.cargo-udeps.ignore]
+normal = ["anyhow", "async-trait", "curve25519-dalek", "ed25519-dalek", "futures", "xmr-wow-crypto", "xmr-wow-script"]
+
 [features]
 default       = []
 real-crypto   = ["xmr-wow-script/real-crypto"]

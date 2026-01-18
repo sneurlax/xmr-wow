@@ -210,7 +210,7 @@ mod tests {
     #[test]
     fn test_adaptor_pre_sig_verifies() {
         let (a, A) = make_party();
-        let (t, T) = make_party();
+        let (_t, T) = make_party();
         let msg = b"swap-tx-hash-goes-here";
 
         let pre_sig = AdaptorSignature::sign(&a, &A, msg, &T, &mut OsRng);
@@ -222,7 +222,7 @@ mod tests {
         // A pre-sig (R_T, s') should NOT satisfy s'*G == R_T + c*A
         // (it fails the completed-sig check, which requires s*G == R_T + c*A)
         let (a, A) = make_party();
-        let (t, T) = make_party();
+        let (_t, T) = make_party();
         let msg = b"message";
 
         let pre_sig = AdaptorSignature::sign(&a, &A, msg, &T, &mut OsRng);

@@ -4,6 +4,12 @@ version.workspace = true
 edition.workspace = true
 publish.workspace = true
 
+# cargo-udeps: monero-oxide, base58-monero, and futures are declared for the
+# pending monero-oxide wallet-adapter port (scanner.rs / tx_builder.rs stubs).
+# They are intentionally unused until the port is complete.
+[package.metadata.cargo-udeps.ignore]
+normal = ["monero-oxide", "base58-monero", "futures"]
+
 [features]
 default = []
 test-helpers = []
@@ -11,6 +17,7 @@ mock-rpc = []
 
 [dependencies]
 # Crypto backend (dalek v4 via monero-oxide, replaces monero-serai-mirror)
+# Reserved: used by scanner.rs / tx_builder.rs stubs pending wallet-adapter port.
 monero-oxide = { workspace = true }
 curve25519-dalek = { workspace = true }
 

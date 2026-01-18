@@ -1,6 +1,8 @@
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![doc = include_str!("../README.md")]
 #![deny(missing_docs)]
+// Vendored upstream code — lints suppressed
+#![allow(clippy::incompatible_msrv, clippy::large_enum_variant)]
 
 use core::future::Future;
 use std::{sync::Arc, io::Read, time::Duration};

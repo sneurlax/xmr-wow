@@ -496,7 +496,7 @@ mod tests {
         let chain_id = resp["result"]["chain_id"].as_str().unwrap().to_string();
         assert_eq!(chain_id.len(), 64, "chain_id should be 64 hex chars");
         // Must be valid hex
-        hex::decode(&chain_id).expect("chain_id must be valid hex");
+        assert!(hex::decode(&chain_id).is_ok(), "chain_id must be valid hex");
     }
 
     #[tokio::test]
