@@ -2,6 +2,7 @@
 name = "wownero-rust"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 publish.workspace = true
 
 # cargo-udeps: wownero-oxide, base58-monero, and futures are declared for the
