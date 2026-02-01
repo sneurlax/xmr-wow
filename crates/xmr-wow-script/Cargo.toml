@@ -48,3 +48,7 @@ required-features = ["stub-crypto"]
 [[test]]
 name = "serialization"
 required-features = ["stub-crypto"]
+
+[[test]]
+name = "real_crypto_roundtrip"
+required-features = ["real-crypto"]
