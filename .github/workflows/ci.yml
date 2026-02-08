@@ -1,0 +1,94 @@
+# CI configuration for xmr-wow atomic swap project.
+#
+# Design notes:
+#
+# 1. xmr-wow-script requires a SEPARATE test step with --features stub-crypto.
+#    Without it, all 50 script VM tests are SILENTLY SKIPPED by
+#    `cargo test --workspace` — cargo omits targets with unsatisfied
+#    required-features without any warning or error. The CI must
+#    explicitly invoke the feature-flagged run to avoid a false-green.
+#
+# 2. Integration tests run with --test-threads=1 (serial execution).
+#    The xmr-wow-wallet and xmr-wow-integration crates use cuprate-simnet
+#    and wownero-simnet (in-process daemon emulators). These consume
+#    significant CPU and can timeout or deadlock under default parallel
+#    test scheduling on loaded CI runners. Serial mode adds ~40s but
+#    eliminates simnet flakiness.
+#
+# 3. Live-daemon tests (LT-02 / TEST-04) are opt-in ONLY.
+#    Tests requiring real XMR/WOW daemons (07_live_network_harness.rs,
+#    wallet_live_privileged.rs) are gated behind --features privileged-live-tests
+#    and require funded wallets and synced daemons. They are never run in the
+#    default CI lane. See crates/xmr-wow-integration/tests_privileged/ for
+#    the manual execution procedure.
+#
+# 4. Bulletproofs tests are excluded from the default CI lane.
+#    wownero-bulletproofs tests take 300-600s each (ZK proof generation).
+#    They are vendored cryptographic primitives and are stable/deterministic.
+#    Run them manually: `cargo test -p wownero-bulletproofs`
+
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main, staging]
+
+jobs:
+  test:
+    name: Test and Lint
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust stable toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      # --- Core workspace tests ---
+
+      - name: Test workspace
+        # Runs all workspace crates with default features.
+        # NOTE: This silently skips xmr-wow-script tests (required-features).
+        # The next step covers the script VM explicitly.
+        run: cargo test --workspace
+
+      - name: Test xmr-wow-script (stub-crypto)
+        # CRITICAL: Without this step, all 50 script VM tests are skipped.
+        # The stub-crypto feature enables StubBackend (always-pass) to test
+        # VM control-flow, stack manipulation, timelocks, and serialization
+        # without real crypto deps. This is the only way to run script tests.
+        run: cargo test -p xmr-wow-script --features stub-crypto
+
+      - name: Test xmr-wow-script (real-crypto)
+        # Verifies Ed25519Backend with real curve25519-dalek scalar multiplication.
+        # This is the ONLY test of the actual cryptographic correctness of
+        # OP_CHECKKEYPAIR and OP_CHECKKEYPAIRVERIFY — the atomic swap security anchor.
+        run: cargo test -p xmr-wow-script --features real-crypto --test real_crypto_roundtrip
+
+      - name: Integration tests (serial for simnet stability)
+        # Run wallet and integration crates sequentially to avoid resource
+        # contention between cuprate-simnet and wownero-simnet instances.
+        # These tests take ~40s in debug mode; stable under serial scheduling.
+        run: >
+          cargo test -p xmr-wow-wallet -p xmr-wow-integration
+          -- --test-threads=1
+
+      # --- Code quality ---
+
+      - name: Clippy
+        run: cargo clippy --all-targets --workspace -- -D warnings
+
+      # --- Supply chain ---
+
+      - name: Install cargo-deny
+        run: cargo install cargo-deny --locked
+
+      - name: Deny check
+        # Checks: advisories (known CVEs), licenses (allow-list), bans
+        # (duplicate versions at deny level). Config: deny.toml
+        run: cargo deny check
