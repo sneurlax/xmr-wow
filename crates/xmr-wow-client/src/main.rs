@@ -1,7 +1,9 @@
 //! XMR-WOW atomic swap CLI.
 //!
-//! Commands cover setup, lock coordination, claim flow, refunds, and wallet
-//! helpers. Swap messages use `xmrwow1:<base64>`, and all signing stays local.
+//! Commands cover setup, lock coordination, claim flow, and wallet helpers.
+//! Legacy refund commands remain implemented only to fail closed and are 
+//! hidden from normal CLI help.  Swap messages use `xmrwow1:<base64>` and all 
+//! signing stays local.
 
 use clap::{Parser, Subcommand};
 use curve25519_dalek::constants::ED25519_BASEPOINT_POINT as G;
@@ -172,7 +174,8 @@ enum Command {
         #[arg(long)]
         spend_key: String,
     },
-    /// Refund locked funds after timelock expires
+    /// Legacy refund command kept only for fail-closed compatibility.
+    #[command(hide = true)]
     Refund {
         #[arg(long)]
         swap_id: String,
@@ -195,14 +198,15 @@ enum Command {
         #[arg(long)]
         mnemonic: Option<String>,
     },
-    /// Emit the local refund secret for the counterparty.
-    /// Only send it after both lock transactions are confirmed.
+    /// Legacy refund command kept only for fail-closed compatibility.
+    #[command(hide = true)]
     GenerateRefundCooperate {
         /// Swap ID (hex)
         #[arg(long)]
         swap_id: String,
     },
-    /// Build and store a timelocked refund transaction.
+    /// Legacy refund command kept only for fail-closed compatibility.
+    #[command(hide = true)]
     BuildRefund {
         /// Swap ID (hex)
         #[arg(long)]
@@ -223,7 +227,8 @@ enum Command {
         #[arg(long, default_value = "0")]
         scan_from: u64,
     },
-    /// Broadcast the stored refund transaction after expiry.
+    /// Legacy refund command kept only for fail-closed compatibility.
+    #[command(hide = true)]
     BroadcastRefund {
         /// Swap ID (hex)
         #[arg(long)]
