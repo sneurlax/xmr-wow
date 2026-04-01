@@ -16,12 +16,15 @@ description and produces Shadow-compatible configs plus Python agent scripts.
 It handles IP allocation, topology setup, daemon/wallet process management,
 and agent lifecycle.
 
-**Why this matters for XMR-WOW:** While the in-process simnet tests (cuprate-simnet)
-prove protocol correctness with instant blocks and no network overhead, Shadow
-simulations validate that the swap protocol works under realistic conditions:
-network latency, message reordering, node restarts, and partition scenarios.
-Shadow runs real `monerod` binaries with real consensus, giving confidence that
-the protocol survives real-world networking.
+**Why this matters for XMR-WOW:** While the in-process simnet tests prove swap
+correctness with instant blocks and no network overhead, Shadow simulations
+validate that the 9-step operator flow and its refund-safety assumptions survive
+realistic networking: latency, message reordering, restarts, and partitions.
+Shadow runs real daemon binaries with real consensus rules.
+
+These simulations are validation artifacts. They are not operator-facing live
+walkthroughs and they do not replace the refund-readiness checks documented in
+`docs/DEPLOYMENT.md`.
 
 ## Prerequisites
 
@@ -34,16 +37,16 @@ the protocol survives real-world networking.
 
 ## Scenarios
 
-### `shadow-swap.yaml` -- CLI-Driven Happy Path
+### `shadow-swap.yaml` -- CLI-Driven 9-Step Flow
 
 Runs the real `xmr-wow` binary as a subprocess inside Shadow through
 `agents/xmr_wow_cli_agent.py`. This is the highest-level simulation artifact in
-the repo: message exchange happens through shared files, but locking, claiming,
-resume, and refund behavior are exercised through the real CLI.
+the repo: message exchange happens through shared files, but lock, claim,
+resume, and refund-gating behavior are exercised through the real CLI.
 
-### `swap-scenario.yaml` -- Happy-Path Atomic Swap
+### `swap-scenario.yaml` -- 9-Step Atomic Swap
 
-Models a complete atomic swap between Alice (XMR) and Bob (WOW):
+Models the supported swap ordering between Alice (XMR) and Bob (WOW):
 
 1. Two chains mine maturity blocks (76 blocks each)
 2. Alice and Bob exchange Ed25519 key contributions
@@ -55,13 +58,13 @@ Models a complete atomic swap between Alice (XMR) and Bob (WOW):
 Agents: 2 miners (one per chain), Alice, Bob, miner-distributor, monitor.
 Duration: 4 hours simulated time.
 
-### `shadow-network-partition.yaml` -- CLI-Driven Refund Path
+### `shadow-network-partition.yaml` -- CLI-Driven Refund Safety
 
 Uses the same CLI-driving agent, but puts both parties in `refund_test` mode so
-the simulation focuses on `resume` and `refund` once the counterparty stops
-advancing the swap.
+the simulation focuses on checkpoint persistence, `resume`, and refund safety
+once the counterparty stops advancing the swap.
 
-### `network-partition.yaml` -- Refund Path Under Network Partition
+### `network-partition.yaml` -- Refund Safety Under Network Partition
 
 Tests the safety properties when a counterparty goes offline:
 
@@ -147,7 +150,8 @@ protocol as a state machine:
 
 The agent communicates with its counterparty via JSON files in monerosim's
 shared state directory (`/tmp/monerosim_shared/`). In production, the XMR-WOW
-swap uses manual copy-paste of protocol messages.
+swap uses manual exchange of protocol messages, but only within the supported
+9-step flow and only when refund checkpoints are ready.
 
 Each method maps to a protocol phase:
 - `generate_keys()` -- Phase 1: create Ed25519 key contribution
