@@ -177,16 +177,98 @@ impl SwapChain {
             full_ids.insert(full_id, ());
         }
 
-        // Update tip if this share has higher cumulative difficulty
+        // Update tip if this share has higher cumulative difficulty.
+        // When the new tip is on a different branch from the old tip (reorg),
+        // reverse the escrow ops of every orphaned share back to the common
+        // ancestor before advancing the tip pointer.
         let became_tip = {
-            let mut tip = self.tip.write();
-            let shares  = self.shares.read();
+            let mut tip    = self.tip.write();
+            let shares_map = self.shares.read();
+
             let current_cum = tip
-                .and_then(|t| shares.get(&t))
+                .and_then(|t| shares_map.get(&t))
                 .map(|s| s.cumulative_difficulty)
                 .unwrap_or(Difficulty::ZERO);
 
             if share.cumulative_difficulty > current_cum {
+                // Detect reorg: the new share's parent must be an ancestor of
+                // the current tip.  If the old tip is NOT an ancestor of the
+                // new tip we have a fork switch and must revert orphaned escrow
+                // ops.
+                if let Some(old_tip_id) = *tip {
+                    // Collect the ancestor set of the new share (back to height 0
+                    // or until we find the old tip).
+                    let mut new_ancestors: std::collections::HashSet<[u8; 32]> =
+                        std::collections::HashSet::new();
+                    let mut cursor = share_id;
+                    loop {
+                        new_ancestors.insert(cursor);
+                        if cursor == old_tip_id {
+                            break; // old tip is an ancestor: no reorg needed
+                        }
+                        match shares_map.get(&cursor) {
+                            Some(s) if s.height > 0 => cursor = s.parent,
+                            _ => break, // reached genesis or missing parent
+                        }
+                    }
+
+                    if !new_ancestors.contains(&old_tip_id) {
+                        // Full reorg: walk the old chain back to find the
+                        // common ancestor, collecting orphaned shares.
+                        let mut orphaned: Vec<[u8; 32]> = Vec::new();
+                        let mut old_cursor = old_tip_id;
+                        loop {
+                            if new_ancestors.contains(&old_cursor) {
+                                break; // common ancestor found
+                            }
+                            orphaned.push(old_cursor);
+                            match shares_map.get(&old_cursor) {
+                                Some(s) if s.height > 0 => old_cursor = s.parent,
+                                _ => break,
+                            }
+                        }
+
+                        // Revert escrow ops for orphaned shares (newest -> oldest).
+                        // We need the EscrowCommitment to restore Open state when
+                        // reverting a Claim or Refund.  Build a map of swap_id ->
+                        // EscrowCommitment from all Open ops on the orphaned fork.
+                        let mut open_map: std::collections::HashMap<[u8; 32], crate::share::EscrowCommitment> =
+                            std::collections::HashMap::new();
+                        for &sid in &orphaned {
+                            if let Some(s) = shares_map.get(&sid) {
+                                for op in &s.escrow_ops {
+                                    if let crate::share::EscrowOp::Open(c) = op {
+                                        open_map.insert(c.swap_id, c.clone());
+                                    }
+                                }
+                            }
+                        }
+
+                        let mut idx = self.escrow_index.write();
+                        for sid in orphaned {
+                            if let Some(s) = shares_map.get(&sid) {
+                                // Revert ops in reverse order (last applied first).
+                                for op in s.escrow_ops.iter().rev() {
+                                    let commitment = match op {
+                                        crate::share::EscrowOp::Open(_) => None,
+                                        crate::share::EscrowOp::Claim { swap_id, .. }
+                                        | crate::share::EscrowOp::Refund { swap_id, .. } => {
+                                            open_map.get(swap_id).or_else(|| {
+                                                // The Open op may have been in an earlier
+                                                // share on the same orphaned fork; the map
+                                                // already covers all orphaned shares so this
+                                                // is the full available set.
+                                                None
+                                            })
+                                        }
+                                    };
+                                    idx.revert(op, commitment.map(|c| c as &_));
+                                }
+                            }
+                        }
+                    }
+                }
+
                 *tip = Some(share_id);
                 true
             } else {
@@ -264,11 +346,9 @@ mod tests {
 
     #[test]
     fn share_without_valid_pow_rejected() {
-        // difficulty=100 means most nonces will NOT satisfy PoW;
-        // nonce=0 almost certainly fails. The test asserts the enforcement is present.
         let chain = SwapChain::new(Difficulty::from_u64(100));
         let mut g = SwapShare::genesis(Difficulty::from_u64(100));
-        // Force nonce=0 and check that it fails pow (if by luck it passes, increment until it fails)
+        // find a nonce that fails PoW
         let mut found_bad = false;
         for n in 0u32..1000 {
             g.nonce = n;
@@ -294,10 +374,9 @@ mod tests {
     fn genesis_share_requires_pow() {
         let chain = SwapChain::new(Difficulty::from_u64(1));
         let mut g = SwapShare::genesis(Difficulty::from_u64(1));
-        // difficulty=1 means every hash passes check_pow, so pick any nonce
         grind_nonce(&mut g);
         assert!(chain.add_share(g).is_ok());
-        // Now test that a genesis with zero difficulty is still rejected before reaching PoW check
+        // zero difficulty still rejected
         let chain2 = SwapChain::new(Difficulty::from_u64(100));
         let mut bad_g = SwapShare::genesis(Difficulty::from_u64(100));
         // find a nonce that fails PoW
@@ -442,6 +521,166 @@ mod tests {
         bad.cumulative_difficulty = Difficulty::from_u64(9999);
         let err = chain.add_share(bad).unwrap_err();
         assert_eq!(err, ChainError::InvalidCumulativeDifficulty);
+    }
+
+    /// Build a share with escrow ops and grind the nonce.
+    fn make_share_with_ops(
+        parent: Hash,
+        height: u64,
+        parent_cumulative: Difficulty,
+        diff: Difficulty,
+        ops: Vec<crate::share::EscrowOp>,
+    ) -> SwapShare {
+        let mut s = SwapShare {
+            parent,
+            uncles: Vec::new(),
+            height,
+            difficulty: diff,
+            cumulative_difficulty: parent_cumulative.wrapping_add(diff),
+            timestamp: height * 10,
+            nonce: 0,
+            escrow_ops: ops,
+            escrow_merkle_root: [height as u8; 32],
+            pow_proof: None,
+        };
+        grind_nonce(&mut s);
+        s
+    }
+
+    /// Reorg must revert escrow ops from orphaned fork.
+    #[test]
+    fn escrow_ops_reverted_on_reorg() {
+        let chain = SwapChain::new(MIN_DIFF);
+        let diff_low  = Difficulty::from_u64(1);
+        let diff_high = Difficulty::from_u64(1000);
+
+        // Genesis
+        let g = genesis(diff_low);
+        let g_id  = g.id();
+        let g_cum = g.cumulative_difficulty;
+        chain.add_share(g).unwrap();
+
+        // Fork A: extends genesis at low difficulty, carries an Open escrow op.
+        let swap_aa = [0xAAu8; 32];
+        let commitment_aa = EscrowCommitment {
+            swap_id:         swap_aa,
+            alice_sc_pubkey: [1u8; 32],
+            bob_sc_pubkey:   [2u8; 32],
+            k_b_expected:    [3u8; 32],
+            k_b_prime:       [4u8; 32],
+            claim_timelock:  100,
+            refund_timelock: 200,
+            amount:          1_000,
+        };
+        let fork_a = make_share_with_ops(
+            g_id, 1, g_cum, diff_low,
+            vec![EscrowOp::Open(commitment_aa.clone())],
+        );
+        let fork_a_id = fork_a.id();
+        let became_tip = chain.add_share(fork_a).unwrap();
+        assert!(became_tip, "fork_a should become tip");
+
+        {
+            let idx = chain.escrow_index.read();
+            assert_eq!(idx.open_count(), 1, "Open(0xAA) should be in index after fork_a");
+            assert!(idx.get(&swap_aa).is_some());
+        }
+
+        // fork_b: higher difficulty, triggers reorg
+        let mut fork_b = make_share_with_ops(
+            g_id, 1, g_cum, diff_high,
+            vec![],
+        );
+        fork_b.escrow_merkle_root = [0xBBu8; 32];
+        fork_b.cumulative_difficulty = g_cum.wrapping_add(diff_high);
+        grind_nonce(&mut fork_b);
+
+        let fork_b_id = fork_b.id();
+        let became_tip = chain.add_share(fork_b).unwrap();
+        assert!(became_tip, "fork_b should become new tip (reorg)");
+        assert_eq!(chain.tip_id(), Some(fork_b_id), "tip must be fork_b");
+        assert_ne!(chain.tip_id(), Some(fork_a_id), "fork_a must no longer be tip");
+
+        // orphaned Open(0xAA) must have been reverted
+        {
+            let idx = chain.escrow_index.read();
+            assert_eq!(
+                idx.open_count(), 0,
+                "Open(0xAA) must be rolled back after reorg that orphans fork_a"
+            );
+            assert!(
+                idx.get(&swap_aa).is_none(),
+                "swap 0xAA must not appear in index after reorg"
+            );
+        }
+    }
+
+    /// Reorg must also revert Claim ops from orphaned fork.
+    #[test]
+    fn claim_op_reverted_on_reorg() {
+        let chain = SwapChain::new(MIN_DIFF);
+        let diff_low  = Difficulty::from_u64(1);
+        let diff_high = Difficulty::from_u64(10_000);
+
+        // Genesis
+        let g = genesis(diff_low);
+        let g_id  = g.id();
+        let g_cum = g.cumulative_difficulty;
+        chain.add_share(g).unwrap();
+
+        let swap_cc = [0xCCu8; 32];
+        let k_b     = [0x55u8; 32];
+        let commitment_cc = EscrowCommitment {
+            swap_id:         swap_cc,
+            alice_sc_pubkey: [1u8; 32],
+            bob_sc_pubkey:   [2u8; 32],
+            k_b_expected:    k_b,
+            k_b_prime:       [4u8; 32],
+            claim_timelock:  100,
+            refund_timelock: 200,
+            amount:          2_000,
+        };
+
+        // fork_a_1: Open(0xCC)
+        let fa1 = make_share_with_ops(
+            g_id, 1, g_cum, diff_low,
+            vec![EscrowOp::Open(commitment_cc.clone())],
+        );
+        let fa1_id  = fa1.id();
+        let fa1_cum = fa1.cumulative_difficulty;
+        chain.add_share(fa1).unwrap();
+
+        // fork_a_2: Claim(0xCC)
+        let fa2 = make_share_with_ops(
+            fa1_id, 2, fa1_cum, diff_low,
+            vec![EscrowOp::Claim { swap_id: swap_cc, k_b }],
+        );
+        chain.add_share(fa2).unwrap();
+
+        // Confirm Claimed state is present.
+        {
+            let idx = chain.escrow_index.read();
+            assert!(matches!(
+                idx.get(&swap_cc),
+                Some(crate::escrow::EscrowState::Claimed { .. })
+            ), "swap 0xCC should be Claimed while fork_a is canonical");
+        }
+
+        // fork_b_1: heavy share from genesis -> reorg
+        let mut fb1 = make_share_with_ops(g_id, 1, g_cum, diff_high, vec![]);
+        fb1.escrow_merkle_root = [0xDDu8; 32];
+        fb1.cumulative_difficulty = g_cum.wrapping_add(diff_high);
+        grind_nonce(&mut fb1);
+        chain.add_share(fb1).unwrap();
+
+        // Both Open and Claim from fork_a must be gone.
+        {
+            let idx = chain.escrow_index.read();
+            assert_eq!(idx.total_count(), 0,
+                "all fork_a escrow entries must be gone after reorg");
+            assert!(idx.get(&swap_cc).is_none(),
+                "swap 0xCC must not appear in index after reorg");
+        }
     }
 
     #[test]

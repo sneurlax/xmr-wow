@@ -130,6 +130,30 @@ impl EscrowIndex {
     pub fn total_count(&self) -> usize {
         self.states.len()
     }
+
+    /// Reverse an escrow op during chain reorg. Open->remove, Claim/Refund->restore to Open.
+    /// `open_commitment` is needed for Claim/Refund to restore the original Open state.
+    /// Idempotent: silently skips entries no longer present.
+    pub fn revert(&mut self, op: &EscrowOp, open_commitment: Option<&EscrowCommitment>) {
+        match op {
+            EscrowOp::Open(commitment) => {
+                self.states.remove(&commitment.swap_id);
+            }
+
+            EscrowOp::Claim { swap_id, .. } => {
+                if let Some(commitment) = open_commitment {
+                    self.states.insert(*swap_id, EscrowState::Open(commitment.clone()));
+                }
+            }
+
+            EscrowOp::Refund { swap_id, .. } => {
+                // Undo a Refund: restore to Open using the commitment supplied by the caller.
+                if let Some(commitment) = open_commitment {
+                    self.states.insert(*swap_id, EscrowState::Open(commitment.clone()));
+                }
+            }
+        }
+    }
 }
 
 // --- Tests --------------------------------------------------------------------
