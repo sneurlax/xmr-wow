@@ -6,3 +6,5 @@ Cargo.lock
 *.secret
 swap-*.log
 swap-state-*.json
+.env
+*.pem
