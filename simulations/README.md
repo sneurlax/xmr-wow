@@ -28,10 +28,17 @@ walkthroughs and they do not replace the refund-readiness checks documented in
 
 ## Prerequisites
 
+Set the following environment variables or substitute the paths below with your local checkout locations:
+
+```bash
+export SHADOWFORMONERO_DIR=<path-to-your-shadowformonero-checkout>
+export MONEROSIM_DIR=<path-to-your-monerosim-checkout>
+```
+
 - **Shadow**: Install from [shadow.github.io](https://shadow.github.io/docs/guide/install_dependencies.html)
-- **monerod compiled for Shadow**: From `shadowformonero` at `/home/user/src/monero/shadowformonero/`
+- **monerod compiled for Shadow**: From `shadowformonero` at `$SHADOWFORMONERO_DIR`
   (Shadow requires binaries compiled with its interposition library)
-- **monerosim**: Configuration generator at `/home/user/src/monero/monerosim/`
+- **monerosim**: Configuration generator at `$MONEROSIM_DIR`
 - **Python 3.x** with `requests` library (for agent scripts)
 - **monero-wallet-rpc**: Wallet RPC binary (from same Shadow-compatible build)
 
@@ -83,8 +90,8 @@ Duration: 6 hours simulated time.
 
 ```bash
 # 1. Generate Shadow config from monerosim YAML
-cd /home/user/src/monero/monerosim
-cargo run -- generate ../swap/xmr-wow/simulations/swap-scenario.yaml -o /tmp/swap-sim
+cd $MONEROSIM_DIR
+cargo run -- generate <XMR_WOW_REPO>/simulations/swap-scenario.yaml -o /tmp/swap-sim
 
 # 2. Run Shadow simulation
 shadow /tmp/swap-sim/shadow.yaml
@@ -95,22 +102,24 @@ shadow /tmp/swap-sim/shadow.yaml
 # Swap results are in /tmp/monerosim_shared/swap_state_*_result.json
 ```
 
+Replace `<XMR_WOW_REPO>` with the absolute path to your xmr-wow checkout, or use a relative path from `$MONEROSIM_DIR` (e.g., `../swap/xmr-wow`).
+
 For the refund scenario:
 
 ```bash
-cd /home/user/src/monero/monerosim
-cargo run -- generate ../swap/xmr-wow/simulations/network-partition.yaml -o /tmp/refund-sim
+cd $MONEROSIM_DIR
+cargo run -- generate <XMR_WOW_REPO>/simulations/network-partition.yaml -o /tmp/refund-sim
 shadow /tmp/refund-sim/shadow.yaml
 ```
 
 For the CLI-driven scenarios:
 
 ```bash
-cd /home/user/src/monero/monerosim
-cargo run -- generate ../swap/xmr-wow/simulations/shadow-swap.yaml -o /tmp/shadow-cli-swap
+cd $MONEROSIM_DIR
+cargo run -- generate <XMR_WOW_REPO>/simulations/shadow-swap.yaml -o /tmp/shadow-cli-swap
 shadow /tmp/shadow-cli-swap/shadow.yaml
 
-cargo run -- generate ../swap/xmr-wow/simulations/shadow-network-partition.yaml -o /tmp/shadow-cli-refund
+cargo run -- generate <XMR_WOW_REPO>/simulations/shadow-network-partition.yaml -o /tmp/shadow-cli-refund
 shadow /tmp/shadow-cli-refund/shadow.yaml
 ```
 
