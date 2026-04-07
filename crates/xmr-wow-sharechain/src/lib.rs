@@ -6,6 +6,7 @@ pub mod escrow;
 pub mod chain;
 pub mod p2p;
 pub mod mm_rpc;
+pub mod coord_store;
 
 // -- Top-level re-exports ------------------------------------------------------
 
@@ -15,3 +16,4 @@ pub use share::{
 pub use chain::{ChainError, SwapChain, CONSENSUS_ID};
 pub use escrow::{EscrowError, EscrowIndex, EscrowState};
 pub use mm_rpc::{merge_mining_router, merge_mining_router_with_connect_info};
+pub use coord_store::{CoordMessageStore, BroadcastRegistry};
