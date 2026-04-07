@@ -45,6 +45,42 @@ fn sample_open_op(swap_id: [u8; 32]) -> EscrowOp {
 }
 
 #[tokio::test]
+async fn node_client_coord_message_round_trip() {
+    let chain = Arc::new(SwapChain::new(Difficulty::from_u64(1)));
+    let server = spawn_rpc_server(chain).await;
+    let client = NodeClient::new(&server.url);
+    let swap_id = [0x22u8; 32];
+
+    let idx0 = client.publish_coord_message(&swap_id, vec![1]).await.unwrap();
+    assert_eq!(idx0, 0, "first message index must be 0");
+
+    let idx1 = client.publish_coord_message(&swap_id, vec![2]).await.unwrap();
+    assert_eq!(idx1, 1, "second message index must be 1");
+
+    let idx2 = client.publish_coord_message(&swap_id, vec![3]).await.unwrap();
+    assert_eq!(idx2, 2, "third message index must be 2");
+
+    let (msgs, next) = client.poll_coord_messages(&swap_id, 0).await.unwrap();
+    assert_eq!(msgs.len(), 3, "poll from 0 must return all 3 messages");
+    assert_eq!(next, 3, "next_index must be 3");
+
+    let (msgs2, next2) = client.poll_coord_messages(&swap_id, 2).await.unwrap();
+    assert_eq!(msgs2.len(), 1, "poll from 2 must return 1 message");
+    assert_eq!(msgs2[0], vec![3u8], "last message payload must be [3]");
+    assert_eq!(next2, 3, "next_index must still be 3");
+
+    let (msgs3, next3) = client.poll_coord_messages(&swap_id, 3).await.unwrap();
+    assert_eq!(msgs3.len(), 0, "poll beyond end must return empty");
+    assert_eq!(next3, 3, "next_index at end must be 3");
+
+    let replayed = client.replay_coord_messages(&swap_id).await.unwrap();
+    assert_eq!(replayed.len(), 3, "replay must return all 3 messages");
+    assert_eq!(replayed[0], vec![1u8]);
+    assert_eq!(replayed[1], vec![2u8]);
+    assert_eq!(replayed[2], vec![3u8]);
+}
+
+#[tokio::test]
 async fn node_client_round_trips_against_sharechain_rpc() {
     let chain = Arc::new(SwapChain::new(Difficulty::from_u64(1)));
     let server = spawn_rpc_server(chain).await;
