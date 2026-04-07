@@ -415,7 +415,14 @@ impl XmrWallet {
 
         // Scan blocks in range (batch-friendly: scan one block at a time)
         for height in from_height..to_height {
-            let scannable = Self::fetch_scannable_block(client, daemon_url, height).await?;
+            let scannable = match Self::fetch_scannable_block(client, daemon_url, height).await {
+                Ok(s) => s,
+                Err(WalletError::ScanFailed(msg)) if msg.contains("parse") || msg.contains("fill whole buffer") || msg.contains("deserialize") => {
+                    tracing::debug!(target: "xmr_wallet", height = height, error = %msg, "skipped unparseable block");
+                    continue;
+                }
+                Err(e) => return Err(e),
+            };
 
             match scanner.scan(scannable) {
                 Ok(timelocked) => {
