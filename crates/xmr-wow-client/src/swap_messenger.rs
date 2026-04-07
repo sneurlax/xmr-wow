@@ -12,6 +12,7 @@
 use async_trait::async_trait;
 
 use crate::coord_message::CoordMessage;
+use crate::node_client::NodeClient;
 
 /// Errors produced by SwapMessenger operations.
 #[derive(Debug, thiserror::Error)]
@@ -57,16 +58,29 @@ pub struct SharechainMessenger {
 
 #[async_trait]
 impl SwapMessenger for SharechainMessenger {
-    async fn send(&self, _msg: CoordMessage) -> Result<(), MessengerError> {
-        Err(MessengerError::Transport(
-            "sharechain transport not yet implemented".into(),
-        ))
+    async fn send(&self, msg: CoordMessage) -> Result<(), MessengerError> {
+        let raw = serde_json::to_vec(&msg)
+            .map_err(|e| MessengerError::Serialization(e.to_string()))?;
+        let client = NodeClient::new(&self.node_url);
+        client.publish_coord_message(&msg.swap_id, raw)
+            .await
+            .map_err(|e| MessengerError::Transport(e.to_string()))?;
+        Ok(())
     }
 
-    async fn receive(&self, _swap_id: &[u8; 32]) -> Result<Option<CoordMessage>, MessengerError> {
-        Err(MessengerError::Transport(
-            "sharechain transport not yet implemented".into(),
-        ))
+    async fn receive(&self, swap_id: &[u8; 32]) -> Result<Option<CoordMessage>, MessengerError> {
+        let client = NodeClient::new(&self.node_url);
+        let (msgs, _next) = client.poll_coord_messages(swap_id, 0)
+            .await
+            .map_err(|e| MessengerError::Transport(e.to_string()))?;
+        match msgs.into_iter().next() {
+            None => Ok(None),
+            Some(raw) => {
+                let coord: CoordMessage = serde_json::from_slice(&raw)
+                    .map_err(|e| MessengerError::Serialization(e.to_string()))?;
+                Ok(Some(coord))
+            }
+        }
     }
 }
 
