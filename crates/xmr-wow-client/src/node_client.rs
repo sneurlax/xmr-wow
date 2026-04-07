@@ -51,6 +51,44 @@ impl NodeClient {
         let height = result["height"].as_u64().unwrap_or(0);
         Ok(height)
     }
+
+    /// Publish a coordination message for a swap; returns the 0-based insertion index.
+    pub async fn publish_coord_message(&self, swap_id: &[u8; 32], payload: Vec<u8>) -> anyhow::Result<usize> {
+        let params = json!({ "swap_id": hex::encode(swap_id), "payload": payload });
+        let result: Value = rpc_call(
+            &self.http,
+            &format!("{}/json_rpc", self.base_url),
+            "publish_coord_message",
+            params,
+        ).await?;
+        Ok(result["index"].as_u64().unwrap_or(0) as usize)
+    }
+
+    /// Poll for coordination messages after `after_index`; returns (messages, next_index).
+    pub async fn poll_coord_messages(&self, swap_id: &[u8; 32], after_index: usize) -> anyhow::Result<(Vec<Vec<u8>>, usize)> {
+        let params = json!({ "swap_id": hex::encode(swap_id), "after_index": after_index });
+        let result: Value = rpc_call(
+            &self.http,
+            &format!("{}/json_rpc", self.base_url),
+            "poll_coord_messages",
+            params,
+        ).await?;
+        let msgs: Vec<Vec<u8>> = serde_json::from_value(result["messages"].clone())?;
+        let next = result["next_index"].as_u64().unwrap_or(0) as usize;
+        Ok((msgs, next))
+    }
+
+    /// Replay all coordination messages for a swap in insertion order.
+    pub async fn replay_coord_messages(&self, swap_id: &[u8; 32]) -> anyhow::Result<Vec<Vec<u8>>> {
+        let params = json!({ "swap_id": hex::encode(swap_id) });
+        let result: Value = rpc_call(
+            &self.http,
+            &format!("{}/json_rpc", self.base_url),
+            "replay_coord_messages",
+            params,
+        ).await?;
+        Ok(serde_json::from_value(result["messages"].clone())?)
+    }
 }
 
 /// Response from get_swap_status.
