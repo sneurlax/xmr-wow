@@ -62,10 +62,10 @@ pub fn validate_timelocks(
             "lock period too short (min 10 blocks)".into(),
         ));
     }
-    if wow_refund_height <= xmr_refund_height + MIN_RESPONSE_BLOCKS {
+    if wow_lock_blocks <= xmr_lock_blocks + MIN_RESPONSE_BLOCKS {
         return Err(SwapError::InvalidTimelock(format!(
-            "WOW refund height ({}) must be > XMR refund height ({}) + MIN_RESPONSE_BLOCKS ({})",
-            wow_refund_height, xmr_refund_height, MIN_RESPONSE_BLOCKS
+            "WOW lock blocks ({}) must be > XMR lock blocks ({}) + MIN_RESPONSE_BLOCKS ({})",
+            wow_lock_blocks, xmr_lock_blocks, MIN_RESPONSE_BLOCKS
         )));
     }
     Ok((xmr_refund_height, wow_refund_height))
@@ -2058,11 +2058,23 @@ mod tests {
 
     #[test]
     fn validate_timelocks_fails_ordering() {
-        // xmr_refund_height=300, wow_refund_height=300 => 300 <= 300 + 100 = 400 => fail
+        // wow_lock_blocks=200 <= xmr_lock_blocks=200 + 100 => fail
         let result = validate_timelocks(100, 100, 200, 200);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("must be >"), "error: {err}");
+    }
+
+    #[test]
+    fn validate_timelocks_succeeds_cross_chain_height_mismatch() {
+        // Regression: XMR stagenet at ~2M blocks, WOW mainnet at ~828K.
+        // Old code compared absolute heights and would fail here even though
+        // wow_lock_blocks (200) > xmr_lock_blocks (50) + MIN_RESPONSE_BLOCKS (100).
+        let result = validate_timelocks(2_092_835, 828_302, 50, 200);
+        assert!(result.is_ok(), "should pass: {result:?}");
+        let (xmr_h, wow_h) = result.unwrap();
+        assert_eq!(xmr_h, 2_092_885);
+        assert_eq!(wow_h, 828_502);
     }
 
     #[test]

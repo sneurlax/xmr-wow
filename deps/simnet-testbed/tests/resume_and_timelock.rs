@@ -179,41 +179,42 @@ async fn timelock_boundary_exact() {
     );
 }
 
-/// Timelock ordering: XMR refund height must be sufficiently greater than
-/// WOW refund height to give Alice time to claim WOW before XMR refund.
+/// Timelock ordering: WOW lock duration must be sufficiently greater than
+/// XMR lock duration because Bob locks WOW first and needs a longer refund
+/// window so Alice can claim WOW before Bob can refund.
 ///
 /// This mirrors the validate_timelocks logic in swap_state.rs:
-/// xmr_refund_height > wow_refund_height + MIN_RESPONSE_BLOCKS
+/// wow_lock_blocks > xmr_lock_blocks + MIN_RESPONSE_BLOCKS
 #[test]
-fn timelock_ordering_xmr_gt_wow() {
+fn timelock_ordering_wow_gt_xmr() {
     const MIN_RESPONSE_BLOCKS: u64 = 100;
 
-    // Valid: XMR refund height is well above WOW + buffer.
-    let xmr_refund_height: u64 = 1000;
-    let wow_refund_height: u64 = 500;
+    // Valid: WOW lock blocks well above XMR + buffer.
+    let xmr_lock_blocks: u64 = 50;
+    let wow_lock_blocks: u64 = 200;
     assert!(
-        xmr_refund_height > wow_refund_height + MIN_RESPONSE_BLOCKS,
-        "Valid: XMR {xmr_refund_height} > WOW {wow_refund_height} + buffer {MIN_RESPONSE_BLOCKS}"
+        wow_lock_blocks > xmr_lock_blocks + MIN_RESPONSE_BLOCKS,
+        "Valid: WOW {wow_lock_blocks} > XMR {xmr_lock_blocks} + buffer {MIN_RESPONSE_BLOCKS}"
     );
 
-    // Invalid: XMR refund height too close to WOW refund height.
-    let xmr_refund_height_bad: u64 = 600;
-    let wow_refund_height_bad: u64 = 500;
+    // Invalid: WOW lock blocks too close to XMR lock blocks.
+    let xmr_lock_blocks_bad: u64 = 200;
+    let wow_lock_blocks_bad: u64 = 200;
     assert!(
-        !(xmr_refund_height_bad > wow_refund_height_bad + MIN_RESPONSE_BLOCKS),
-        "Invalid: XMR {xmr_refund_height_bad} NOT > WOW {wow_refund_height_bad} + buffer {MIN_RESPONSE_BLOCKS}"
+        !(wow_lock_blocks_bad > xmr_lock_blocks_bad + MIN_RESPONSE_BLOCKS),
+        "Invalid: WOW {wow_lock_blocks_bad} NOT > XMR {xmr_lock_blocks_bad} + buffer {MIN_RESPONSE_BLOCKS}"
     );
 
     // Edge case: exactly at boundary (not valid -- must be strictly greater).
-    let xmr_exact: u64 = 600;
-    let wow_exact: u64 = 500;
+    let xmr_exact: u64 = 100;
+    let wow_exact: u64 = 200;
     assert!(
-        !(xmr_exact > wow_exact + MIN_RESPONSE_BLOCKS),
-        "Edge: XMR {xmr_exact} == WOW {wow_exact} + buffer {MIN_RESPONSE_BLOCKS} -- NOT valid (need strictly greater)"
+        !(wow_exact > xmr_exact + MIN_RESPONSE_BLOCKS),
+        "Edge: WOW {wow_exact} == XMR {xmr_exact} + buffer {MIN_RESPONSE_BLOCKS} -- NOT valid (need strictly greater)"
     );
 
     tracing::info!(
         "Timelock ordering constraints validated: \
-         XMR refund must be > WOW refund + {MIN_RESPONSE_BLOCKS} blocks"
+         WOW lock must be > XMR lock + {MIN_RESPONSE_BLOCKS} blocks"
     );
 }
