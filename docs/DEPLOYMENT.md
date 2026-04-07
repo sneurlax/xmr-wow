@@ -243,9 +243,9 @@ $BIN --password "bob-secret-pw" --db bob-swaps.db exchange-pre-sig \
 ### Step 7: Bob sends the first claim proof
 
 ```bash
-$BIN generate-claim-proof \
+$BIN --password "bob-secret-pw" --db bob-swaps.db generate-claim-proof \
   --presig "xmrwow1:<alice-presig>" \
-  --spend-key <bob-wow-spend-key>
+  --swap-id <bob-swap-id>
 ```
 
 Bob sends the emitted `xmrwow1:...` claim proof to Alice.

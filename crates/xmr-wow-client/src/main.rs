@@ -171,14 +171,14 @@ enum Command {
         #[arg(long, default_value = "0")]
         scan_from: u64,
     },
-    /// Generate a ClaimProof from an adaptor pre-sig and private spend key
+    /// Generate a ClaimProof from an adaptor pre-sig and swap protocol secret
     GenerateClaimProof {
         /// The xmrwow1: adaptor pre-sig message
         #[arg(long)]
         presig: String,
-        /// The private spend key (hex)
+        /// Swap ID to retrieve the protocol secret from the database
         #[arg(long)]
-        spend_key: String,
+        swap_id: String,
     },
     /// Legacy refund command kept only for fail-closed compatibility.
     #[command(hide = true)]
@@ -1424,19 +1424,22 @@ async fn main() -> anyhow::Result<()> {
             println!("XMR claimed. Swap complete.");
         }
 
-        Command::GenerateClaimProof { presig, spend_key } => {
+        Command::GenerateClaimProof { presig, swap_id } => {
+            let password = get_password(cli.password.as_deref())?;
+            let salt = store.get_or_create_salt()?;
+            let enc_key = derive_key(password.as_bytes(), &salt);
+
+            let id = parse_swap_id(&swap_id)?;
+            let (_state, secret_bytes, _) = load_and_decrypt_state(&store, &id, &enc_key)?;
+
             let presig_msg: ProtocolMessage = decode_message(&presig)?;
             let pre_sig = match presig_msg {
                 ProtocolMessage::AdaptorPreSig { pre_sig } => pre_sig,
                 _ => anyhow::bail!("Expected AdaptorPreSig message"),
             };
-            let key_bytes = hex::decode(&spend_key)?;
-            let key_arr: [u8; 32] = key_bytes
-                .try_into()
-                .map_err(|_| anyhow::anyhow!("spend key must be 32 bytes"))?;
-            let scalar = Scalar::from_canonical_bytes(key_arr)
+            let scalar = Scalar::from_canonical_bytes(secret_bytes)
                 .into_option()
-                .ok_or_else(|| anyhow::anyhow!("invalid scalar"))?;
+                .ok_or_else(|| anyhow::anyhow!("invalid protocol secret scalar"))?;
 
             let completed = pre_sig
                 .complete(&scalar)
