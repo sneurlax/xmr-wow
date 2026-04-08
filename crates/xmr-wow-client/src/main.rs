@@ -1,9 +1,5 @@
 //! XMR-WOW atomic swap CLI.
-//!
-//! Commands cover setup, lock coordination, claim flow, and wallet helpers.
-//! Legacy refund commands remain implemented only to fail closed and are 
-//! hidden from normal CLI help.  Swap messages use `xmrwow1:<base64>` and all 
-//! signing stays local.
+//! Legacy refund commands are hidden and fail closed. Signing stays local.
 
 use clap::{Parser, Subcommand};
 use curve25519_dalek::constants::ED25519_BASEPOINT_POINT as G;
@@ -22,6 +18,18 @@ use xmr_wow_crypto::{
 };
 use xmr_wow_wallet::{CryptoNoteWallet, TxHash, WowWallet, XmrWallet};
 
+/// Transport mode for swap coordination messages.
+#[derive(clap::ValueEnum, Clone, Debug, Default)]
+enum TransportMode {
+    /// Encode messages as `xmrwow1:` strings for manual exchange (default).
+    #[default]
+    #[value(name = "out-of-band")]
+    OutOfBand,
+    /// Relay messages via the WOW sharechain node. Requires --node-url.
+    #[value(name = "sharechain")]
+    Sharechain,
+}
+
 #[derive(Parser)]
 #[command(name = "xmr-wow", about = "XMR\u{2194}WOW atomic swap client")]
 struct Cli {
@@ -33,8 +41,36 @@ struct Cli {
     #[arg(long, default_value = "xmr-wow-swaps.db")]
     db: String,
 
+    /// Transport mode for swap coordination messages
+    #[arg(long, default_value = "out-of-band")]
+    transport: TransportMode,
+
+    /// Sharechain node URL (required when --transport sharechain)
+    #[arg(long)]
+    node_url: Option<String>,
+
     #[command(subcommand)]
     cmd: Command,
+}
+
+/// Build a SwapMessenger for the selected transport, failing fast if --node-url is missing.
+fn make_messenger(
+    mode: &TransportMode,
+    node_url: Option<&str>,
+) -> anyhow::Result<Box<dyn xmr_wow_client::swap_messenger::SwapMessenger + Send + Sync>> {
+    match mode {
+        TransportMode::OutOfBand => Ok(Box::new(xmr_wow_client::swap_messenger::OobMessenger)),
+        TransportMode::Sharechain => {
+            let url = node_url.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "--node-url is required when --transport sharechain is selected"
+                )
+            })?;
+            Ok(Box::new(xmr_wow_client::swap_messenger::SharechainMessenger {
+                node_url: url.to_string(),
+            }))
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -91,6 +127,12 @@ enum Command {
         /// Show all swaps including orphaned temp-ID entries
         #[arg(long)]
         all: bool,
+    },
+    /// Query swap state by replaying sharechain coordination messages
+    Status {
+        /// Swap ID (hex)
+        #[arg(long)]
+        swap_id: String,
     },
     /// Alice: verify Bob's WOW lock and lock XMR (second lock)
     LockXmr {
@@ -284,10 +326,8 @@ fn parse_swap_id(hex_str: &str) -> anyhow::Result<[u8; 32]> {
     Ok(arr)
 }
 
-/// Parse a 64-char hex string into a curve25519-dalek Scalar.
-///
-/// Uses `from_canonical_bytes` to reject non-canonical inputs (>= group order l).
-/// Does NOT use `from_bytes_mod_order` which would silently reduce the key.
+/// Parse a 64-char hex string into a Scalar, rejecting non-canonical inputs.
+/// Uses `from_canonical_bytes`: not `from_bytes_mod_order`: to avoid silently reducing the key.
 fn parse_scalar_hex(hex_str: &str) -> anyhow::Result<Scalar> {
     let bytes = hex::decode(hex_str)?;
     if bytes.len() != 32 {
@@ -329,7 +369,6 @@ fn resolve_sender_keys(
     }
 }
 
-/// Extract the phase name from a SwapState for display.
 fn phase_name(state: &SwapState) -> &'static str {
     match state {
         SwapState::KeyGeneration { .. } => "KeyGeneration",
@@ -342,7 +381,6 @@ fn phase_name(state: &SwapState) -> &'static str {
     }
 }
 
-/// Extract the role from a SwapState for display.
 fn role_name(state: &SwapState) -> &'static str {
     match state {
         SwapState::KeyGeneration { role, .. }
@@ -380,7 +418,7 @@ fn validate_persisted_timing(state: &SwapState) -> anyhow::Result<()> {
 
 fn guarantee_failure(command: &str, decision: GuaranteeDecision) -> anyhow::Error {
     anyhow::anyhow!(
-        "Phase 13: `{}` is {}. {}",
+        "`{}` is {}. {}",
         command,
         decision.status.label(),
         decision.reason
@@ -413,7 +451,7 @@ fn require_checkpoint_ready(
 ) -> anyhow::Result<()> {
     state
         .require_checkpoint_ready(name)
-        .map_err(|e| anyhow::anyhow!("Phase 15: `{}` blocked. {}", command, e))
+        .map_err(|e| anyhow::anyhow!("`{}` blocked. {}", command, e))
 }
 
 fn print_refund_checkpoints(state: &SwapState) {
@@ -446,11 +484,7 @@ fn print_refund_checkpoints(state: &SwapState) {
     }
 }
 
-/// Poll for transaction confirmation with exponential backoff.
-///
-/// Blocks until the transaction reaches `required` confirmations or
-/// `max_retries` attempts are exhausted. The poll interval starts at
-/// `initial_poll_secs` and doubles each attempt, capped at 120 seconds.
+/// Poll for confirmation with exponential backoff, doubling the interval each attempt up to 120 s.
 async fn wait_for_confirmation(
     wallet: &dyn CryptoNoteWallet,
     tx_hash: &TxHash,
@@ -509,9 +543,55 @@ async fn wait_for_confirmation(
     }
 }
 
-/// Load swap state from the store, decrypt the secret, and restore it.
-///
-/// Returns (state_with_secret, secret_bytes, encrypted_blob).
+/// Infer swap state from sharechain coord messages; returns (count, last_type, label).
+fn derive_swap_state(raw_messages: &[Vec<u8>]) -> (usize, String, String) {
+    let count = raw_messages.len();
+    if count == 0 {
+        return (0, "unknown".to_string(), "No messages".to_string());
+    }
+
+    let mut last_type = "unknown".to_string();
+    for raw in raw_messages {
+        match serde_json::from_slice::<xmr_wow_client::CoordMessage>(raw) {
+            Ok(coord) => match xmr_wow_client::unwrap_protocol_message(&coord) {
+                Ok(xmr_wow_client::ProtocolMessage::Init { .. }) => {
+                    last_type = "Init".to_string();
+                }
+                Ok(xmr_wow_client::ProtocolMessage::Response { .. }) => {
+                    last_type = "Response".to_string();
+                }
+                Ok(xmr_wow_client::ProtocolMessage::AdaptorPreSig { .. }) => {
+                    last_type = "AdaptorPreSig".to_string();
+                }
+                Ok(xmr_wow_client::ProtocolMessage::ClaimProof { .. }) => {
+                    last_type = "ClaimProof".to_string();
+                }
+                Ok(xmr_wow_client::ProtocolMessage::RefundCooperate { .. }) => {
+                    last_type = "RefundCooperate".to_string();
+                }
+                Err(_) => {
+                    last_type = "unreadable".to_string();
+                }
+            },
+            Err(_) => {
+                last_type = "unreadable".to_string();
+            }
+        }
+    }
+
+    let inferred = match last_type.as_str() {
+        "Init" => "Awaiting Bob response",
+        "Response" => "Awaiting lock transactions",
+        "AdaptorPreSig" => "Awaiting claim proof",
+        "ClaimProof" => "Complete (claim seen)",
+        "RefundCooperate" => "Refund cooperation in progress",
+        _ => "Unknown",
+    };
+
+    (count, last_type, inferred.to_string())
+}
+
+/// Load, decrypt, and restore swap state from the store.
 fn load_and_decrypt_state(
     store: &SwapStore,
     swap_id: &[u8; 32],
@@ -541,6 +621,8 @@ fn load_and_decrypt_state(
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
     let cli = Cli::parse();
+    // Fail fast on bad transport config before opening the store.
+    let _messenger = make_messenger(&cli.transport, cli.node_url.as_deref())?;
     let store = SwapStore::open(&cli.db)?;
 
     match cli.cmd {
@@ -553,7 +635,6 @@ async fn main() -> anyhow::Result<()> {
             wow_lock_blocks,
             alice_refund_address,
         } => {
-            // Validate amounts (ERR-02)
             if amount_xmr == 0 {
                 anyhow::bail!("--amount-xmr must be greater than 0");
             }
@@ -561,7 +642,6 @@ async fn main() -> anyhow::Result<()> {
                 anyhow::bail!("--amount-wow must be greater than 0");
             }
 
-            // Validate timelock sanity cap (ERR-02)
             if xmr_lock_blocks > 10000 {
                 anyhow::bail!(
                     "--xmr-lock-blocks {} exceeds maximum 10000 (would lock funds for months)",
@@ -599,13 +679,15 @@ async fn main() -> anyhow::Result<()> {
                 bob_refund_address: None,
             };
 
-            // Generate key contribution
             let (state, secret_bytes) = SwapState::generate(SwapRole::Alice, params, &mut OsRng);
 
+<<<<<<< HEAD
             // Encrypt secret BEFORE any output ()
+=======
+            // Encrypt before any output so the secret is safe even if printing panics.
+>>>>>>> 7e0903fd (feat(cli): add Command::Status with sharechain replay and state derivation)
             let encrypted = encrypt_secret(&enc_key, &secret_bytes);
 
-            // Extract pubkey and proof for the protocol message
             let (my_pubkey, my_proof) = match &state {
                 SwapState::KeyGeneration {
                     my_pubkey,
@@ -615,14 +697,12 @@ async fn main() -> anyhow::Result<()> {
                 _ => unreachable!(),
             };
 
-            // Temp swap_id = Keccak256(alice_pubkey) until we know Bob's pubkey
+            // Temp ID is Keccak256(alice_pubkey); replaced with the real swap_id after Import.
             let temp_id = keccak256(&my_pubkey);
 
-            // Persist encrypted state + secret
             let state_json = serde_json::to_string(&state)?;
             store.save_with_secret(&temp_id, &state_json, Some(&encrypted))?;
 
-            // Build and encode the Init message
             let msg = ProtocolMessage::Init {
                 pubkey: my_pubkey,
                 proof: my_proof,
@@ -658,7 +738,6 @@ async fn main() -> anyhow::Result<()> {
             let salt = store.get_or_create_salt()?;
             let enc_key = derive_key(password.as_bytes(), &salt);
 
-            // Decode Alice's init message
             let init_msg: ProtocolMessage = decode_message(&message)?;
             let (
                 alice_pubkey,
@@ -694,12 +773,12 @@ async fn main() -> anyhow::Result<()> {
 
             let refund_timing = refund_timing.ok_or_else(|| {
                 anyhow::anyhow!(
-                    "Phase 13 timing basis missing: legacy init transcripts without refund_timing are unsupported"
+                    "legacy init transcripts without refund_timing are unsupported"
                 )
             })?;
             let alice_refund_address = alice_refund_address.ok_or_else(|| {
                 anyhow::anyhow!(
-                    "Phase 15 transcript missing: legacy init transcripts without alice_refund_address are unsupported"
+                    "legacy init transcripts without alice_refund_address are unsupported"
                 )
             })?;
 
@@ -716,13 +795,15 @@ async fn main() -> anyhow::Result<()> {
                 .validate_observed_refund_timing()
                 .map_err(|e| anyhow::anyhow!("{}", e))?;
 
-            // Generate Bob's key contribution
             let (state, secret_bytes) = SwapState::generate(SwapRole::Bob, params, &mut OsRng);
 
+<<<<<<< HEAD
             // Encrypt secret BEFORE any output ()
+=======
+            // Encrypt before any output so the secret is safe even if printing panics.
+>>>>>>> 7e0903fd (feat(cli): add Command::Status with sharechain replay and state derivation)
             let encrypted = encrypt_secret(&enc_key, &secret_bytes);
 
-            // Extract Bob's pubkey and proof
             let (my_pubkey, my_proof) = match &state {
                 SwapState::KeyGeneration {
                     my_pubkey,
@@ -732,13 +813,9 @@ async fn main() -> anyhow::Result<()> {
                 _ => unreachable!(),
             };
 
-            // Receive Alice's counterparty key and verify DLEQ proof
             let state = state.receive_counterparty_key(alice_pubkey, &alice_proof)?;
-
-            // Derive joint addresses (Bob computes locally per D-04)
             let state = state.derive_joint_addresses()?;
 
-            // Extract swap_id and addresses from JointAddress state
             let (swap_id, xmr_address, wow_address) = match &state {
                 SwapState::JointAddress { addresses, .. } => (
                     addresses.swap_id,
@@ -748,11 +825,9 @@ async fn main() -> anyhow::Result<()> {
                 _ => unreachable!(),
             };
 
-            // Persist state + encrypted secret
             let state_json = serde_json::to_string(&state)?;
             store.save_with_secret(&swap_id, &state_json, Some(&encrypted))?;
 
-            // Build and encode Bob's response
             let response = ProtocolMessage::Response {
                 pubkey: my_pubkey,
                 proof: my_proof,
@@ -784,7 +859,6 @@ async fn main() -> anyhow::Result<()> {
 
             let temp_id = parse_swap_id(&swap_id)?;
 
-            // Load Alice's existing state + encrypted secret
             let (state_json, encrypted_secret) = store
                 .load_with_secret(&temp_id)?
                 .ok_or_else(|| anyhow::anyhow!("swap {} not found", swap_id))?;
@@ -792,15 +866,12 @@ async fn main() -> anyhow::Result<()> {
             let encrypted_blob = encrypted_secret
                 .ok_or_else(|| anyhow::anyhow!("no encrypted secret found for swap {}", swap_id))?;
 
-            // Decrypt the secret
             let secret_bytes = decrypt_secret(&enc_key, &encrypted_blob)
                 .map_err(|e| anyhow::anyhow!("failed to decrypt secret: {}", e))?;
 
-            // Deserialize and restore secret into state
             let state: SwapState = serde_json::from_str(&state_json)?;
             let state = restore_secret_into_state(state, *secret_bytes)?;
 
-            // Decode Bob's response
             let response_msg: ProtocolMessage = decode_message(&message)?;
             let (bob_pubkey, bob_proof, bob_refund_address) = match response_msg {
                 ProtocolMessage::Response {
@@ -812,11 +883,10 @@ async fn main() -> anyhow::Result<()> {
             };
             let bob_refund_address = bob_refund_address.ok_or_else(|| {
                 anyhow::anyhow!(
-                    "Phase 15 transcript missing: legacy response messages without bob_refund_address are unsupported"
+                    "legacy response messages without bob_refund_address are unsupported"
                 )
             })?;
 
-            // Verify and advance state
             let state = state.receive_counterparty_key(bob_pubkey, &bob_proof)?;
             let state = state.derive_joint_addresses()?;
             let state = match state {
@@ -853,7 +923,6 @@ async fn main() -> anyhow::Result<()> {
                 _ => unreachable!(),
             };
 
-            // Re-encrypt secret, save under real swap_id, delete temp entry
             let encrypted = encrypt_secret(&enc_key, &*secret_bytes);
             let state_json = serde_json::to_string(&state)?;
             store.save_with_secret(&real_swap_id, &state_json, Some(&encrypted))?;
@@ -878,7 +947,6 @@ async fn main() -> anyhow::Result<()> {
                     println!("Phase:   {}", phase_name(&state));
                     println!("Role:    {}", role_name(&state));
 
-                    // Print addresses if available
                     match &state {
                         SwapState::JointAddress {
                             addresses, params, ..
@@ -947,6 +1015,34 @@ async fn main() -> anyhow::Result<()> {
             }
         }
 
+        Command::Status { swap_id } => {
+            let id_bytes = hex::decode(&swap_id)
+                .map_err(|e| anyhow::anyhow!("invalid swap_id hex: {}", e))?;
+            let id: [u8; 32] = id_bytes
+                .try_into()
+                .map_err(|_| anyhow::anyhow!("swap_id must be exactly 64 hex characters (32 bytes)"))?;
+
+            let url = cli.node_url.as_deref().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "--node-url is required for `status` (uses sharechain replay). For local state, use `show`."
+                )
+            })?;
+
+            let client = xmr_wow_client::node_client::NodeClient::new(url);
+            let raw_messages = client.replay_coord_messages(&id).await?;
+
+            let (count, last_type, inferred) = derive_swap_state(&raw_messages);
+
+            if count == 0 {
+                println!("No coordination messages found for swap {}.", swap_id);
+            } else {
+                println!("Swap ID:        {}", swap_id);
+                println!("Messages seen:  {}", count);
+                println!("Last message:   {}", last_type);
+                println!("Inferred state: {}", inferred);
+            }
+        }
+
         Command::LockXmr {
             swap_id,
             xmr_daemon,
@@ -965,7 +1061,6 @@ async fn main() -> anyhow::Result<()> {
             let state = state.refresh_refund_readiness()?;
             validate_persisted_timing(&state)?;
 
-            // Verify state is WowLocked (primary) or JointAddress (fallback) and role is Alice
             let (role, params, my_pubkey, counterparty_pubkey) = match &state {
                 SwapState::WowLocked {
                     role,
@@ -991,11 +1086,9 @@ async fn main() -> anyhow::Result<()> {
             }
             require_checkpoint_ready(&state, RefundCheckpointName::BeforeXmrLock, "lock-xmr")?;
 
-            // Compute joint spend point and view scalar
             let (joint_spend, view_scalar) =
                 SwapState::compute_joint_keys(&my_pubkey, &counterparty_pubkey, role)?;
 
-            // Verify Bob's WOW lock on-chain
             let wow_wallet_verify = WowWallet::new(&wow_daemon);
             let wow_height: u64 =
                 {
@@ -1024,7 +1117,6 @@ async fn main() -> anyhow::Result<()> {
                 scan_result.amount, scan_result.block_height
             );
 
-            // Lock XMR to the joint address
             let (sender_spend, sender_view) =
                 resolve_sender_keys(&mnemonic, &spend_key, &view_key, SeedCoin::Monero)?;
             let xmr_wallet = XmrWallet::with_sender_keys(&xmr_daemon, sender_spend, sender_view)
@@ -1038,14 +1130,11 @@ async fn main() -> anyhow::Result<()> {
                 .await?;
             println!("XMR lock tx: {}", hex::encode(tx_hash));
 
-            // wait for confirmation
             println!("Waiting for confirmation...");
             wait_for_confirmation(&xmr_wallet, &tx_hash, 1, 10).await?;
 
-            // Transition state
             let state = state.record_xmr_lock(tx_hash)?;
 
-            // Extract the adaptor pre-sig for sending to Bob
             let my_adaptor_pre_sig = match &state {
                 SwapState::XmrLocked {
                     my_adaptor_pre_sig, ..
@@ -1053,7 +1142,7 @@ async fn main() -> anyhow::Result<()> {
                 _ => unreachable!(),
             };
 
-            // Print protocol message FIRST (user always has it even if save fails)
+            // Print before saving so the user has the message even if the save fails.
             let pre_sig_msg = ProtocolMessage::AdaptorPreSig {
                 pre_sig: my_adaptor_pre_sig,
             };
@@ -1062,7 +1151,6 @@ async fn main() -> anyhow::Result<()> {
             println!("Send this adaptor pre-signature to Bob:");
             println!("{}", encode_message(&pre_sig_msg));
 
-            // Then save state
             let swap_id_bytes = state.swap_id().ok_or_else(|| {
                 anyhow::anyhow!("swap state has no swap_id (still in KeyGeneration phase?)")
             })?;
@@ -1087,7 +1175,6 @@ async fn main() -> anyhow::Result<()> {
             let (state, secret_bytes, _) = load_and_decrypt_state(&store, &id, &enc_key)?;
             validate_persisted_timing(&state)?;
 
-            // Verify state is JointAddress and role is Bob (first lock)
             let (role, params, my_pubkey, counterparty_pubkey) = match &state {
                 SwapState::JointAddress {
                     role,
@@ -1103,11 +1190,9 @@ async fn main() -> anyhow::Result<()> {
             }
             require_checkpoint_ready(&state, RefundCheckpointName::BeforeWowLock, "lock-wow")?;
 
-            // Compute joint keys
             let (joint_spend, view_scalar) =
                 SwapState::compute_joint_keys(&my_pubkey, &counterparty_pubkey, role)?;
 
-            // Lock WOW to the joint address (first lock -- no prior lock to verify)
             let (sender_spend, sender_view) =
                 resolve_sender_keys(&mnemonic, &spend_key, &view_key, SeedCoin::Wownero)?;
             let wow_wallet = WowWallet::with_sender_keys(&wow_daemon, sender_spend, sender_view)
@@ -1121,14 +1206,11 @@ async fn main() -> anyhow::Result<()> {
                 .await?;
             println!("WOW lock tx: {}", hex::encode(wow_tx_hash));
 
-            // wait for confirmation
             println!("Waiting for WOW confirmation...");
             wait_for_confirmation(&wow_wallet, &wow_tx_hash, 1, 10).await?;
 
-            // Transition from JointAddress to WowLocked
             let state = state.record_wow_lock(wow_tx_hash)?;
 
-            // Extract Bob's adaptor pre-sig
             let my_adaptor_pre_sig = match &state {
                 SwapState::WowLocked {
                     my_adaptor_pre_sig, ..
@@ -1136,7 +1218,7 @@ async fn main() -> anyhow::Result<()> {
                 _ => unreachable!(),
             };
 
-            // Print protocol message FIRST (user always has it even if save fails)
+            // Print before saving so the user has the message even if the save fails.
             let pre_sig_msg = ProtocolMessage::AdaptorPreSig {
                 pre_sig: my_adaptor_pre_sig,
             };
@@ -1145,7 +1227,6 @@ async fn main() -> anyhow::Result<()> {
             println!("Send this adaptor pre-signature to Alice:");
             println!("{}", encode_message(&pre_sig_msg));
 
-            // Then save state
             let swap_id_bytes = state.swap_id().ok_or_else(|| {
                 anyhow::anyhow!("swap state has no swap_id (still in KeyGeneration phase?)")
             })?;
@@ -1162,17 +1243,14 @@ async fn main() -> anyhow::Result<()> {
             let id = parse_swap_id(&swap_id)?;
             let (state, secret_bytes, _) = load_and_decrypt_state(&store, &id, &enc_key)?;
 
-            // Decode counterparty's adaptor pre-sig
             let msg: ProtocolMessage = decode_message(&message)?;
             let pre_sig = match msg {
                 ProtocolMessage::AdaptorPreSig { pre_sig } => pre_sig,
                 _ => anyhow::bail!("Expected AdaptorPreSig message"),
             };
 
-            // Validate and store
             let state = state.receive_counterparty_pre_sig(pre_sig)?;
 
-            // Save updated state
             let swap_id_bytes = state.swap_id().ok_or_else(|| {
                 anyhow::anyhow!("swap state has no swap_id (still in KeyGeneration phase?)")
             })?;
@@ -1190,7 +1268,6 @@ async fn main() -> anyhow::Result<()> {
             destination,
             scan_from,
         } => {
-            // ADAPTOR SIG ATOMICITY: Alice claims WOW
             let password = get_password(cli.password.as_deref())?;
             let salt = store.get_or_create_salt()?;
             let enc_key = derive_key(password.as_bytes(), &salt);
@@ -1198,7 +1275,6 @@ async fn main() -> anyhow::Result<()> {
             let id = parse_swap_id(&swap_id)?;
             let (state, secret_bytes, _) = load_and_decrypt_state(&store, &id, &enc_key)?;
 
-            // Verify state is WowLocked or XmrLocked (with counterparty pre-sig) and role is Alice
             let (role, my_pubkey, counterparty_pubkey, my_adaptor_pre_sig) = match &state {
                 SwapState::WowLocked {
                     role,
@@ -1237,29 +1313,24 @@ async fn main() -> anyhow::Result<()> {
                 ),
             };
 
-            // Decode Bob's ClaimProof (his completed adaptor sig)
             let claim_msg: ProtocolMessage = decode_message(&message)?;
             let bob_completed_sig = match claim_msg {
                 ProtocolMessage::ClaimProof { completed_sig } => completed_sig,
                 _ => anyhow::bail!("Expected ClaimProof message from Bob"),
             };
 
-            // Extract Bob's secret via adaptor sig atomicity
             let (complete_state, bob_secret) =
                 state.complete_with_adaptor_claim(&bob_completed_sig)?;
             println!("Extracted Bob's secret from his completed adaptor signature.");
 
-            // Compute combined spend key: a + b
             let my_scalar = Scalar::from_canonical_bytes(*secret_bytes)
                 .into_option()
                 .ok_or_else(|| anyhow::anyhow!("invalid secret scalar"))?;
             let combined = my_scalar + bob_secret;
 
-            // Compute view scalar for the joint address
             let (_, view_scalar) =
                 SwapState::compute_joint_keys(&my_pubkey, &counterparty_pubkey, role)?;
 
-            // Sweep WOW from joint address to Alice's destination
             let wow_wallet = WowWallet::new(&wow_daemon).with_scan_from(scan_from);
             println!("Sweeping WOW from joint address to {}...", destination);
             let sweep_tx = wow_wallet
@@ -1267,11 +1338,10 @@ async fn main() -> anyhow::Result<()> {
                 .await?;
             println!("WOW sweep tx: {}", hex::encode(sweep_tx));
 
-            // wait for confirmation
             println!("Waiting for WOW sweep confirmation...");
             wait_for_confirmation(&wow_wallet, &sweep_tx, 1, 10).await?;
 
-            // Alice must now reveal her secret to Bob by completing her pre-sig
+            // Alice reveals her secret by completing her own pre-sig, enabling Bob to claim XMR.
             let alice_completed = my_adaptor_pre_sig
                 .complete(&my_scalar)
                 .map_err(|e| anyhow::anyhow!("failed to complete own pre-sig: {}", e))?;
@@ -1279,18 +1349,16 @@ async fn main() -> anyhow::Result<()> {
                 completed_sig: alice_completed,
             };
 
-            // Print protocol message FIRST (user always has it even if save fails)
+            // Print before saving so the user has the message even if the save fails.
             println!("WOW claimed successfully.");
             println!();
             println!("Send this claim proof to Bob so he can claim XMR:");
             println!("{}", encode_message(&claim_proof));
 
-            // Then save Complete state
             let swap_id_bytes = complete_state.swap_id().ok_or_else(|| {
                 anyhow::anyhow!("swap state has no swap_id (still in KeyGeneration phase?)")
             })?;
             let state_json = serde_json::to_string(&complete_state)?;
-            // No need to store encrypted secret for Complete state
             store.save_with_secret(&swap_id_bytes, &state_json, None)?;
         }
 
@@ -1301,7 +1369,6 @@ async fn main() -> anyhow::Result<()> {
             destination,
             scan_from,
         } => {
-            // ADAPTOR SIG ATOMICITY: Bob claims XMR
             let password = get_password(cli.password.as_deref())?;
             let salt = store.get_or_create_salt()?;
             let enc_key = derive_key(password.as_bytes(), &salt);
@@ -1309,7 +1376,6 @@ async fn main() -> anyhow::Result<()> {
             let id = parse_swap_id(&swap_id)?;
             let (state, secret_bytes, _) = load_and_decrypt_state(&store, &id, &enc_key)?;
 
-            // Verify state is WowLocked and role is Bob with counterparty_pre_sig
             let (role, my_pubkey, counterparty_pubkey, my_adaptor_pre_sig, counterparty_pre_sig) =
                 match &state {
                     SwapState::WowLocked {
@@ -1339,8 +1405,7 @@ async fn main() -> anyhow::Result<()> {
                 .into_option()
                 .ok_or_else(|| anyhow::anyhow!("invalid secret scalar"))?;
 
-            // FIRST: Bob must reveal his secret to Alice by completing his pre-sig.
-            // Print the ClaimProof for Bob to send to Alice.
+            // Bob reveals his secret first, enabling Alice to sweep WOW.
             let bob_completed = my_adaptor_pre_sig
                 .complete(&my_scalar)
                 .map_err(|e| anyhow::anyhow!("failed to complete own pre-sig: {}", e))?;
@@ -1352,14 +1417,12 @@ async fn main() -> anyhow::Result<()> {
             println!("{}", encode_message(&bob_claim_proof));
             println!();
 
-            // Decode Alice's ClaimProof (her completed adaptor sig)
             let claim_msg: ProtocolMessage = decode_message(&message)?;
             let alice_completed_sig = match claim_msg {
                 ProtocolMessage::ClaimProof { completed_sig } => completed_sig,
                 _ => anyhow::bail!("Expected ClaimProof message from Alice"),
             };
 
-            // Extract Alice's secret via adaptor sig atomicity
             let alice_secret = counterparty_pre_sig
                 .extract_secret(&alice_completed_sig)
                 .map_err(|e| anyhow::anyhow!("secret extraction failed: {}", e))?;
@@ -1372,14 +1435,11 @@ async fn main() -> anyhow::Result<()> {
             }
             println!("Extracted Alice's secret from her completed adaptor signature.");
 
-            // Compute combined spend key: a + b
             let combined = alice_secret + my_scalar;
 
-            // Compute view scalar
             let (_, view_scalar) =
                 SwapState::compute_joint_keys(&my_pubkey, &counterparty_pubkey, role)?;
 
-            // Sweep XMR from joint address to Bob's destination
             let xmr_wallet = XmrWallet::new(&xmr_daemon).with_scan_from(scan_from);
             println!("Sweeping XMR from joint address to {}...", destination);
             let sweep_tx = xmr_wallet
@@ -1387,11 +1447,9 @@ async fn main() -> anyhow::Result<()> {
                 .await?;
             println!("XMR sweep tx: {}", hex::encode(sweep_tx));
 
-            // wait for confirmation
             println!("Waiting for XMR sweep confirmation...");
             wait_for_confirmation(&xmr_wallet, &sweep_tx, 1, 10).await?;
 
-            // Transition to Complete
             let k_b_revealed = alice_secret.to_bytes();
             let complete_state = SwapState::Complete {
                 role,
@@ -1402,7 +1460,6 @@ async fn main() -> anyhow::Result<()> {
                 k_b_revealed,
             };
 
-            // Save Complete state
             let swap_id_bytes = complete_state.swap_id().ok_or_else(|| {
                 anyhow::anyhow!("swap state has no swap_id (still in KeyGeneration phase?)")
             })?;
@@ -1522,27 +1579,21 @@ async fn main() -> anyhow::Result<()> {
 
             let id = parse_swap_id(&swap_id)?;
 
-            // Load state and decrypt secret to verify password
             let (state_json, encrypted_secret) = store
                 .load_with_secret(&id)?
                 .ok_or_else(|| anyhow::anyhow!("swap {} not found", swap_id))?;
 
             let state: SwapState = serde_json::from_str(&state_json)?;
 
-            // For terminal states (Complete, Refunded), no secret to verify
             match &state {
-                SwapState::Complete { .. } | SwapState::Refunded { .. } => {
-                    // No secret needed for terminal states
-                }
+                SwapState::Complete { .. } | SwapState::Refunded { .. } => {}
                 _ => {
-                    // Verify password by decrypting the secret
                     let encrypted_blob = encrypted_secret.ok_or_else(|| {
                         anyhow::anyhow!("no encrypted secret found for swap {}", swap_id)
                     })?;
                     let secret_bytes = decrypt_secret(&enc_key, &encrypted_blob)
                         .map_err(|_| anyhow::anyhow!("Wrong password"))?;
 
-                    // Verify secret matches stored pubkey (scalar * G == pubkey)
                     let scalar = Scalar::from_canonical_bytes(*secret_bytes)
                         .into_option()
                         .ok_or_else(|| anyhow::anyhow!("invalid secret scalar"))?;
@@ -1564,13 +1615,11 @@ async fn main() -> anyhow::Result<()> {
             }
             validate_persisted_timing(&state)?;
 
-            // Print swap status
             println!("=== Swap Resume ===");
             println!("Swap ID: {}", swap_id);
             println!("Role:    {}", role_name(&state));
             println!("Phase:   {}", phase_name(&state));
 
-            // Print addresses and timelock info if available
             match &state {
                 SwapState::JointAddress {
                     addresses, params, ..
@@ -1601,7 +1650,6 @@ async fn main() -> anyhow::Result<()> {
 
             print_refund_checkpoints(&state);
 
-            // Print next action guidance
             println!();
             println!("--- Next Safe Action ---");
             println!("{}", state.next_safe_action());
@@ -1712,4 +1760,129 @@ async fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use xmr_wow_client::coord_message::wrap_protocol_message;
+    use xmr_wow_crypto::{AdaptorSignature, CompletedSignature, DleqProof, KeyContribution};
+    use rand::rngs::OsRng;
+
+    fn dummy_swap_id() -> [u8; 32] {
+        [0x42u8; 32]
+    }
+
+    fn make_init_bytes() -> Vec<u8> {
+        let contrib = KeyContribution::generate(&mut OsRng);
+        let proof = DleqProof::prove(
+            &contrib.secret,
+            &contrib.public,
+            b"xmr-wow-swap-v1",
+            &mut OsRng,
+        );
+        let msg = xmr_wow_client::ProtocolMessage::Init {
+            pubkey: contrib.public_bytes(),
+            proof,
+            amount_xmr: 1_000_000_000_000,
+            amount_wow: 500_000_000_000_000,
+            xmr_refund_height: 2000,
+            wow_refund_height: 1000,
+            refund_timing: None,
+            alice_refund_address: None,
+        };
+        let coord = wrap_protocol_message(dummy_swap_id(), &msg).unwrap();
+        serde_json::to_vec(&coord).unwrap()
+    }
+
+    fn make_response_bytes() -> Vec<u8> {
+        let contrib = KeyContribution::generate(&mut OsRng);
+        let proof = DleqProof::prove(
+            &contrib.secret,
+            &contrib.public,
+            b"xmr-wow-swap-v1",
+            &mut OsRng,
+        );
+        let msg = xmr_wow_client::ProtocolMessage::Response {
+            pubkey: contrib.public_bytes(),
+            proof,
+            bob_refund_address: None,
+        };
+        let coord = wrap_protocol_message(dummy_swap_id(), &msg).unwrap();
+        serde_json::to_vec(&coord).unwrap()
+    }
+
+    fn make_adaptor_pre_sig_bytes() -> Vec<u8> {
+        let msg = xmr_wow_client::ProtocolMessage::AdaptorPreSig {
+            pre_sig: AdaptorSignature {
+                r_plus_t: [0xAAu8; 32],
+                s_prime: [0xBBu8; 32],
+            },
+        };
+        let coord = wrap_protocol_message(dummy_swap_id(), &msg).unwrap();
+        serde_json::to_vec(&coord).unwrap()
+    }
+
+    fn make_claim_proof_bytes() -> Vec<u8> {
+        let msg = xmr_wow_client::ProtocolMessage::ClaimProof {
+            completed_sig: CompletedSignature {
+                r_t: [0xCCu8; 32],
+                s: [0xDDu8; 32],
+            },
+        };
+        let coord = wrap_protocol_message(dummy_swap_id(), &msg).unwrap();
+        serde_json::to_vec(&coord).unwrap()
+    }
+
+    #[test]
+    fn derive_state_empty() {
+        let (count, _, inferred) = derive_swap_state(&[]);
+        assert_eq!(count, 0);
+        assert_eq!(inferred, "No messages");
+    }
+
+    #[test]
+    fn derive_state_init_only() {
+        let msgs = vec![make_init_bytes()];
+        let (count, last, inferred) = derive_swap_state(&msgs);
+        assert_eq!(count, 1);
+        assert_eq!(last, "Init");
+        assert_eq!(inferred, "Awaiting Bob response");
+    }
+
+    #[test]
+    fn derive_state_init_response() {
+        let msgs = vec![make_init_bytes(), make_response_bytes()];
+        let (count, last, inferred) = derive_swap_state(&msgs);
+        assert_eq!(count, 2);
+        assert_eq!(last, "Response");
+        assert_eq!(inferred, "Awaiting lock transactions");
+    }
+
+    #[test]
+    fn derive_state_init_response_adaptor_pre_sig() {
+        let msgs = vec![
+            make_init_bytes(),
+            make_response_bytes(),
+            make_adaptor_pre_sig_bytes(),
+        ];
+        let (count, last, inferred) = derive_swap_state(&msgs);
+        assert_eq!(count, 3);
+        assert_eq!(last, "AdaptorPreSig");
+        assert_eq!(inferred, "Awaiting claim proof");
+    }
+
+    #[test]
+    fn derive_state_full_sequence_claim_proof() {
+        let msgs = vec![
+            make_init_bytes(),
+            make_response_bytes(),
+            make_adaptor_pre_sig_bytes(),
+            make_claim_proof_bytes(),
+        ];
+        let (count, last, inferred) = derive_swap_state(&msgs);
+        assert_eq!(count, 4);
+        assert_eq!(last, "ClaimProof");
+        assert_eq!(inferred, "Complete (claim seen)");
+    }
 }
