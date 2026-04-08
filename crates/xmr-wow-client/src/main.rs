@@ -22,6 +22,23 @@ use xmr_wow_crypto::{
 };
 use xmr_wow_wallet::{CryptoNoteWallet, TxHash, WowWallet, XmrWallet};
 
+/// Transport mode for swap coordination messages.
+///
+/// Selects whether swap protocol messages are relayed via the WOW sharechain
+/// or exchanged out-of-band (copy-paste / manual).
+#[derive(clap::ValueEnum, Clone, Debug, Default)]
+enum TransportMode {
+    /// Out-of-band copy-paste transport (default): encode messages as xmrwow1: strings
+    /// for manual exchange between swap counterparties. No sharechain dependency.
+    #[default]
+    #[value(name = "out-of-band")]
+    OutOfBand,
+    /// Sharechain transport: relay messages via the WOW sharechain node.
+    /// Requires --node-url.
+    #[value(name = "sharechain")]
+    Sharechain,
+}
+
 #[derive(Parser)]
 #[command(name = "xmr-wow", about = "XMR\u{2194}WOW atomic swap client")]
 struct Cli {
@@ -33,8 +50,40 @@ struct Cli {
     #[arg(long, default_value = "xmr-wow-swaps.db")]
     db: String,
 
+    /// Transport mode for swap coordination messages
+    #[arg(long, default_value = "out-of-band")]
+    transport: TransportMode,
+
+    /// Sharechain node URL (required when --transport sharechain)
+    #[arg(long)]
+    node_url: Option<String>,
+
     #[command(subcommand)]
     cmd: Command,
+}
+
+/// Factory: construct the appropriate SwapMessenger for the selected transport mode.
+///
+/// Validates that --node-url is provided when --transport sharechain is selected.
+/// This is called before SwapStore::open so that invalid transport configuration
+/// fails fast, before any swap state is written.
+fn make_messenger(
+    mode: &TransportMode,
+    node_url: Option<&str>,
+) -> anyhow::Result<Box<dyn xmr_wow_client::swap_messenger::SwapMessenger + Send + Sync>> {
+    match mode {
+        TransportMode::OutOfBand => Ok(Box::new(xmr_wow_client::swap_messenger::OobMessenger)),
+        TransportMode::Sharechain => {
+            let url = node_url.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "--node-url is required when --transport sharechain is selected"
+                )
+            })?;
+            Ok(Box::new(xmr_wow_client::swap_messenger::SharechainMessenger {
+                node_url: url.to_string(),
+            }))
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -541,6 +590,8 @@ fn load_and_decrypt_state(
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
     let cli = Cli::parse();
+    // Validate transport configuration before any swap state is written (fail-fast).
+    let _messenger = make_messenger(&cli.transport, cli.node_url.as_deref())?;
     let store = SwapStore::open(&cli.db)?;
 
     match cli.cmd {
