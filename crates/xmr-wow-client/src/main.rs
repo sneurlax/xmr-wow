@@ -681,11 +681,7 @@ async fn main() -> anyhow::Result<()> {
 
             let (state, secret_bytes) = SwapState::generate(SwapRole::Alice, params, &mut OsRng);
 
-<<<<<<< HEAD
-            // Encrypt secret BEFORE any output ()
-=======
             // Encrypt before any output so the secret is safe even if printing panics.
->>>>>>> 7e0903fd (feat(cli): add Command::Status with sharechain replay and state derivation)
             let encrypted = encrypt_secret(&enc_key, &secret_bytes);
 
             let (my_pubkey, my_proof) = match &state {
@@ -797,11 +793,7 @@ async fn main() -> anyhow::Result<()> {
 
             let (state, secret_bytes) = SwapState::generate(SwapRole::Bob, params, &mut OsRng);
 
-<<<<<<< HEAD
-            // Encrypt secret BEFORE any output ()
-=======
             // Encrypt before any output so the secret is safe even if printing panics.
->>>>>>> 7e0903fd (feat(cli): add Command::Status with sharechain replay and state derivation)
             let encrypted = encrypt_secret(&enc_key, &secret_bytes);
 
             let (my_pubkey, my_proof) = match &state {
