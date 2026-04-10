@@ -52,5 +52,13 @@ path = "tests/lock_order_enforcement.rs"
 name = "no_key_in_default_output"
 path = "tests/no_key_in_default_output.rs"
 
+[[test]]
+name = "onchain_invariant"
+path = "tests/onchain_invariant.rs"
+
+[[test]]
+name = "oob_isolation"
+path = "tests/oob_isolation.rs"
+
 [dev-dependencies]
 axum = { workspace = true }
