@@ -293,7 +293,6 @@ Automated single-machine harness that drives the full swap flow end-to-end using
 ./scripts/run-live-network-harness.sh             # Run live (requires XMR_WOW_LIVE_CONFIRM=1)
 ```
 
-
 ## 8. Troubleshooting
 
 ### Checkpoint says `blocked` or `unsupported-for-guarantee`

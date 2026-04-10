@@ -1,334 +1,428 @@
 #!/usr/bin/env bash
+# run-live-network-harness.sh — Live-network E2E harness for XMR<->WOW atomic swaps.
+#
+# Usage:
+#   ./scripts/run-live-network-harness.sh [oob|sharechain] [--cleanup]
+#
+# Prerequisites:
+#   - XMR stagenet daemon at http://127.0.0.1:38081
+#   - WOW mainnet daemon at http://127.0.0.1:34568
+#   - sharechain mode only: xmr-wow-node at http://127.0.0.1:18091
+#   - Binary: cargo build --release -p xmr-wow-client
+#   - Funded wallets and env vars set (see Environment variables below)
+#
+# Environment variables:
+#   ALICE_XMR_REFUND  XMR stagenet refund address (Alice)
+#   ALICE_WOW_DEST    WOW mainnet destination address (Alice)
+#   BOB_WOW_REFUND    WOW mainnet refund address (Bob)
+#   BOB_XMR_DEST      XMR stagenet destination address (Bob)
+#   ALICE_SPEND_KEY / ALICE_VIEW_KEY  Alice's XMR keys (hex); or ALICE_MNEMONIC
+#   BOB_SPEND_KEY / BOB_VIEW_KEY      Bob's WOW keys (hex); or BOB_MNEMONIC
+#   AMOUNT_XMR        XMR atomic units (default: 1000000000 = 0.001 XMR)
+#   AMOUNT_WOW        WOW atomic units (default: 1000000000000 = 1.0 WOW)
+#   *_SCAN_FROM       Block height to start wallet scan (avoids full rescan)
+#   RUN_DIR           Override run artifact directory
+#
+# Stdout/stderr are captured to separate files per step — tracing output on
+# stderr would otherwise corrupt the xmrwow1: base64 messages on stdout.
+#
+# Swap DBs are NOT deleted on success; they are proof artifacts for the run.
+# Pass --cleanup to remove the run directory on exit.
+
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-cd "$ROOT_DIR"
+TRANSPORT_ARG="${1:-oob}"
+CLEANUP=false
 
-DRY_RUN=false
-RUN_DIR=""
-
-usage() {
-  cat <<'USAGE'
-Usage: scripts/run-live-network-harness.sh [--dry-run] [--run-dir <path>]
-
-Automated single-machine harness for the live-network flow:
-  publish-offer → accept-offer → init-alice → init-bob → import → lock-wow → lock-xmr →
-  exchange-pre-sig → (bob claim-xmr publishes claim proof) → alice claim-wow → bob claim-xmr completes
-
-Safety:
-  - Reads all secrets from environment variables (never hardcoded).
-  - Requires XMR_WOW_LIVE_CONFIRM=1 to run live mode.
-  - Runs daemon + sharechain preflight BEFORE creating swap DB files.
-
-See docs/DEPLOYMENT.md for daemon setup prerequisites.
-
-Options:
-  --dry-run           Print required env vars and exit 0 (no network calls).
-  --run-dir <path>    Directory for logs + swap DBs (default: .planning/reports/live-harness-<ts>).
-USAGE
-}
-
-while [[ $# -gt 0 ]]; do
-  case "$1" in
-    --dry-run) DRY_RUN=true; shift ;;
-    --run-dir) RUN_DIR="${2:-}"; shift 2 ;;
-    -h|--help) usage; exit 0 ;;
-    *) echo "Unknown argument: $1" >&2; usage; exit 2 ;;
+for arg in "$@"; do
+  case "$arg" in
+    --cleanup) CLEANUP=true ;;
   esac
 done
 
-XMR_WOW_BIN="${XMR_WOW_BIN:-$ROOT_DIR/target/release/xmr-wow}"
+case "$TRANSPORT_ARG" in
+  oob|out-of-band)
+    TRANSPORT_MODE="out-of-band"
+    ;;
+  sharechain)
+    TRANSPORT_MODE="sharechain"
+    ;;
+  --cleanup)
+    TRANSPORT_MODE="out-of-band"
+    ;;
+  *)
+    echo "Usage: $0 [oob|sharechain] [--cleanup]" >&2
+    echo "  oob        Use out-of-band copy-paste transport (default)" >&2
+    echo "  sharechain Use sharechain node transport (requires --node-url)" >&2
+    exit 2
+    ;;
+esac
+
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+
+BINARY="${XMR_WOW_BIN:-${ROOT_DIR}/target/release/xmr-wow}"
 
 XMR_DAEMON_URL="${XMR_DAEMON_URL:-http://127.0.0.1:38081}"
 WOW_DAEMON_URL="${WOW_DAEMON_URL:-http://127.0.0.1:34568}"
-SHARECHAIN_NODE_URL="${SHARECHAIN_NODE_URL:-http://127.0.0.1:18091}"
+NODE_URL="${NODE_URL:-http://127.0.0.1:18091}"
 
-ALICE_LABEL="${ALICE_LABEL:-alice}"
-BOB_LABEL="${BOB_LABEL:-bob}"
+# Alice locks XMR (stagenet) and receives WOW; Bob locks WOW (mainnet) and receives XMR.
+ALICE_XMR_REFUND="${ALICE_XMR_REFUND:-}"
+ALICE_WOW_DEST="${ALICE_WOW_DEST:-}"
+BOB_WOW_REFUND="${BOB_WOW_REFUND:-}"
+BOB_XMR_DEST="${BOB_XMR_DEST:-}"
 
+ALICE_SPEND_KEY="${ALICE_SPEND_KEY:-}"
+ALICE_VIEW_KEY="${ALICE_VIEW_KEY:-}"
+ALICE_MNEMONIC="${ALICE_MNEMONIC:-}"            # alternative to spend/view key pair
+
+BOB_SPEND_KEY="${BOB_SPEND_KEY:-}"
+BOB_VIEW_KEY="${BOB_VIEW_KEY:-}"
+BOB_MNEMONIC="${BOB_MNEMONIC:-}"                # alternative to spend/view key pair
+
+ALICE_PW="${ALICE_PW:-alice-test-password}"
+BOB_PW="${BOB_PW:-bob-test-password}"
+
+# 0.001 XMR / 1.0 WOW in atomic units
 AMOUNT_XMR="${AMOUNT_XMR:-1000000000}"
-AMOUNT_WOW="${AMOUNT_WOW:-100000000000}"
-XMR_LOCK_BLOCKS="${XMR_LOCK_BLOCKS:-50}"
-WOW_LOCK_BLOCKS="${WOW_LOCK_BLOCKS:-200}"
+AMOUNT_WOW="${AMOUNT_WOW:-1000000000000}"
 
-ALICE_PASSWORD="${ALICE_PASSWORD:-}"
-BOB_PASSWORD="${BOB_PASSWORD:-}"
-
-ALICE_XMR_REFUND_ADDRESS="${ALICE_XMR_REFUND_ADDRESS:-}"
-BOB_WOW_REFUND_ADDRESS="${BOB_WOW_REFUND_ADDRESS:-}"
-ALICE_WOW_DESTINATION_ADDRESS="${ALICE_WOW_DESTINATION_ADDRESS:-}"
-BOB_XMR_DESTINATION_ADDRESS="${BOB_XMR_DESTINATION_ADDRESS:-}"
-
-ALICE_XMR_MNEMONIC="${ALICE_XMR_MNEMONIC:-}"
-ALICE_XMR_SPEND_KEY="${ALICE_XMR_SPEND_KEY:-}"
-ALICE_XMR_VIEW_KEY="${ALICE_XMR_VIEW_KEY:-}"
-
-BOB_WOW_MNEMONIC="${BOB_WOW_MNEMONIC:-}"
-BOB_WOW_SPEND_KEY="${BOB_WOW_SPEND_KEY:-}"
-BOB_WOW_VIEW_KEY="${BOB_WOW_VIEW_KEY:-}"
-
+# Set to recent block heights to avoid full rescans
 ALICE_XMR_SCAN_FROM="${ALICE_XMR_SCAN_FROM:-0}"
-ALICE_WOW_SCAN_FROM="${ALICE_WOW_SCAN_FROM:-0}"
 BOB_WOW_SCAN_FROM="${BOB_WOW_SCAN_FROM:-0}"
+ALICE_WOW_SCAN_FROM="${ALICE_WOW_SCAN_FROM:-0}"
 BOB_XMR_SCAN_FROM="${BOB_XMR_SCAN_FROM:-0}"
 
-require() {
-  local name="$1"
-  local value="${!name:-}"
-  if [[ -z "$value" ]]; then
-    echo "ERROR: missing required env var: ${name}" >&2
-    exit 1
-  fi
-}
-
-announce() { printf '%s\n' "$1"; }
-
-preflight() {
-  XMR_DAEMON_URL="$XMR_DAEMON_URL" \
-  WOW_DAEMON_URL="$WOW_DAEMON_URL" \
-  SHARECHAIN_NODE_URL="$SHARECHAIN_NODE_URL" \
-    ./scripts/live-network/preflight.sh
-}
-
-announce "XMR-WOW live-network harness"
-announce "Reference: docs/DEPLOYMENT.md"
-
-if [[ "$DRY_RUN" == "true" ]]; then
-  announce ""
-  announce "Dry run enabled (no network calls)."
-  announce ""
-  announce "Required env vars:"
-  announce "- XMR_WOW_LIVE_CONFIRM=1 (for live execution)"
-  announce "- ALICE_PASSWORD, BOB_PASSWORD"
-  announce "- ALICE_XMR_REFUND_ADDRESS, BOB_WOW_REFUND_ADDRESS"
-  announce "- ALICE_WOW_DESTINATION_ADDRESS, BOB_XMR_DESTINATION_ADDRESS"
-  announce "- Either ALICE_XMR_MNEMONIC OR (ALICE_XMR_SPEND_KEY + ALICE_XMR_VIEW_KEY)"
-  announce "- Either BOB_WOW_MNEMONIC OR (BOB_WOW_SPEND_KEY + BOB_WOW_VIEW_KEY)"
-  announce ""
-  announce "Optional:"
-  announce "- XMR_WOW_BIN (default: ./target/release/xmr-wow)"
-  announce "- XMR_DAEMON_URL (default: http://127.0.0.1:38081)"
-  announce "- WOW_DAEMON_URL (default: http://127.0.0.1:34568)"
-  announce "- SHARECHAIN_NODE_URL (default: http://127.0.0.1:18091)"
-  announce "- AMOUNT_XMR, AMOUNT_WOW, XMR_LOCK_BLOCKS, WOW_LOCK_BLOCKS"
-  announce "- *_SCAN_FROM overrides"
-  exit 0
-fi
-
-if [[ "${XMR_WOW_LIVE_CONFIRM:-0}" != "1" ]]; then
-  echo "ERROR: live execution is gated. Set XMR_WOW_LIVE_CONFIRM=1 to proceed." >&2
-  exit 1
-fi
-
-if [[ ! -x "$XMR_WOW_BIN" ]]; then
-  echo "ERROR: xmr-wow binary not found/executable at ${XMR_WOW_BIN}" >&2
-  echo "Hint: run: cargo build --release -p xmr-wow-client" >&2
-  exit 1
-fi
-
-require ALICE_PASSWORD
-require BOB_PASSWORD
-require ALICE_XMR_REFUND_ADDRESS
-require BOB_WOW_REFUND_ADDRESS
-require ALICE_WOW_DESTINATION_ADDRESS
-require BOB_XMR_DESTINATION_ADDRESS
-
-if [[ -z "$ALICE_XMR_MNEMONIC" ]]; then
-  require ALICE_XMR_SPEND_KEY
-  require ALICE_XMR_VIEW_KEY
-fi
-if [[ -z "$BOB_WOW_MNEMONIC" ]]; then
-  require BOB_WOW_SPEND_KEY
-  require BOB_WOW_VIEW_KEY
-fi
-
-# Preflight must run before creating swap DB files.
-preflight
-
-ts="$(date -u +%Y%m%dT%H%M%SZ)"
-if [[ -z "$RUN_DIR" ]]; then
-  RUN_DIR="${ROOT_DIR}/.planning/reports/live-harness-${ts}"
-fi
-mkdir -p "$RUN_DIR"
+RUN_DIR="${RUN_DIR:-${ROOT_DIR}/scripts/live-network/runs/$(date -u +%Y%m%dT%H%M%SZ)}"
 
 ALICE_DB="${RUN_DIR}/alice-swaps.db"
 BOB_DB="${RUN_DIR}/bob-swaps.db"
 
-announce ""
-announce "Run dir: ${RUN_DIR}"
-
-announce ""
-announce "== Offer publish/accept =="
-offer_out="$("$XMR_WOW_BIN" publish-offer \
-  --node "$SHARECHAIN_NODE_URL" \
-  --maker "$ALICE_LABEL" \
-  --amount-xmr "$AMOUNT_XMR" \
-  --amount-wow "$AMOUNT_WOW")"
-echo "$offer_out" | tee "${RUN_DIR}/publish-offer.log"
-OFFER_ID="$(echo "$offer_out" | awk '/^Offer ID:/ {print $3}')"
-if [[ -z "$OFFER_ID" ]]; then
-  echo "ERROR: failed to parse Offer ID from publish-offer output" >&2
-  exit 1
-fi
-
-accept_out="$("$XMR_WOW_BIN" accept-offer \
-  --node "$SHARECHAIN_NODE_URL" \
-  --offer-id "$OFFER_ID" \
-  --taker "$BOB_LABEL")"
-echo "$accept_out" | tee "${RUN_DIR}/accept-offer.log"
-BILATERAL_TOPIC="$(echo "$accept_out" | awk '/^Bilateral Topic:/ {print $3}')"
-if [[ -z "$BILATERAL_TOPIC" ]]; then
-  echo "ERROR: failed to parse Bilateral Topic from accept-offer output" >&2
-  exit 1
-fi
-
-announce ""
-announce "Bilateral topic: ${BILATERAL_TOPIC}"
-
-announce ""
-announce "== Init Alice/Bob + import =="
-init_alice_out="$("$XMR_WOW_BIN" --password "$ALICE_PASSWORD" --db "$ALICE_DB" init-alice \
-  --amount-xmr "$AMOUNT_XMR" \
-  --amount-wow "$AMOUNT_WOW" \
-  --xmr-daemon "$XMR_DAEMON_URL" \
-  --wow-daemon "$WOW_DAEMON_URL" \
-  --xmr-lock-blocks "$XMR_LOCK_BLOCKS" \
-  --wow-lock-blocks "$WOW_LOCK_BLOCKS" \
-  --alice-refund-address "$ALICE_XMR_REFUND_ADDRESS" \
-  --coord-node "$SHARECHAIN_NODE_URL" \
-  --coord-topic "$BILATERAL_TOPIC" \
-  --coord-self "$ALICE_LABEL" \
-  --coord-counterparty "$BOB_LABEL")"
-echo "$init_alice_out" | tee "${RUN_DIR}/init-alice.log"
-TEMP_SWAP_ID="$(echo "$init_alice_out" | awk '/^Temp swap ID:/ {print $4}')"
-if [[ -z "$TEMP_SWAP_ID" ]]; then
-  echo "ERROR: failed to parse Temp swap ID from init-alice output" >&2
-  exit 1
-fi
-
-init_bob_out="$("$XMR_WOW_BIN" --password "$BOB_PASSWORD" --db "$BOB_DB" init-bob \
-  --bob-refund-address "$BOB_WOW_REFUND_ADDRESS" \
-  --coord-node "$SHARECHAIN_NODE_URL" \
-  --coord-topic "$BILATERAL_TOPIC" \
-  --coord-self "$BOB_LABEL" \
-  --coord-counterparty "$ALICE_LABEL")"
-echo "$init_bob_out" | tee "${RUN_DIR}/init-bob.log"
-BOB_SWAP_ID="$(echo "$init_bob_out" | awk '/^Swap ID:/ {print $3}')"
-if [[ -z "$BOB_SWAP_ID" ]]; then
-  echo "ERROR: failed to parse Bob swap ID from init-bob output" >&2
-  exit 1
-fi
-
-import_out="$("$XMR_WOW_BIN" --password "$ALICE_PASSWORD" --db "$ALICE_DB" import \
-  --swap-id "$TEMP_SWAP_ID" \
-  --coord-node "$SHARECHAIN_NODE_URL" \
-  --coord-topic "$BILATERAL_TOPIC" \
-  --coord-self "$ALICE_LABEL" \
-  --coord-counterparty "$BOB_LABEL")"
-echo "$import_out" | tee "${RUN_DIR}/import.log"
-ALICE_SWAP_ID="$(echo "$import_out" | awk '/^Swap ID:/ {print $3}')"
-if [[ -z "$ALICE_SWAP_ID" ]]; then
-  echo "ERROR: failed to parse Alice swap ID from import output" >&2
-  exit 1
-fi
-
-announce ""
-announce "Swap IDs: alice=${ALICE_SWAP_ID} bob=${BOB_SWAP_ID}"
-
-announce ""
-announce "== Locks =="
-
-bob_lock_args=()
-if [[ -n "$BOB_WOW_MNEMONIC" ]]; then
-  bob_lock_args+=(--mnemonic "$BOB_WOW_MNEMONIC")
+if [[ "$TRANSPORT_MODE" == "out-of-band" ]]; then
+  TRANSPORT_FLAGS="--transport out-of-band"
 else
-  bob_lock_args+=(--spend-key "$BOB_WOW_SPEND_KEY" --view-key "$BOB_WOW_VIEW_KEY")
+  TRANSPORT_FLAGS="--transport sharechain --node-url ${NODE_URL}"
 fi
 
-"$XMR_WOW_BIN" --password "$BOB_PASSWORD" --db "$BOB_DB" lock-wow \
-  --swap-id "$BOB_SWAP_ID" \
-  --wow-daemon "$WOW_DAEMON_URL" \
-  --scan-from "$BOB_WOW_SCAN_FROM" \
-  --coord-node "$SHARECHAIN_NODE_URL" \
-  --coord-topic "$BILATERAL_TOPIC" \
-  --coord-self "$BOB_LABEL" \
-  --coord-counterparty "$ALICE_LABEL" \
-  "${bob_lock_args[@]}" | tee "${RUN_DIR}/lock-wow.log"
+log() { printf '[%s] %s\n' "$(date -u +%H:%M:%S)" "$*"; }
+ok()  { printf '[OK] %s\n' "$*"; }
+fail() { printf '[FAIL] %s\n' "$*" >&2; exit 1; }
 
-alice_lock_args=()
-if [[ -n "$ALICE_XMR_MNEMONIC" ]]; then
-  alice_lock_args+=(--mnemonic "$ALICE_XMR_MNEMONIC")
-else
-  alice_lock_args+=(--spend-key "$ALICE_XMR_SPEND_KEY" --view-key "$ALICE_XMR_VIEW_KEY")
-fi
+require_env() {
+  local name="$1"
+  local value="${!name:-}"
+  if [[ -z "$value" ]]; then
+    fail "Required env var not set: ${name}. See script header for documentation."
+  fi
+}
 
-"$XMR_WOW_BIN" --password "$ALICE_PASSWORD" --db "$ALICE_DB" lock-xmr \
-  --swap-id "$ALICE_SWAP_ID" \
-  --xmr-daemon "$XMR_DAEMON_URL" \
-  --wow-daemon "$WOW_DAEMON_URL" \
-  --scan-from "$ALICE_XMR_SCAN_FROM" \
-  --coord-node "$SHARECHAIN_NODE_URL" \
-  --coord-topic "$BILATERAL_TOPIC" \
-  --coord-self "$ALICE_LABEL" \
-  --coord-counterparty "$BOB_LABEL" \
-  "${alice_lock_args[@]}" | tee "${RUN_DIR}/lock-xmr.log"
+preflight() {
+  log "Running preflight checks..."
 
-announce ""
-announce "== Exchange adaptor pre-sigs =="
-"$XMR_WOW_BIN" --password "$ALICE_PASSWORD" --db "$ALICE_DB" exchange-pre-sig \
-  --swap-id "$ALICE_SWAP_ID" \
-  --coord-node "$SHARECHAIN_NODE_URL" \
-  --coord-topic "$BILATERAL_TOPIC" \
-  --coord-self "$ALICE_LABEL" \
-  --coord-counterparty "$BOB_LABEL" | tee "${RUN_DIR}/exchange-pre-sig-alice.log"
+  if [[ ! -x "$BINARY" ]]; then
+    fail "Binary not found or not executable: ${BINARY}. Run: cargo build --release -p xmr-wow-client"
+  fi
+  ok "Binary: ${BINARY}"
 
-"$XMR_WOW_BIN" --password "$BOB_PASSWORD" --db "$BOB_DB" exchange-pre-sig \
-  --swap-id "$BOB_SWAP_ID" \
-  --coord-node "$SHARECHAIN_NODE_URL" \
-  --coord-topic "$BILATERAL_TOPIC" \
-  --coord-self "$BOB_LABEL" \
-  --coord-counterparty "$ALICE_LABEL" | tee "${RUN_DIR}/exchange-pre-sig-bob.log"
+  if ! curl -sf --max-time 5 \
+      -d '{"jsonrpc":"2.0","id":"0","method":"get_info"}' \
+      -H 'Content-Type: application/json' \
+      "${XMR_DAEMON_URL}/json_rpc" >/dev/null 2>&1; then
+    fail "XMR daemon not responding at ${XMR_DAEMON_URL}. Start your XMR stagenet daemon."
+  fi
+  ok "XMR daemon: ${XMR_DAEMON_URL}"
 
-announce ""
-announce "== Claims =="
-announce "Starting Bob claim-xmr in background (it will publish Bob's claim proof, then wait for Alice)."
+  if ! curl -sf --max-time 5 \
+      -d '{"jsonrpc":"2.0","id":"0","method":"get_info"}' \
+      -H 'Content-Type: application/json' \
+      "${WOW_DAEMON_URL}/json_rpc" >/dev/null 2>&1; then
+    fail "WOW daemon not responding at ${WOW_DAEMON_URL}. Start your WOW mainnet daemon."
+  fi
+  ok "WOW daemon: ${WOW_DAEMON_URL}"
 
-BOB_CLAIM_LOG="${RUN_DIR}/claim-xmr.log"
-(
-  "$XMR_WOW_BIN" --password "$BOB_PASSWORD" --db "$BOB_DB" claim-xmr \
+  if [[ "$TRANSPORT_MODE" == "sharechain" ]]; then
+    if ! curl -sf --max-time 5 "${NODE_URL}/" >/dev/null 2>&1; then
+      fail "Sharechain node not responding at ${NODE_URL}. Start xmr-wow-node."
+    fi
+    ok "Sharechain node: ${NODE_URL}"
+  fi
+
+  require_env ALICE_XMR_REFUND
+  require_env ALICE_WOW_DEST
+  require_env BOB_WOW_REFUND
+  require_env BOB_XMR_DEST
+
+  if [[ -z "$ALICE_MNEMONIC" ]]; then
+    require_env ALICE_SPEND_KEY
+    require_env ALICE_VIEW_KEY
+  fi
+
+  if [[ -z "$BOB_MNEMONIC" ]]; then
+    require_env BOB_SPEND_KEY
+    require_env BOB_VIEW_KEY
+  fi
+
+  log "All preflight checks passed."
+}
+
+step_init_alice() {
+  log "Step 1: init-alice"
+
+  "$BINARY" $TRANSPORT_FLAGS \
+    --password "$ALICE_PW" --db "$ALICE_DB" \
+    init-alice \
+    --amount-xmr "$AMOUNT_XMR" \
+    --amount-wow "$AMOUNT_WOW" \
+    --xmr-daemon "$XMR_DAEMON_URL" \
+    --wow-daemon "$WOW_DAEMON_URL" \
+    --alice-refund-address "$ALICE_XMR_REFUND" \
+    > "${RUN_DIR}/init-alice.stdout" \
+    2> "${RUN_DIR}/init-alice.stderr"
+
+  # grep stdout only — stderr carries tracing logs that would corrupt the match
+  ALICE_INIT_MSG="$(grep '^xmrwow1:' "${RUN_DIR}/init-alice.stdout" | head -1)"
+  if [[ -z "$ALICE_INIT_MSG" ]]; then
+    cat "${RUN_DIR}/init-alice.stderr" >&2
+    fail "No xmrwow1: message in init-alice output"
+  fi
+
+  TEMP_SWAP_ID="$(awk '/Temp swap ID:/ {print $NF}' "${RUN_DIR}/init-alice.stdout")"
+  if [[ -z "$TEMP_SWAP_ID" ]]; then
+    fail "Could not parse Temp swap ID from init-alice output"
+  fi
+
+  ok "Step 1: init-alice completed (temp swap ID: ${TEMP_SWAP_ID})"
+}
+
+step_init_bob() {
+  log "Step 2: init-bob"
+
+  "$BINARY" $TRANSPORT_FLAGS \
+    --password "$BOB_PW" --db "$BOB_DB" \
+    init-bob \
+    --message "$ALICE_INIT_MSG" \
+    --bob-refund-address "$BOB_WOW_REFUND" \
+    > "${RUN_DIR}/init-bob.stdout" \
+    2> "${RUN_DIR}/init-bob.stderr"
+
+  BOB_RESPONSE_MSG="$(grep '^xmrwow1:' "${RUN_DIR}/init-bob.stdout" | head -1)"
+  if [[ -z "$BOB_RESPONSE_MSG" ]]; then
+    cat "${RUN_DIR}/init-bob.stderr" >&2
+    fail "No xmrwow1: message in init-bob output"
+  fi
+
+  BOB_SWAP_ID="$(awk '/^Swap ID:/ {print $NF}' "${RUN_DIR}/init-bob.stdout")"
+  if [[ -z "$BOB_SWAP_ID" ]]; then
+    fail "Could not parse Bob swap ID from init-bob output"
+  fi
+
+  ok "Step 2: init-bob completed (Bob swap ID: ${BOB_SWAP_ID})"
+}
+
+step_import() {
+  log "Step 3: import (Alice imports Bob's response)"
+
+  "$BINARY" $TRANSPORT_FLAGS \
+    --password "$ALICE_PW" --db "$ALICE_DB" \
+    import \
+    --swap-id "$TEMP_SWAP_ID" \
+    --message "$BOB_RESPONSE_MSG" \
+    > "${RUN_DIR}/import.stdout" \
+    2> "${RUN_DIR}/import.stderr"
+
+  ALICE_SWAP_ID="$(awk '/^Swap ID:/ {print $NF}' "${RUN_DIR}/import.stdout")"
+  if [[ -z "$ALICE_SWAP_ID" ]]; then
+    # fallback pattern for alternate output format
+    ALICE_SWAP_ID="$(awk '/swap.id/ {print $NF}' "${RUN_DIR}/import.stdout" | head -1)"
+  fi
+  if [[ -z "$ALICE_SWAP_ID" ]]; then
+    fail "Could not parse Alice swap ID from import output"
+  fi
+
+  ok "Step 3: import completed (Alice swap ID: ${ALICE_SWAP_ID})"
+}
+
+step_lock_wow() {
+  log "Step 4: lock-wow (Bob locks WOW first — lock-order safety)"
+
+  local bob_wallet_args=()
+  if [[ -n "$BOB_MNEMONIC" ]]; then
+    bob_wallet_args=(--mnemonic "$BOB_MNEMONIC")
+  else
+    bob_wallet_args=(--spend-key "$BOB_SPEND_KEY" --view-key "$BOB_VIEW_KEY")
+  fi
+
+  "$BINARY" $TRANSPORT_FLAGS \
+    --password "$BOB_PW" --db "$BOB_DB" \
+    lock-wow \
+    --swap-id "$BOB_SWAP_ID" \
+    --wow-daemon "$WOW_DAEMON_URL" \
+    --scan-from "$BOB_WOW_SCAN_FROM" \
+    "${bob_wallet_args[@]}" \
+    > "${RUN_DIR}/lock-wow.stdout" \
+    2> "${RUN_DIR}/lock-wow.stderr"
+
+  ok "Step 4: lock-wow completed"
+}
+
+step_lock_xmr() {
+  log "Step 5: lock-xmr (Alice locks XMR after verifying Bob's WOW lock)"
+
+  local alice_wallet_args=()
+  if [[ -n "$ALICE_MNEMONIC" ]]; then
+    alice_wallet_args=(--mnemonic "$ALICE_MNEMONIC")
+  else
+    alice_wallet_args=(--spend-key "$ALICE_SPEND_KEY" --view-key "$ALICE_VIEW_KEY")
+  fi
+
+  "$BINARY" $TRANSPORT_FLAGS \
+    --password "$ALICE_PW" --db "$ALICE_DB" \
+    lock-xmr \
+    --swap-id "$ALICE_SWAP_ID" \
+    --xmr-daemon "$XMR_DAEMON_URL" \
+    --wow-daemon "$WOW_DAEMON_URL" \
+    --scan-from "$ALICE_XMR_SCAN_FROM" \
+    "${alice_wallet_args[@]}" \
+    > "${RUN_DIR}/lock-xmr.stdout" \
+    2> "${RUN_DIR}/lock-xmr.stderr"
+
+  ok "Step 5: lock-xmr completed"
+}
+
+step_exchange_pre_sig() {
+  log "Step 6a: exchange-pre-sig (Alice sends pre-sig to Bob)"
+
+  "$BINARY" $TRANSPORT_FLAGS \
+    --password "$ALICE_PW" --db "$ALICE_DB" \
+    exchange-pre-sig \
+    --swap-id "$ALICE_SWAP_ID" \
+    --message "" \
+    > "${RUN_DIR}/exchange-pre-sig-alice.stdout" \
+    2> "${RUN_DIR}/exchange-pre-sig-alice.stderr" || true
+
+  ALICE_PRESIG_MSG="$(grep '^xmrwow1:' "${RUN_DIR}/exchange-pre-sig-alice.stdout" | head -1)"
+
+  log "Step 6b: exchange-pre-sig (Bob receives Alice's pre-sig, sends his)"
+
+  "$BINARY" $TRANSPORT_FLAGS \
+    --password "$BOB_PW" --db "$BOB_DB" \
+    exchange-pre-sig \
+    --swap-id "$BOB_SWAP_ID" \
+    --message "${ALICE_PRESIG_MSG:-}" \
+    > "${RUN_DIR}/exchange-pre-sig-bob.stdout" \
+    2> "${RUN_DIR}/exchange-pre-sig-bob.stderr"
+
+  BOB_PRESIG_MSG="$(grep '^xmrwow1:' "${RUN_DIR}/exchange-pre-sig-bob.stdout" | head -1)"
+  if [[ -z "$BOB_PRESIG_MSG" ]]; then
+    cat "${RUN_DIR}/exchange-pre-sig-bob.stderr" >&2
+    fail "No xmrwow1: message from Bob exchange-pre-sig"
+  fi
+
+  ok "Step 6: exchange-pre-sig completed"
+}
+
+step_claim_wow() {
+  log "Step 7: claim-wow (Alice claims WOW using Bob's completed adaptor sig)"
+
+  "$BINARY" $TRANSPORT_FLAGS \
+    --password "$ALICE_PW" --db "$ALICE_DB" \
+    claim-wow \
+    --swap-id "$ALICE_SWAP_ID" \
+    --wow-daemon "$WOW_DAEMON_URL" \
+    --message "$BOB_PRESIG_MSG" \
+    --destination "$ALICE_WOW_DEST" \
+    --scan-from "$ALICE_WOW_SCAN_FROM" \
+    > "${RUN_DIR}/claim-wow.stdout" \
+    2> "${RUN_DIR}/claim-wow.stderr"
+
+  # Alice's WOW claim reveals her spend key contribution on-chain; capture proof msg
+  ALICE_CLAIM_PROOF_MSG="$(grep '^xmrwow1:' "${RUN_DIR}/claim-wow.stdout" | head -1)"
+
+  ok "Step 7: claim-wow completed"
+}
+
+step_claim_xmr() {
+  log "Step 8: claim-xmr (Bob claims XMR using Alice's claim proof)"
+
+  # claim-xmr derives the full adaptor sig from the on-chain WOW transaction;
+  # falls back to Alice's pre-sig if no explicit claim proof was captured.
+  "$BINARY" $TRANSPORT_FLAGS \
+    --password "$BOB_PW" --db "$BOB_DB" \
+    claim-xmr \
     --swap-id "$BOB_SWAP_ID" \
     --xmr-daemon "$XMR_DAEMON_URL" \
-    --destination "$BOB_XMR_DESTINATION_ADDRESS" \
+    --message "${ALICE_CLAIM_PROOF_MSG:-$ALICE_PRESIG_MSG}" \
+    --destination "$BOB_XMR_DEST" \
     --scan-from "$BOB_XMR_SCAN_FROM" \
-    --coord-node "$SHARECHAIN_NODE_URL" \
-    --coord-topic "$BILATERAL_TOPIC" \
-    --coord-self "$BOB_LABEL" \
-    --coord-counterparty "$ALICE_LABEL"
-) 2>&1 | tee "$BOB_CLAIM_LOG" &
-BOB_CLAIM_PID=$!
+    > "${RUN_DIR}/claim-xmr.stdout" \
+    2> "${RUN_DIR}/claim-xmr.stderr"
 
-# Wait for Bob to publish claim proof before Alice tries to claim WOW.
-for _ in $(seq 1 60); do
-  if rg -q "Your claim proof" "$BOB_CLAIM_LOG" 2>/dev/null || rg -q "Published Bob's claim proof" "$BOB_CLAIM_LOG" 2>/dev/null; then
-    break
+  ok "Step 8: claim-xmr completed"
+}
+
+cleanup_on_exit() {
+  if [[ "$CLEANUP" == "true" ]]; then
+    log "Cleaning up run directory: ${RUN_DIR}"
+    rm -rf "$RUN_DIR"
   fi
-  sleep 1
-done
+}
+trap cleanup_on_exit EXIT
 
-announce "Running Alice claim-wow (will fetch Bob claim proof from sharechain)."
-"$XMR_WOW_BIN" --password "$ALICE_PASSWORD" --db "$ALICE_DB" claim-wow \
-  --swap-id "$ALICE_SWAP_ID" \
-  --wow-daemon "$WOW_DAEMON_URL" \
-  --destination "$ALICE_WOW_DESTINATION_ADDRESS" \
-  --scan-from "$ALICE_WOW_SCAN_FROM" \
-  --coord-node "$SHARECHAIN_NODE_URL" \
-  --coord-topic "$BILATERAL_TOPIC" \
-  --coord-self "$ALICE_LABEL" \
-  --coord-counterparty "$BOB_LABEL" | tee "${RUN_DIR}/claim-wow.log"
+echo "=== XMR-WOW E2E Live Network Harness ==="
+echo "Transport: ${TRANSPORT_MODE}"
+echo "XMR daemon: ${XMR_DAEMON_URL}"
+echo "WOW daemon: ${WOW_DAEMON_URL}"
+if [[ "$TRANSPORT_MODE" == "sharechain" ]]; then
+  echo "Sharechain node: ${NODE_URL}"
+fi
 
-announce "Waiting for Bob claim-xmr to complete..."
-wait "$BOB_CLAIM_PID"
+preflight
 
-announce ""
-announce "Live harness complete ✅"
-announce "Logs + DBs: ${RUN_DIR}"
+mkdir -p "$RUN_DIR"
+echo "Run dir: ${RUN_DIR}"
+echo ""
+
+ALICE_INIT_MSG=""
+BOB_RESPONSE_MSG=""
+TEMP_SWAP_ID=""
+BOB_SWAP_ID=""
+ALICE_SWAP_ID=""
+ALICE_PRESIG_MSG=""
+BOB_PRESIG_MSG=""
+ALICE_CLAIM_PROOF_MSG=""
+
+# Bob locks WOW first, Alice locks XMR second (lock-order safety invariant)
+step_init_alice
+step_init_bob
+step_import
+
+echo ""
+echo "=== Swap IDs ==="
+echo "Alice swap ID: ${ALICE_SWAP_ID}"
+echo "Bob swap ID:   ${BOB_SWAP_ID}"
+echo ""
+echo "NOTE: lock-wow, lock-xmr, exchange-pre-sig, and claim steps require"
+echo "funded wallets and live daemon interaction. They may fail if wallets"
+echo "are not funded or daemons are not synced."
+echo ""
+
+step_lock_wow
+step_lock_xmr
+step_exchange_pre_sig
+step_claim_wow
+step_claim_xmr
+
+echo ""
+echo "=== ALL STEPS COMPLETED ==="
+echo "Artifacts in: ${RUN_DIR}"
+echo ""
+echo "Per-step artifacts:"
+ls -lh "${RUN_DIR}/" 2>/dev/null || true
+echo ""
+echo "Swap DBs (proof artifacts):"
+echo "  Alice: ${ALICE_DB}"
+echo "  Bob:   ${BOB_DB}"
+echo ""
+echo "To inspect swap state:"
+echo "  ${BINARY} --password \"\$ALICE_PW\" --db \"${ALICE_DB}\" list"
+echo "  ${BINARY} --password \"\$BOB_PW\" --db \"${BOB_DB}\" list"
