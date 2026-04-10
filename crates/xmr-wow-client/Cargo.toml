@@ -34,9 +34,22 @@ rand_core          = { workspace = true }
 curve25519-dalek   = { workspace = true }
 argon2             = { workspace = true }
 aes-gcm            = { workspace = true }
+zeroize            = { workspace = true }
 base64             = { workspace = true }
 rpassword          = { workspace = true }
 xmr-wow-wallet     = { workspace = true }
+
+[[test]]
+name = "adversarial_messages"
+path = "tests/adversarial_messages.rs"
+
+[[test]]
+name = "lock_order_enforcement"
+path = "tests/lock_order_enforcement.rs"
+
+[[test]]
+name = "no_key_in_default_output"
+path = "tests/no_key_in_default_output.rs"
 
 [dev-dependencies]
 axum = { workspace = true }

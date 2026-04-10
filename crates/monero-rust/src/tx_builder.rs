@@ -7,6 +7,8 @@
 //!
 //! These will be implemented using monero-oxide's wallet::send module
 //! when the XmrWallet adapter is ready.
+//
+// todo!() stubs: deferred until monero-oxide port.
 
 pub mod native {
     use serde::{Deserialize, Serialize};
@@ -190,6 +192,7 @@ pub mod native {
     /// Create and sign a transaction with pre-fetched decoys.
     ///
     /// TODO: Implement using monero-oxide's SignableTransaction.
+    #[allow(clippy::too_many_arguments)] // All parameters are required for the crypto signing interface
     pub async fn create_transaction_with_decoys(
         _node_url: &str,
         _network: &str,
@@ -223,7 +226,7 @@ pub mod native {
         let weight = estimate_tx_weight(num_inputs, num_outputs, false, &[]);
         let raw_fee = weight as u64 * per_weight;
         let fee = if mask > 0 {
-            ((raw_fee + mask - 1) / mask) * mask
+            raw_fee.div_ceil(mask) * mask
         } else {
             raw_fee
         };

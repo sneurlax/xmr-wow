@@ -2,7 +2,14 @@
 name = "wownero-rust"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 publish.workspace = true
+
+# cargo-udeps: wownero-oxide, base58-monero, and futures are declared for the
+# pending wownero-oxide wallet-adapter port (scanner.rs / tx_builder.rs stubs).
+# They are intentionally unused until the port is complete.
+[package.metadata.cargo-udeps.ignore]
+normal = ["wownero-oxide", "base58-monero", "futures"]
 
 [features]
 default = []
@@ -13,6 +20,7 @@ mock-rpc = []
 # Crypto backend: wownero-oxide (dalek v4, WOW-specific RctType 8, ring 22, INV_EIGHT)
 # Sub-crate lockfile collision resolved by renaming wownero-oxide sub-crates from
 # monero-* to wownero-* (vendored at deps/wownero-oxide/).
+# Reserved: used by scanner.rs / tx_builder.rs stubs pending wallet-adapter port.
 wownero-oxide = { workspace = true }
 curve25519-dalek = { workspace = true }
 

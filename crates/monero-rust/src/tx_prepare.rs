@@ -34,7 +34,7 @@ pub fn prepare_send_inputs(
                 && !o.frozen
                 && is_spendable(o, daemon_height)
                 && !excluded_key_images
-                    .map_or(false, |exc| exc.contains(&o.key_image))
+                    .is_some_and(|exc| exc.contains(&o.key_image))
         })
         .cloned()
         .collect();
@@ -74,7 +74,7 @@ pub fn prepare_sweep_inputs(
                 && !o.frozen
                 && is_spendable(o, daemon_height)
                 && !excluded_key_images
-                    .map_or(false, |exc| exc.contains(&o.key_image))
+                    .is_some_and(|exc| exc.contains(&o.key_image))
         })
         .cloned()
         .collect();

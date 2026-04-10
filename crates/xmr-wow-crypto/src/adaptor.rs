@@ -39,23 +39,13 @@ use curve25519_dalek::{
 };
 use rand_core::{CryptoRng, RngCore};
 use serde::{Deserialize, Serialize};
-use tiny_keccak::{Hasher, Keccak};
 
 use crate::error::CryptoError;
+use crate::keccak::keccak256;
 
 #[inline(always)]
 fn parse_scalar(bytes: [u8; 32]) -> Option<Scalar> {
     Scalar::from_canonical_bytes(bytes).into()
-}
-
-// --- internal helpers --------------------------------------------------------
-
-fn keccak256(data: &[u8]) -> [u8; 32] {
-    let mut h = Keccak::v256();
-    h.update(data);
-    let mut out = [0u8; 32];
-    h.finalize(&mut out);
-    out
 }
 
 /// Schnorr challenge: c = Keccak256("xmr-adaptor-v1" || R_T || A || msg)
@@ -220,7 +210,7 @@ mod tests {
     #[test]
     fn test_adaptor_pre_sig_verifies() {
         let (a, A) = make_party();
-        let (t, T) = make_party();
+        let (_t, T) = make_party();
         let msg = b"swap-tx-hash-goes-here";
 
         let pre_sig = AdaptorSignature::sign(&a, &A, msg, &T, &mut OsRng);
@@ -232,7 +222,7 @@ mod tests {
         // A pre-sig (R_T, s') should NOT satisfy s'*G == R_T + c*A
         // (it fails the completed-sig check, which requires s*G == R_T + c*A)
         let (a, A) = make_party();
-        let (t, T) = make_party();
+        let (_t, T) = make_party();
         let msg = b"message";
 
         let pre_sig = AdaptorSignature::sign(&a, &A, msg, &T, &mut OsRng);

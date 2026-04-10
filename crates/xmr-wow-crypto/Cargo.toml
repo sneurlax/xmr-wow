@@ -7,25 +7,21 @@ license.workspace   = true
 publish.workspace   = true
 
 [features]
-default = ["std"]
-std     = ["base58-monero/std"]
+default = []
 
 [dependencies]
-base58-monero    = { workspace = true, default-features = false }
 curve25519-dalek = { workspace = true }
 rand_core        = { workspace = true, default-features = false }
 rand             = { workspace = true, optional = true }
-sha3             = { workspace = true, default-features = false }
 sha2             = { workspace = true, default-features = false }
 zeroize          = { workspace = true, default-features = false }
 thiserror        = { workspace = true }
 serde            = { workspace = true, default-features = false }
-hex              = { workspace = true, default-features = false }
 tiny-keccak      = { workspace = true, default-features = false }
 hmac             = { workspace = true, default-features = false }
 crc              = { workspace = true }
 polyseed         = { workspace = true }
 
 [dev-dependencies]
-rand = { workspace = true }
-hex  = { workspace = true }
+rand     = { workspace = true }
+proptest = { workspace = true }

@@ -14,4 +14,4 @@ pub use share::{
 };
 pub use chain::{ChainError, SwapChain, CONSENSUS_ID};
 pub use escrow::{EscrowError, EscrowIndex, EscrowState};
-pub use mm_rpc::merge_mining_router;
+pub use mm_rpc::{merge_mining_router, merge_mining_router_with_connect_info};

@@ -21,3 +21,6 @@ tracing-subscriber = { workspace = true }
 anyhow             = { workspace = true }
 serde              = { workspace = true }
 serde_json         = { workspace = true }
+
+[dev-dependencies]
+# No external dev-dependencies needed: node_smoke.rs uses only std (blocking HTTP, process::Command)

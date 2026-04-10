@@ -9,6 +9,7 @@ use clap::{Parser, Subcommand};
 use curve25519_dalek::constants::ED25519_BASEPOINT_POINT as G;
 use curve25519_dalek::scalar::Scalar;
 use rand::rngs::OsRng;
+use zeroize::Zeroizing;
 use xmr_wow_client::{
     build_observed_refund_timing, decode_message, decrypt_secret, derive_key, encode_message,
     encrypt_secret, guarantee_decision, restore_secret_into_state, GuaranteeDecision,
@@ -255,6 +256,9 @@ enum Command {
         mnemonic: Option<String>,
         #[arg(long, default_value = "0")]
         scan_from: u64,
+        /// Print private key material (view private key) to stdout. Do not use on shared systems.
+        #[arg(long)]
+        verbose: bool,
     },
 }
 
@@ -512,7 +516,7 @@ fn load_and_decrypt_state(
     store: &SwapStore,
     swap_id: &[u8; 32],
     enc_key: &[u8; 32],
-) -> anyhow::Result<(SwapState, [u8; 32], Vec<u8>)> {
+) -> anyhow::Result<(SwapState, Zeroizing<[u8; 32]>, Vec<u8>)> {
     let (state_json, encrypted_secret) = store
         .load_with_secret(swap_id)?
         .ok_or_else(|| anyhow::anyhow!("swap {} not found", hex::encode(swap_id)))?;
@@ -528,7 +532,7 @@ fn load_and_decrypt_state(
         .map_err(|e| anyhow::anyhow!("failed to decrypt secret: {}", e))?;
 
     let state: SwapState = serde_json::from_str(&state_json)?;
-    let state = restore_secret_into_state(state, secret_bytes)?;
+    let state = restore_secret_into_state(state, *secret_bytes)?;
 
     Ok((state, secret_bytes, encrypted_blob))
 }
@@ -794,7 +798,7 @@ async fn main() -> anyhow::Result<()> {
 
             // Deserialize and restore secret into state
             let state: SwapState = serde_json::from_str(&state_json)?;
-            let state = restore_secret_into_state(state, secret_bytes)?;
+            let state = restore_secret_into_state(state, *secret_bytes)?;
 
             // Decode Bob's response
             let response_msg: ProtocolMessage = decode_message(&message)?;
@@ -850,7 +854,7 @@ async fn main() -> anyhow::Result<()> {
             };
 
             // Re-encrypt secret, save under real swap_id, delete temp entry
-            let encrypted = encrypt_secret(&enc_key, &secret_bytes);
+            let encrypted = encrypt_secret(&enc_key, &*secret_bytes);
             let state_json = serde_json::to_string(&state)?;
             store.save_with_secret(&real_swap_id, &state_json, Some(&encrypted))?;
             if temp_id != real_swap_id {
@@ -920,7 +924,7 @@ async fn main() -> anyhow::Result<()> {
             if swaps.is_empty() {
                 println!("No swaps found.");
             } else {
-                println!("{:<66}  {:<15}  {}", "SWAP ID", "PHASE", "ROLE");
+                println!("{:<66}  {:<15}  ROLE", "SWAP ID", "PHASE");
                 println!("{}", "-".repeat(90));
                 for (id, state_json) in swaps {
                     let id_hex = hex::encode(id);
@@ -936,7 +940,7 @@ async fn main() -> anyhow::Result<()> {
                         }
                         Err(_) if !all => continue,
                         Err(_) => {
-                            println!("{:<66}  {:<15}  {}", id_hex, "???", "???");
+                            println!("{:<66}  {:<15}  ???", id_hex, "???");
                         }
                     }
                 }
@@ -996,7 +1000,7 @@ async fn main() -> anyhow::Result<()> {
             let wow_height: u64 =
                 {
                     let resp: serde_json::Value = reqwest::Client::new()
-                    .post(&format!("{}/json_rpc", wow_daemon))
+                    .post(format!("{}/json_rpc", wow_daemon))
                     .json(&serde_json::json!({"jsonrpc":"2.0","id":"0","method":"get_block_count"}))
                     .send().await?.json().await?;
                     resp["result"]["count"].as_u64().unwrap_or(0)
@@ -1034,7 +1038,7 @@ async fn main() -> anyhow::Result<()> {
                 .await?;
             println!("XMR lock tx: {}", hex::encode(tx_hash));
 
-            // Wait for confirmation (FLOW-08)
+            // wait for confirmation
             println!("Waiting for confirmation...");
             wait_for_confirmation(&xmr_wallet, &tx_hash, 1, 10).await?;
 
@@ -1062,7 +1066,7 @@ async fn main() -> anyhow::Result<()> {
             let swap_id_bytes = state.swap_id().ok_or_else(|| {
                 anyhow::anyhow!("swap state has no swap_id (still in KeyGeneration phase?)")
             })?;
-            let encrypted = encrypt_secret(&enc_key, &secret_bytes);
+            let encrypted = encrypt_secret(&enc_key, &*secret_bytes);
             let state_json = serde_json::to_string(&state)?;
             store.save_with_secret(&swap_id_bytes, &state_json, Some(&encrypted))?;
         }
@@ -1117,7 +1121,7 @@ async fn main() -> anyhow::Result<()> {
                 .await?;
             println!("WOW lock tx: {}", hex::encode(wow_tx_hash));
 
-            // Wait for confirmation (FLOW-08)
+            // wait for confirmation
             println!("Waiting for WOW confirmation...");
             wait_for_confirmation(&wow_wallet, &wow_tx_hash, 1, 10).await?;
 
@@ -1145,7 +1149,7 @@ async fn main() -> anyhow::Result<()> {
             let swap_id_bytes = state.swap_id().ok_or_else(|| {
                 anyhow::anyhow!("swap state has no swap_id (still in KeyGeneration phase?)")
             })?;
-            let encrypted = encrypt_secret(&enc_key, &secret_bytes);
+            let encrypted = encrypt_secret(&enc_key, &*secret_bytes);
             let state_json = serde_json::to_string(&state)?;
             store.save_with_secret(&swap_id_bytes, &state_json, Some(&encrypted))?;
         }
@@ -1172,7 +1176,7 @@ async fn main() -> anyhow::Result<()> {
             let swap_id_bytes = state.swap_id().ok_or_else(|| {
                 anyhow::anyhow!("swap state has no swap_id (still in KeyGeneration phase?)")
             })?;
-            let encrypted = encrypt_secret(&enc_key, &secret_bytes);
+            let encrypted = encrypt_secret(&enc_key, &*secret_bytes);
             let state_json = serde_json::to_string(&state)?;
             store.save_with_secret(&swap_id_bytes, &state_json, Some(&encrypted))?;
 
@@ -1246,7 +1250,7 @@ async fn main() -> anyhow::Result<()> {
             println!("Extracted Bob's secret from his completed adaptor signature.");
 
             // Compute combined spend key: a + b
-            let my_scalar = Scalar::from_canonical_bytes(secret_bytes)
+            let my_scalar = Scalar::from_canonical_bytes(*secret_bytes)
                 .into_option()
                 .ok_or_else(|| anyhow::anyhow!("invalid secret scalar"))?;
             let combined = my_scalar + bob_secret;
@@ -1263,7 +1267,7 @@ async fn main() -> anyhow::Result<()> {
                 .await?;
             println!("WOW sweep tx: {}", hex::encode(sweep_tx));
 
-            // Wait for confirmation (FLOW-08)
+            // wait for confirmation
             println!("Waiting for WOW sweep confirmation...");
             wait_for_confirmation(&wow_wallet, &sweep_tx, 1, 10).await?;
 
@@ -1331,7 +1335,7 @@ async fn main() -> anyhow::Result<()> {
                     other => anyhow::bail!("expected WowLocked state, got {}", phase_name(other)),
                 };
 
-            let my_scalar = Scalar::from_canonical_bytes(secret_bytes)
+            let my_scalar = Scalar::from_canonical_bytes(*secret_bytes)
                 .into_option()
                 .ok_or_else(|| anyhow::anyhow!("invalid secret scalar"))?;
 
@@ -1383,7 +1387,7 @@ async fn main() -> anyhow::Result<()> {
                 .await?;
             println!("XMR sweep tx: {}", hex::encode(sweep_tx));
 
-            // Wait for confirmation (FLOW-08)
+            // wait for confirmation
             println!("Waiting for XMR sweep confirmation...");
             wait_for_confirmation(&xmr_wallet, &sweep_tx, 1, 10).await?;
 
@@ -1539,7 +1543,7 @@ async fn main() -> anyhow::Result<()> {
                         .map_err(|_| anyhow::anyhow!("Wrong password"))?;
 
                     // Verify secret matches stored pubkey (scalar * G == pubkey)
-                    let scalar = Scalar::from_canonical_bytes(secret_bytes)
+                    let scalar = Scalar::from_canonical_bytes(*secret_bytes)
                         .into_option()
                         .ok_or_else(|| anyhow::anyhow!("invalid secret scalar"))?;
                     let computed = (scalar * G).compress().to_bytes();
@@ -1647,6 +1651,7 @@ async fn main() -> anyhow::Result<()> {
             view_key,
             mnemonic,
             scan_from,
+            verbose,
         } => {
             let seed_coin = if network.contains("wow") {
                 SeedCoin::Wownero
@@ -1668,7 +1673,12 @@ async fn main() -> anyhow::Result<()> {
                 "Spend pubkey: {}",
                 hex::encode(spend_point.compress().to_bytes())
             );
-            println!("View privkey: {}", hex::encode(view_scalar.to_bytes()));
+            // only print view privkey with --verbose
+            if verbose {
+                println!("View privkey: {}", hex::encode(view_scalar.to_bytes()));
+            } else {
+                println!("View privkey: [redacted, use --verbose to display]");
+            }
             println!("Scan from: {} to tip", scan_from);
 
             if network.contains("wow") {

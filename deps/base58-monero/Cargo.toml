@@ -17,6 +17,8 @@ description = "Library with support for encoding/decoding Monero base58 strings.
 
 edition = "2021"
 rust-version = "1.63.0"
+# Vendored upstream bench — gated by disabling autobenches to avoid stable compile errors
+autobenches = false
 
 [package.metadata]
 

@@ -1,6 +1,6 @@
 /// Integration tests: p2pool merge-mining compatibility.
 use std::sync::Arc;
-use xmr_wow_sharechain::{SwapChain, Difficulty, CONSENSUS_ID, merge_mining_router};
+use xmr_wow_sharechain::{SwapChain, Difficulty, CONSENSUS_ID, SwapShare, merge_mining_router};
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use serde_json::{json, Value};
@@ -70,8 +70,21 @@ async fn merge_mining_rpc_submit_solution_adds_to_chain() {
             "params": null
         }),
     ).await;
-    let aux_blob = aux_resp["result"]["aux_blob"].as_str()
+    let aux_blob_hex = aux_resp["result"]["aux_blob"].as_str()
         .expect("aux_blob must be present").to_string();
+
+    // Decode the pending share, grind the nonce to satisfy PoW, and re-encode.
+    // (In real mining the miner grinds the Monero block nonce which maps to the
+    // share nonce; here we simulate that step directly.)
+    let aux_blob_bytes = hex::decode(&aux_blob_hex).unwrap();
+    let mut pending = SwapShare::deserialize(&aux_blob_bytes).unwrap();
+    for n in 0u32..=u32::MAX {
+        pending.nonce = n;
+        if pending.difficulty.check_pow(&pending.pow_hash()) {
+            break;
+        }
+    }
+    let aux_blob_valid = hex::encode(pending.serialize());
 
     let app = merge_mining_router(chain.clone());
     let resp = call(app, json!({
@@ -79,7 +92,7 @@ async fn merge_mining_rpc_submit_solution_adds_to_chain() {
         "id": 1,
         "method": "merge_mining_submit_solution",
         "params": {
-            "aux_blob": aux_blob,
+            "aux_blob": aux_blob_valid,
             "aux_hash": "0".repeat(64),
             "blob": hex::encode(b"fake monero block"),
             "merkle_proof": [],

@@ -84,6 +84,14 @@ For the 9-step flow you need:
 
 Record the mnemonic, spend key, view key, and address for each funded wallet.
 
+To verify wallet connectivity and confirm funding before starting a swap, use `scan-test`:
+
+```bash
+$BIN scan-test --network xmr-stagenet --daemon http://127.0.0.1:38081 --address <your-address> --view-key <view-key> --scan-from <height>
+```
+
+This is a read-only diagnostic that scans for outputs without modifying any state. Use `--verbose` to see full output details (note: verbose mode displays the view key in output).
+
 ## 5. Refund Gating
 
 Refund readiness is part of the protocol, not an optional recovery path.
@@ -266,10 +274,23 @@ $BIN --password "bob-secret-pw" --db bob-swaps.db claim-xmr \
 
 ## 7. Validation Harness
 
-For proof coverage, use:
+### scripts/test-harness.sh
+
+Runs cargo test suites (`xmr-wow-wallet` and `xmr-wow-integration` 
+plus wownero-simnet spend test). This validates swap protocol correctness in simnet but does not
+drive a live-network swap.
 
 ```bash
 ./scripts/test-harness.sh
+```
+
+### scripts/run-live-network-harness.sh
+
+Automated single-machine harness that drives the full swap flow end-to-end using live daemons.
+
+```bash
+./scripts/run-live-network-harness.sh --dry-run   # Print required env vars and exit
+./scripts/run-live-network-harness.sh             # Run live (requires XMR_WOW_LIVE_CONFIRM=1)
 ```
 
 ## 8. Troubleshooting

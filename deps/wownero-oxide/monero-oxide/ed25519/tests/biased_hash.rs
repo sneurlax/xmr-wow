@@ -1,4 +1,4 @@
-use monero_ed25519::Point;
+use wownero_ed25519::Point;
 
 mod hex;
 

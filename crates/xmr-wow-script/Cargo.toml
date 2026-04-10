@@ -19,7 +19,6 @@ curve25519-dalek = { workspace = true, optional = true }
 ed25519-dalek    = { workspace = true, optional = true }
 
 [dev-dependencies]
-hex      = { workspace = true }
 proptest = { workspace = true }
 
 [[test]]
@@ -49,3 +48,7 @@ required-features = ["stub-crypto"]
 [[test]]
 name = "serialization"
 required-features = ["stub-crypto"]
+
+[[test]]
+name = "real_crypto_roundtrip"
+required-features = ["real-crypto"]

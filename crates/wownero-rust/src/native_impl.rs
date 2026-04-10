@@ -58,7 +58,7 @@ mod tests {
 
     #[test]
     fn test_system_time_provider_default() {
-        let provider = SystemTimeProvider::default();
+        let provider = SystemTimeProvider;
         let now = provider.now();
         assert!(now > 0);
     }

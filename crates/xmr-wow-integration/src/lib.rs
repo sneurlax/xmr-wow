@@ -1,9 +1,9 @@
-/// Integration test helpers.
-///
-/// The standalone simnet harness lives at `deps/simnet-testbed/` because its
-/// simnet forks pin a different `monero-oxide` revision.
 pub mod simnet_testbed {
-    //! Docs only. Use the standalone crate directly.
+    //! Integration test helpers.
+    //!
+    //! The standalone simnet harness lives at `deps/simnet-testbed/` because its
+    //! simnet forks pin a different `monero-oxide` revision.
+    //! Use the standalone crate directly.
 }
 
 use xmr_wow_sharechain::{SwapChain, SwapShare, EscrowOp, Difficulty};

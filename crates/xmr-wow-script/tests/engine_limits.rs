@@ -1,7 +1,7 @@
 //! Tests for engine resource limit enforcement.
 
 mod helpers;
-use helpers::{bytes32, ctx, stub_engine};
+use helpers::{ctx, stub_engine};
 use xmr_wow_script::{Engine, Limits, Opcode, ScriptError, StubBackend};
 
 fn limited_engine(max_ops: usize, max_depth: usize) -> Engine<StubBackend> {
@@ -15,12 +15,6 @@ fn limited_engine(max_ops: usize, max_depth: usize) -> Engine<StubBackend> {
 
 #[test]
 fn max_script_ops_limit_enforced() {
-    // Script with 1001 Push ops ; should fail at op 1001
-    let mut script: Vec<Opcode> = (0..1001)
-        .map(|_| Opcode::Push(vec![0x01]))
-        .collect();
-    // Add a Drop at end to prevent stack depth issues
-    // (Actually stack depth of 100 would trigger first ; use small ops limit)
     // Use a limit of 5 ops to make it easy to test:
     let eng = limited_engine(5, 1000);
     let script = vec![
@@ -41,15 +35,7 @@ fn max_script_ops_limit_enforced() {
 fn ops_at_exactly_limit_succeeds() {
     // Script with exactly max_ops operations (including final push of result)
     let eng = limited_engine(3, 100);
-    let script = vec![
-        Opcode::Push(vec![0x01, 0x01]),
-        Opcode::Push(vec![0x01, 0x01]),
-        Opcode::EqualVerify, // op 3 ; at limit, should succeed
-        // Note: engine checks op_count BEFORE executing, increments first
-        // Wait ; we need the final truthy item. Let's use 2 ops + final push.
-    ];
-    // 3 ops: push, push, EqualVerify  ; but then stack is empty -> VerifyFailed
-    // Use 3 ops that leave truthy on stack:
+    // 3 ops that leave truthy on stack:
     let script = vec![
         Opcode::Push(vec![0x01]),
         Opcode::Drop, // op 2
