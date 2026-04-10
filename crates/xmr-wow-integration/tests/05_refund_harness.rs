@@ -124,7 +124,7 @@ fn persist_and_reload(
     let encrypted_secret = encrypted_secret.expect("encrypted secret should persist");
     let decrypted = decrypt_secret(&enc_key, &encrypted_secret).unwrap();
     let reloaded: SwapState = serde_json::from_str(&state_json).unwrap();
-    restore_secret_into_state(reloaded, decrypted)
+    restore_secret_into_state(reloaded, *decrypted)
         .unwrap()
         .refresh_refund_readiness()
         .unwrap()
