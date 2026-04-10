@@ -44,7 +44,7 @@ pub fn encrypt_secret(key: &[u8; 32], secret: &[u8; 32]) -> Vec<u8> {
     let nonce_bytes: [u8; 12] = rand::random();
     let nonce = Nonce::from(nonce_bytes);
     let ciphertext = cipher
-        .encrypt(nonce, secret.as_ref())
+        .encrypt(&nonce, secret.as_ref())
         .expect("AES-256-GCM encryption should not fail");
     // nonce (12) + ciphertext (32) + tag (16) = 60 bytes
     let mut result = Vec::with_capacity(60);
@@ -68,7 +68,7 @@ pub fn decrypt_secret(key: &[u8; 32], encrypted: &[u8]) -> Result<Zeroizing<[u8;
     let nonce = Nonce::from(nonce_arr);
 
     let plaintext = cipher
-        .decrypt(nonce, ciphertext)
+        .decrypt(&nonce, ciphertext)
         .map_err(|_| SwapError::DecryptionFailed("AES-256-GCM decryption failed (wrong password or corrupted data)".into()))?;
 
     if plaintext.len() != 32 {

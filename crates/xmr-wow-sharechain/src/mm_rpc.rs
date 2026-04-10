@@ -1,14 +1,4 @@
-// xmr-wow-sharechain: P2Pool merge-mining JSON-RPC server
-//
-// Exposes the three method names p2pool v4.0 expects on POST /json_rpc:
-//   1. merge_mining_get_chain_id   -> chain ID (genesis keccak hash)
-//   2. merge_mining_get_aux_block  -> current aux_hash + pending share blob + difficulty
-//   3. merge_mining_submit_solution -> attach MergeMinedProof and add share to chain
-//
-// Also exposes swap-client RPC methods on the same endpoint:
-//   4. get_swap_status   -> EscrowState for a swap_id
-//   5. get_chain_height  -> current tip height
-//   6. submit_escrow_op  -> submit an EscrowOp for inclusion in the next share
+// xmr-wow-sharechain: merge-mining and swap-client JSON-RPC server (POST /json_rpc)
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -23,12 +13,11 @@ use serde_json::Value;
 use tiny_keccak::{Hasher, Keccak};
 
 use crate::chain::{SwapChain, CONSENSUS_ID};
+use crate::coord_store::{BroadcastRegistry, CoordMessageStore};
 use crate::escrow::EscrowState;
 use crate::share::{
     Difficulty, EscrowOp, Hash, MergeMinedProof, SwapShare,
 };
-
-// --- JSON-RPC envelope -------------------------------------------------------
 
 #[derive(Debug, Deserialize)]
 pub struct RpcRequest {
@@ -73,14 +62,12 @@ fn err(id: Value, code: i32, msg: impl Into<String>) -> Json<Value> {
     )
 }
 
-// --- Shared state ------------------------------------------------------------
-
 #[derive(Clone)]
 pub struct RpcState {
-    pub chain: Arc<SwapChain>,
+    pub chain:     Arc<SwapChain>,
+    pub msg_store: Arc<CoordMessageStore>,
+    pub broadcast: Arc<BroadcastRegistry>,
 }
-
-// --- Genesis chain ID (keccak256(CONSENSUS_ID)) ------------------------------
 
 fn genesis_chain_id() -> [u8; 32] {
     let mut h = Keccak::v256();
@@ -90,23 +77,15 @@ fn genesis_chain_id() -> [u8; 32] {
     out
 }
 
-// --- RPC method handlers -----------------------------------------------------
-
-// Method: merge_mining_get_chain_id
-// Returns: { "chain_id": "<64 hex chars>" }
 fn handle_get_chain_id(id: Value) -> Json<Value> {
     let chain_id = hex::encode(genesis_chain_id());
     ok(id, serde_json::json!({ "chain_id": chain_id }))
 }
 
-// Method: merge_mining_get_aux_block
-// Params: { "address": "...", "aux_hash": "...", "height": N, "prev_id": "..." }
-// Returns: { "aux_hash": "<32 bytes hex>", "aux_blob": "<pending share hex>", "aux_diff": N }
 fn handle_get_aux_block(state: &RpcState, id: Value, _params: Option<Value>) -> Json<Value> {
     let aux_hash = state.chain.current_aux_hash();
     let height   = state.chain.tip_height();
 
-    // Build a minimal pending share extending the current tip
     let tip_id  = state.chain.tip_id().unwrap_or([0u8; 32]);
     let tip_diff = state.chain.difficulty_at_tip();
     let pending_diff = if tip_diff.is_zero() {
@@ -126,8 +105,6 @@ fn handle_get_aux_block(state: &RpcState, id: Value, _params: Option<Value>) -> 
         }
     };
 
-    // If the chain has no tip yet, produce a genesis share (height 0, parent all-zeros).
-    // Otherwise produce a share extending the current tip (height + 1).
     let has_tip = state.chain.tip_id().is_some();
     let pending_height = if has_tip { height + 1 } else { 0 };
     let pending_parent = if has_tip { tip_id } else { [0u8; 32] };
@@ -158,18 +135,12 @@ fn handle_get_aux_block(state: &RpcState, id: Value, _params: Option<Value>) -> 
     )
 }
 
-// Method: merge_mining_submit_solution
-// Params:
-//   { "aux_blob": "<hex>", "aux_hash": "<hex>", "blob": "<hex>",
-//     "merkle_proof": ["<hex>", ...], "path": N, "seed_hash": "<hex>" }
-// Returns: { "status": "accepted" } or error
 fn handle_submit_solution(state: &RpcState, id: Value, params: Option<Value>) -> Json<Value> {
     let params = match params {
         Some(p) => p,
         None    => return err(id, -32602, "params required"),
     };
 
-    // Decode aux_blob -> SwapShare
     let aux_blob_hex = match params.get("aux_blob").and_then(Value::as_str) {
         Some(s) => s.to_string(),
         None    => return err(id, -32602, "aux_blob required"),
@@ -183,7 +154,6 @@ fn handle_submit_solution(state: &RpcState, id: Value, params: Option<Value>) ->
         Err(e) => return err(id, -32602, format!("aux_blob deserialize: {e}")),
     };
 
-    // Decode Monero block blob
     let block_blob_hex = match params.get("blob").and_then(Value::as_str) {
         Some(s) => s.to_string(),
         None    => return err(id, -32602, "blob required"),
@@ -193,7 +163,6 @@ fn handle_submit_solution(state: &RpcState, id: Value, params: Option<Value>) ->
         Err(e) => return err(id, -32602, format!("blob hex decode: {e}")),
     };
 
-    // Decode seed_hash
     let seed_hash_hex = match params.get("seed_hash").and_then(Value::as_str) {
         Some(s) => s.to_string(),
         None    => return err(id, -32602, "seed_hash required"),
@@ -208,7 +177,6 @@ fn handle_submit_solution(state: &RpcState, id: Value, params: Option<Value>) ->
     let mut seed_hash: Hash = [0u8; 32];
     seed_hash.copy_from_slice(&seed_hash_bytes);
 
-    // Decode merkle_proof
     let merkle_proof: Vec<Hash> = match params.get("merkle_proof").and_then(Value::as_array) {
         Some(arr) => {
             let mut proof = Vec::new();
@@ -235,7 +203,6 @@ fn handle_submit_solution(state: &RpcState, id: Value, params: Option<Value>) ->
         .and_then(Value::as_u64)
         .unwrap_or(0) as u32;
 
-    // Attach the merge-mining proof to the share
     share.pow_proof = Some(MergeMinedProof {
         monero_block_blob,
         merkle_proof,
@@ -243,18 +210,12 @@ fn handle_submit_solution(state: &RpcState, id: Value, params: Option<Value>) ->
         seed_hash,
     });
 
-    // Add to chain
     match state.chain.add_share(share) {
         Ok(_)  => ok(id, serde_json::json!({ "status": "accepted" })),
         Err(e) => err(id, -32000, format!("share rejected: {e}")),
     }
 }
 
-// -- Swap-client methods -------------------------------------------------------
-
-// Method: get_swap_status
-// Params: { "swap_id": "<64 hex chars>" }
-// Returns: { "state": "Open"|"Claimed"|"Refunded", ... }
 fn handle_get_swap_status(state: &RpcState, id: Value, params: Option<Value>) -> Json<Value> {
     let params = match params {
         Some(p) => p,
@@ -299,17 +260,12 @@ fn handle_get_swap_status(state: &RpcState, id: Value, params: Option<Value>) ->
     }
 }
 
-// Method: get_chain_height
-// Returns: { "height": N }
 fn handle_get_chain_height(state: &RpcState, id: Value) -> Json<Value> {
     let height = state.chain.tip_height();
     ok(id, serde_json::json!({ "height": height }))
 }
 
-// Method: submit_escrow_op
-// Params: { "op": <EscrowOp as JSON> }
-// Queues an EscrowOp to be included in the next share.
-// For now: immediately applies it and wraps it in a share at height+1.
+/// Wraps a single `EscrowOp` in a share and adds it to the chain immediately.
 fn handle_submit_escrow_op(state: &RpcState, id: Value, params: Option<Value>) -> Json<Value> {
     let params = match params {
         Some(p) => p,
@@ -324,7 +280,6 @@ fn handle_submit_escrow_op(state: &RpcState, id: Value, params: Option<Value>) -
         Err(e) => return err(id, -32602, format!("op deserialize: {e}")),
     };
 
-    // Build a minimal share containing this single op
     let tip_id   = state.chain.tip_id().unwrap_or([0u8; 32]);
     let height   = state.chain.tip_height();
     let tip_diff = state.chain.difficulty_at_tip();
@@ -360,7 +315,83 @@ fn handle_submit_escrow_op(state: &RpcState, id: Value, params: Option<Value>) -
     }
 }
 
-// --- Dispatcher ---------------------------------------------------------------
+fn parse_swap_id_hex(hex_str: &str, id: &Value) -> Result<[u8; 32], Json<Value>> {
+    let bytes = hex::decode(hex_str)
+        .map_err(|e| err(id.clone(), -32602, format!("swap_id hex decode: {e}")))?;
+    let arr: [u8; 32] = bytes
+        .try_into()
+        .map_err(|_| err(id.clone(), -32602, "swap_id must be 32 bytes"))?;
+    Ok(arr)
+}
+
+fn handle_publish_coord_message(state: &RpcState, id: Value, params: Option<Value>) -> Json<Value> {
+    let params = match params {
+        Some(p) => p,
+        None => return err(id, -32602, "params required"),
+    };
+    let swap_id_hex = match params.get("swap_id").and_then(Value::as_str) {
+        Some(s) => s,
+        None => return err(id, -32602, "swap_id required"),
+    };
+    let swap_id = match parse_swap_id_hex(swap_id_hex, &id) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let payload_value = match params.get("payload") {
+        Some(v) => v.clone(),
+        None => return err(id, -32602, "payload required"),
+    };
+    let raw: Vec<u8> = match serde_json::from_value(payload_value) {
+        Ok(v) => v,
+        Err(e) => return err(id, -32602, format!("payload deserialize: {e}")),
+    };
+
+    let index = state.msg_store.publish(swap_id, raw.clone());
+    state.broadcast.send(swap_id, raw);
+    ok(id, serde_json::json!({ "accepted": true, "index": index }))
+}
+
+fn handle_poll_coord_messages(state: &RpcState, id: Value, params: Option<Value>) -> Json<Value> {
+    let params = match params {
+        Some(p) => p,
+        None => return err(id, -32602, "params required"),
+    };
+    let swap_id_hex = match params.get("swap_id").and_then(Value::as_str) {
+        Some(s) => s,
+        None => return err(id, -32602, "swap_id required"),
+    };
+    let swap_id = match parse_swap_id_hex(swap_id_hex, &id) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+    let after_index = params
+        .get("after_index")
+        .and_then(Value::as_u64)
+        .unwrap_or(0) as usize;
+
+    let messages = state.msg_store.get_after(&swap_id, after_index);
+    let next_index = after_index + messages.len();
+    ok(id, serde_json::json!({ "messages": messages, "next_index": next_index }))
+}
+
+fn handle_replay_coord_messages(state: &RpcState, id: Value, params: Option<Value>) -> Json<Value> {
+    let params = match params {
+        Some(p) => p,
+        None => return err(id, -32602, "params required"),
+    };
+    let swap_id_hex = match params.get("swap_id").and_then(Value::as_str) {
+        Some(s) => s,
+        None => return err(id, -32602, "swap_id required"),
+    };
+    let swap_id = match parse_swap_id_hex(swap_id_hex, &id) {
+        Ok(v) => v,
+        Err(e) => return e,
+    };
+
+    let messages = state.msg_store.get_all(&swap_id);
+    let count = messages.len();
+    ok(id, serde_json::json!({ "messages": messages, "count": count }))
+}
 
 async fn handle_rpc(
     State(state): State<RpcState>,
@@ -379,7 +410,6 @@ async fn handle_rpc_with_connect_info(
 
 fn handle_rpc_inner(state: RpcState, req: RpcRequest, caller_addr: Option<SocketAddr>) -> Json<Value> {
     let id = req.id.clone();
-    // localhost-only methods are rejected for non-loopback callers
     if is_localhost_only_method(req.method.as_str()) {
         let addr = caller_addr.unwrap_or_else(|| "127.0.0.1:0".parse().unwrap());
         if let Err(rpc_err) = check_loopback(&addr, id.clone()) {
@@ -394,6 +424,9 @@ fn handle_rpc_inner(state: RpcState, req: RpcRequest, caller_addr: Option<Socket
         "get_swap_status"               => handle_get_swap_status(&state, id, req.params),
         "get_chain_height"              => handle_get_chain_height(&state, id),
         "submit_escrow_op"              => handle_submit_escrow_op(&state, id, req.params),
+        "publish_coord_message"         => handle_publish_coord_message(&state, id, req.params),
+        "poll_coord_messages"           => handle_poll_coord_messages(&state, id, req.params),
+        "replay_coord_messages"         => handle_replay_coord_messages(&state, id, req.params),
         other => err(
             id,
             -32601,
@@ -402,14 +435,10 @@ fn handle_rpc_inner(state: RpcState, req: RpcRequest, caller_addr: Option<Socket
     }
 }
 
-// --- Localhost gating helpers -------------------------------------------------
-
-/// Returns true iff `method` is restricted to loopback-only callers.
 pub fn is_localhost_only_method(method: &str) -> bool {
     method == "submit_escrow_op"
 }
 
-/// Returns Ok(()) if the caller address is loopback, or an RPC error Json if not.
 pub fn check_loopback(addr: &std::net::SocketAddr, id: serde_json::Value) -> Result<(), Json<Value>> {
     if addr.ip().is_loopback() {
         Ok(())
@@ -418,28 +447,29 @@ pub fn check_loopback(addr: &std::net::SocketAddr, id: serde_json::Value) -> Res
     }
 }
 
-// --- Public API ---------------------------------------------------------------
-
-/// Build an Axum router exposing all merge-mining and swap-client RPC endpoints.
-///
-/// Without ConnectInfo — for unit tests. submit_escrow_op defaults to localhost.
+/// Router without `ConnectInfo`; intended for unit tests (`submit_escrow_op` is unrestricted).
 pub fn merge_mining_router(chain: Arc<SwapChain>) -> Router {
-    let state = RpcState { chain };
+    let state = RpcState {
+        chain,
+        msg_store: Arc::new(CoordMessageStore::new()),
+        broadcast: Arc::new(BroadcastRegistry::new()),
+    };
     Router::new()
         .route("/json_rpc", post(handle_rpc))
         .with_state(state)
 }
 
-/// With ConnectInfo — gates submit_escrow_op to loopback.
-/// Serve with `.into_make_service_with_connect_info::<SocketAddr>()`.
+/// Router with `ConnectInfo`; gates `submit_escrow_op` to loopback callers.
 pub fn merge_mining_router_with_connect_info(chain: Arc<SwapChain>) -> Router {
-    let state = RpcState { chain };
+    let state = RpcState {
+        chain,
+        msg_store: Arc::new(CoordMessageStore::new()),
+        broadcast: Arc::new(BroadcastRegistry::new()),
+    };
     Router::new()
         .route("/json_rpc", post(handle_rpc_with_connect_info))
         .with_state(state)
 }
-
-// --- Helpers -----------------------------------------------------------------
 
 fn current_timestamp() -> u64 {
     use std::time::{SystemTime, UNIX_EPOCH};
@@ -448,8 +478,6 @@ fn current_timestamp() -> u64 {
         .map(|d| d.as_secs())
         .unwrap_or(0)
 }
-
-// --- Tests --------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
@@ -495,7 +523,6 @@ mod tests {
         let resp   = post_rpc(router, "merge_mining_get_chain_id", Value::Null).await;
         let chain_id = resp["result"]["chain_id"].as_str().unwrap().to_string();
         assert_eq!(chain_id.len(), 64, "chain_id should be 64 hex chars");
-        // Must be valid hex
         assert!(hex::decode(&chain_id).is_ok(), "chain_id must be valid hex");
     }
 
@@ -504,11 +531,9 @@ mod tests {
         let chain  = make_chain();
         let router = merge_mining_router(chain.clone());
 
-        // No tip yet ; aux_hash should be all-zeros
         let resp = post_rpc(router, "merge_mining_get_aux_block", Value::Null).await;
         let aux_hash = resp["result"]["aux_hash"].as_str().unwrap();
         assert_eq!(aux_hash.len(), 64);
-        // With an empty chain the merkle root is all-zeros
         assert_eq!(aux_hash, "0".repeat(64));
     }
 
@@ -517,7 +542,6 @@ mod tests {
         let chain  = make_chain();
         let router = merge_mining_router(chain.clone());
 
-        // First get an aux_block to obtain a valid pending share blob
         let aux_resp = post_rpc(
             merge_mining_router(chain.clone()),
             "merge_mining_get_aux_block",
@@ -526,12 +550,8 @@ mod tests {
         .await;
         let aux_blob_hex = aux_resp["result"]["aux_blob"].as_str().unwrap().to_string();
 
-        // Decode the pending share, grind the nonce to satisfy PoW, and re-encode.
-        // (In a real mining setup the miner would grind the Monero block nonce which
-        // translates to the share nonce; here we simulate that step directly.)
         let aux_blob_bytes = hex::decode(&aux_blob_hex).unwrap();
         let mut pending = crate::share::SwapShare::deserialize(&aux_blob_bytes).unwrap();
-        // Grind nonce until PoW is satisfied
         for n in 0u32..=u32::MAX {
             pending.nonce = n;
             if pending.difficulty.check_pow(&pending.pow_hash()) {
@@ -540,7 +560,6 @@ mod tests {
         }
         let aux_blob_valid = hex::encode(pending.serialize());
 
-        // Submit the solution (with stub proof data and valid nonce)
         let params = serde_json::json!({
             "aux_blob":     aux_blob_valid,
             "aux_hash":     "0".repeat(64),
@@ -551,7 +570,6 @@ mod tests {
         });
 
         let resp = post_rpc(router, "merge_mining_submit_solution", params).await;
-        // Should be accepted (the chain starts empty so genesis-level share is valid)
         let status = resp["result"]["status"].as_str().unwrap_or("");
         assert_eq!(status, "accepted", "unexpected response: {resp:?}");
         assert_eq!(chain.share_count(), 1);
@@ -598,5 +616,133 @@ mod tests {
         assert!(!is_localhost_only_method("merge_mining_get_chain_id"));
         assert!(!is_localhost_only_method("get_chain_height"));
         assert!(!is_localhost_only_method("merge_mining_submit_solution"));
+        // coord message methods are public (not localhost-gated)
+        assert!(!is_localhost_only_method("publish_coord_message"));
+        assert!(!is_localhost_only_method("poll_coord_messages"));
+        assert!(!is_localhost_only_method("replay_coord_messages"));
+    }
+
+    fn make_swap_id_hex() -> String {
+        hex::encode([42u8; 32])
+    }
+
+    #[tokio::test]
+    async fn publish_rpc_accepted() {
+        let chain = make_chain();
+        let router = merge_mining_router(chain);
+        let params = serde_json::json!({
+            "swap_id": make_swap_id_hex(),
+            "payload": [1u8, 2u8, 3u8],
+        });
+        let resp = post_rpc(router, "publish_coord_message", params).await;
+        assert_eq!(resp["result"]["accepted"].as_bool(), Some(true));
+        assert_eq!(resp["result"]["index"].as_u64(), Some(0));
+    }
+
+    #[tokio::test]
+    async fn publish_rpc_index_increments() {
+        let chain = make_chain();
+        let router = merge_mining_router(chain);
+        let swap_id = make_swap_id_hex();
+        for expected_index in 0u64..3 {
+            let params = serde_json::json!({
+                "swap_id": swap_id,
+                "payload": [expected_index as u8],
+            });
+            let resp = post_rpc(router.clone(), "publish_coord_message", params).await;
+            assert_eq!(resp["result"]["index"].as_u64(), Some(expected_index));
+        }
+    }
+
+    #[tokio::test]
+    async fn poll_rpc_returns_messages() {
+        let chain = make_chain();
+        let router = merge_mining_router(chain);
+        let swap_id = make_swap_id_hex();
+
+        for i in 0u8..3 {
+            let params = serde_json::json!({
+                "swap_id": swap_id,
+                "payload": [i],
+            });
+            post_rpc(router.clone(), "publish_coord_message", params).await;
+        }
+
+        let params = serde_json::json!({ "swap_id": swap_id, "after_index": 0 });
+        let resp = post_rpc(router.clone(), "poll_coord_messages", params).await;
+        let msgs = resp["result"]["messages"].as_array().unwrap();
+        assert_eq!(msgs.len(), 3);
+        assert_eq!(resp["result"]["next_index"].as_u64(), Some(3));
+
+        let params = serde_json::json!({ "swap_id": swap_id, "after_index": 2 });
+        let resp = post_rpc(router.clone(), "poll_coord_messages", params).await;
+        let msgs = resp["result"]["messages"].as_array().unwrap();
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(resp["result"]["next_index"].as_u64(), Some(3));
+    }
+
+    #[tokio::test]
+    async fn poll_unknown_swap_returns_empty() {
+        let chain = make_chain();
+        let router = merge_mining_router(chain);
+        let unknown = hex::encode([0xffu8; 32]);
+        let params = serde_json::json!({ "swap_id": unknown, "after_index": 0 });
+        let resp = post_rpc(router, "poll_coord_messages", params).await;
+        let msgs = resp["result"]["messages"].as_array().unwrap();
+        assert!(msgs.is_empty());
+        assert_eq!(resp["result"]["next_index"].as_u64(), Some(0));
+    }
+
+    #[tokio::test]
+    async fn replay_rpc_returns_all() {
+        let chain = make_chain();
+        let router = merge_mining_router(chain);
+        let swap_id = make_swap_id_hex();
+
+        for i in 0u8..3 {
+            let params = serde_json::json!({
+                "swap_id": swap_id,
+                "payload": [i],
+            });
+            post_rpc(router.clone(), "publish_coord_message", params).await;
+        }
+
+        let params = serde_json::json!({ "swap_id": swap_id });
+        let resp = post_rpc(router, "replay_coord_messages", params).await;
+        let msgs = resp["result"]["messages"].as_array().unwrap();
+        assert_eq!(msgs.len(), 3);
+        assert_eq!(resp["result"]["count"].as_u64(), Some(3));
+    }
+
+    #[tokio::test]
+    async fn replay_unknown_swap_returns_empty() {
+        let chain = make_chain();
+        let router = merge_mining_router(chain);
+        let unknown = hex::encode([0xaau8; 32]);
+        let params = serde_json::json!({ "swap_id": unknown });
+        let resp = post_rpc(router, "replay_coord_messages", params).await;
+        let msgs = resp["result"]["messages"].as_array().unwrap();
+        assert!(msgs.is_empty());
+        assert_eq!(resp["result"]["count"].as_u64(), Some(0));
+    }
+
+    #[tokio::test]
+    async fn publish_rpc_missing_params() {
+        let chain = make_chain();
+        let router = merge_mining_router(chain);
+        let resp = post_rpc(router, "publish_coord_message", Value::Null).await;
+        assert_eq!(resp["error"]["code"].as_i64(), Some(-32602));
+    }
+
+    #[tokio::test]
+    async fn publish_rpc_invalid_swap_id() {
+        let chain = make_chain();
+        let router = merge_mining_router(chain);
+        let params = serde_json::json!({
+            "swap_id": "not-valid-hex!!!",
+            "payload": [1u8, 2u8],
+        });
+        let resp = post_rpc(router, "publish_coord_message", params).await;
+        assert_eq!(resp["error"]["code"].as_i64(), Some(-32602));
     }
 }
