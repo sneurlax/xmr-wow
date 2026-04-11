@@ -1,11 +1,14 @@
 //! Async transport trait for `CoordMessage` with sharechain and out-of-band implementations.
 
+use std::sync::{Arc, Mutex};
+
 use async_trait::async_trait;
 use tokio::io::AsyncBufReadExt;
 
 use crate::coord_message::CoordMessage;
 use crate::node_client::NodeClient;
 use crate::protocol_message::ProtocolMessage;
+use crate::store::SwapStore;
 
 /// Errors produced by SwapMessenger operations.
 #[derive(Debug, thiserror::Error)]
@@ -35,6 +38,8 @@ pub trait SwapMessenger: Send + Sync {
 pub struct SharechainMessenger {
     /// URL of the sharechain node (e.g. `http://127.0.0.1:34568`).
     pub node_url: String,
+    /// Shared swap store for cursor persistence across receive calls.
+    pub store: Arc<Mutex<SwapStore>>,
 }
 
 #[async_trait]
@@ -50,13 +55,22 @@ impl SwapMessenger for SharechainMessenger {
     }
 
     async fn receive(&self, swap_id: &[u8; 32]) -> Result<Option<CoordMessage>, MessengerError> {
+        let after_index = {
+            let store = self.store.lock().unwrap();
+            store.get_cursor(swap_id).map_err(|e| MessengerError::Transport(e.to_string()))?
+        };
         let client = NodeClient::new(&self.node_url);
-        let (msgs, _next) = client.poll_coord_messages(swap_id, 0)
+        let (msgs, next_index) = client.poll_coord_messages(swap_id, after_index)
             .await
             .map_err(|e| MessengerError::Transport(e.to_string()))?;
         match msgs.into_iter().next() {
             None => Ok(None),
             Some(raw) => {
+                {
+                    let store = self.store.lock().unwrap();
+                    store.set_cursor(swap_id, next_index)
+                        .map_err(|e| MessengerError::Transport(e.to_string()))?;
+                }
                 let coord: CoordMessage = serde_json::from_slice(&raw)
                     .map_err(|e| MessengerError::Serialization(e.to_string()))?;
                 Ok(Some(coord))
@@ -105,6 +119,11 @@ impl SwapMessenger for OobMessenger {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::store::SwapStore;
+
+    fn make_test_store() -> Arc<Mutex<SwapStore>> {
+        Arc::new(Mutex::new(SwapStore::open_in_memory().unwrap()))
+    }
 
     #[test]
     fn messenger_error_transport_display() {
@@ -122,6 +141,7 @@ mod tests {
     async fn sharechain_send_returns_err_not_panic() {
         let m = SharechainMessenger {
             node_url: "http://127.0.0.1:34568".into(),
+            store: make_test_store(),
         };
         let coord = CoordMessage {
             swap_id: [0u8; 32],
@@ -140,6 +160,7 @@ mod tests {
     async fn sharechain_receive_returns_err_not_panic() {
         let m = SharechainMessenger {
             node_url: "http://127.0.0.1:34568".into(),
+            store: make_test_store(),
         };
         let swap_id = [0u8; 32];
         let result = m.receive(&swap_id).await;
@@ -196,6 +217,7 @@ mod tests {
     fn sharechain_messenger_is_object_safe() {
         let m: Box<dyn SwapMessenger + Send + Sync> = Box::new(SharechainMessenger {
             node_url: "http://127.0.0.1:34568".into(),
+            store: make_test_store(),
         });
         // Just holding the Box is enough: this is a compile-time proof.
         let _ = m;

@@ -1,11 +1,11 @@
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use tokio::{net::TcpListener, task::JoinHandle};
 use xmr_wow_client::{
     node_client::NodeClient,
     wrap_protocol_message, unwrap_protocol_message,
     OobMessenger,
-    SharechainMessenger, SwapMessenger,
+    SharechainMessenger, SwapMessenger, SwapStore,
     ProtocolMessage,
 };
 use xmr_wow_crypto::{AdaptorSignature, CompletedSignature, DleqProof, KeyContribution};
@@ -96,8 +96,10 @@ async fn sharechain_transport_full_message_flow() {
     let msgs = make_test_messages(swap_id);
     assert_eq!(msgs.len(), 4, "make_test_messages must return exactly 4 variants");
 
-    let alice_messenger = SharechainMessenger { node_url: server.url.clone() };
-    let bob_messenger = SharechainMessenger { node_url: server.url.clone() };
+    let alice_store = Arc::new(Mutex::new(SwapStore::open_in_memory().unwrap()));
+    let bob_store = Arc::new(Mutex::new(SwapStore::open_in_memory().unwrap()));
+    let alice_messenger = SharechainMessenger { node_url: server.url.clone(), store: alice_store };
+    let bob_messenger = SharechainMessenger { node_url: server.url.clone(), store: bob_store };
     let alice_client = NodeClient::new(&server.url);
     let bob_client = NodeClient::new(&server.url);
 

@@ -1,6 +1,8 @@
 //! XMR-WOW atomic swap CLI.
 //! Legacy refund commands are hidden and fail closed. Signing stays local.
 
+use std::sync::{Arc, Mutex};
+
 use clap::{Parser, Subcommand};
 use curve25519_dalek::constants::ED25519_BASEPOINT_POINT as G;
 use curve25519_dalek::scalar::Scalar;
@@ -57,6 +59,7 @@ struct Cli {
 fn make_messenger(
     mode: &TransportMode,
     node_url: Option<&str>,
+    store: Arc<Mutex<SwapStore>>,
 ) -> anyhow::Result<Box<dyn xmr_wow_client::swap_messenger::SwapMessenger + Send + Sync>> {
     match mode {
         TransportMode::OutOfBand => Ok(Box::new(xmr_wow_client::swap_messenger::OobMessenger)),
@@ -68,6 +71,7 @@ fn make_messenger(
             })?;
             Ok(Box::new(xmr_wow_client::swap_messenger::SharechainMessenger {
                 node_url: url.to_string(),
+                store,
             }))
         }
     }
@@ -621,9 +625,10 @@ fn load_and_decrypt_state(
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
     let cli = Cli::parse();
-    // Fail fast on bad transport config before opening the store.
-    let _messenger = make_messenger(&cli.transport, cli.node_url.as_deref())?;
     let store = SwapStore::open(&cli.db)?;
+    let store_shared = Arc::new(Mutex::new(store));
+    // Fail fast on bad transport config before entering command handlers.
+    let messenger = make_messenger(&cli.transport, cli.node_url.as_deref(), store_shared.clone())?;
 
     match cli.cmd {
         Command::InitAlice {
@@ -656,7 +661,7 @@ async fn main() -> anyhow::Result<()> {
             }
 
             let password = get_password(cli.password.as_deref())?;
-            let salt = store.get_or_create_salt()?;
+            let salt = store_shared.lock().unwrap().get_or_create_salt()?;
             let enc_key = derive_key(password.as_bytes(), &salt);
 
             let xmr_height = XmrWallet::new(&xmr_daemon).get_current_height().await?;
@@ -697,7 +702,7 @@ async fn main() -> anyhow::Result<()> {
             let temp_id = keccak256(&my_pubkey);
 
             let state_json = serde_json::to_string(&state)?;
-            store.save_with_secret(&temp_id, &state_json, Some(&encrypted))?;
+            store_shared.lock().unwrap().save_with_secret(&temp_id, &state_json, Some(&encrypted))?;
 
             let msg = ProtocolMessage::Init {
                 pubkey: my_pubkey,
@@ -731,7 +736,7 @@ async fn main() -> anyhow::Result<()> {
             bob_refund_address,
         } => {
             let password = get_password(cli.password.as_deref())?;
-            let salt = store.get_or_create_salt()?;
+            let salt = store_shared.lock().unwrap().get_or_create_salt()?;
             let enc_key = derive_key(password.as_bytes(), &salt);
 
             let init_msg: ProtocolMessage = decode_message(&message)?;
@@ -818,7 +823,7 @@ async fn main() -> anyhow::Result<()> {
             };
 
             let state_json = serde_json::to_string(&state)?;
-            store.save_with_secret(&swap_id, &state_json, Some(&encrypted))?;
+            store_shared.lock().unwrap().save_with_secret(&swap_id, &state_json, Some(&encrypted))?;
 
             let response = ProtocolMessage::Response {
                 pubkey: my_pubkey,
@@ -846,12 +851,12 @@ async fn main() -> anyhow::Result<()> {
 
         Command::Import { swap_id, message } => {
             let password = get_password(cli.password.as_deref())?;
-            let salt = store.get_or_create_salt()?;
+            let salt = store_shared.lock().unwrap().get_or_create_salt()?;
             let enc_key = derive_key(password.as_bytes(), &salt);
 
             let temp_id = parse_swap_id(&swap_id)?;
 
-            let (state_json, encrypted_secret) = store
+            let (state_json, encrypted_secret) = store_shared.lock().unwrap()
                 .load_with_secret(&temp_id)?
                 .ok_or_else(|| anyhow::anyhow!("swap {} not found", swap_id))?;
 
@@ -917,9 +922,12 @@ async fn main() -> anyhow::Result<()> {
 
             let encrypted = encrypt_secret(&enc_key, &*secret_bytes);
             let state_json = serde_json::to_string(&state)?;
-            store.save_with_secret(&real_swap_id, &state_json, Some(&encrypted))?;
-            if temp_id != real_swap_id {
-                store.delete(&temp_id)?;
+            {
+                let store = store_shared.lock().unwrap();
+                store.save_with_secret(&real_swap_id, &state_json, Some(&encrypted))?;
+                if temp_id != real_swap_id {
+                    store.delete(&temp_id)?;
+                }
             }
 
             println!("Imported Bob's response successfully.");
@@ -930,7 +938,7 @@ async fn main() -> anyhow::Result<()> {
 
         Command::Show { swap_id } => {
             let id = parse_swap_id(&swap_id)?;
-            match store.load(&id)? {
+            match store_shared.lock().unwrap().load(&id)? {
                 Some(state_json) => {
                     let state: SwapState = serde_json::from_str(&state_json)?;
                     let state = state.refresh_refund_readiness()?;
@@ -980,7 +988,7 @@ async fn main() -> anyhow::Result<()> {
         }
 
         Command::List { all } => {
-            let swaps = store.list_all()?;
+            let swaps = store_shared.lock().unwrap().list_all()?;
             if swaps.is_empty() {
                 println!("No swaps found.");
             } else {
@@ -1045,11 +1053,11 @@ async fn main() -> anyhow::Result<()> {
             scan_from,
         } => {
             let password = get_password(cli.password.as_deref())?;
-            let salt = store.get_or_create_salt()?;
+            let salt = store_shared.lock().unwrap().get_or_create_salt()?;
             let enc_key = derive_key(password.as_bytes(), &salt);
 
             let id = parse_swap_id(&swap_id)?;
-            let (state, secret_bytes, _) = load_and_decrypt_state(&store, &id, &enc_key)?;
+            let (state, secret_bytes, _) = load_and_decrypt_state(&store_shared.lock().unwrap(), &id, &enc_key)?;
             let state = state.refresh_refund_readiness()?;
             validate_persisted_timing(&state)?;
 
@@ -1148,7 +1156,7 @@ async fn main() -> anyhow::Result<()> {
             })?;
             let encrypted = encrypt_secret(&enc_key, &*secret_bytes);
             let state_json = serde_json::to_string(&state)?;
-            store.save_with_secret(&swap_id_bytes, &state_json, Some(&encrypted))?;
+            store_shared.lock().unwrap().save_with_secret(&swap_id_bytes, &state_json, Some(&encrypted))?;
         }
 
         Command::LockWow {
@@ -1160,11 +1168,11 @@ async fn main() -> anyhow::Result<()> {
             scan_from,
         } => {
             let password = get_password(cli.password.as_deref())?;
-            let salt = store.get_or_create_salt()?;
+            let salt = store_shared.lock().unwrap().get_or_create_salt()?;
             let enc_key = derive_key(password.as_bytes(), &salt);
 
             let id = parse_swap_id(&swap_id)?;
-            let (state, secret_bytes, _) = load_and_decrypt_state(&store, &id, &enc_key)?;
+            let (state, secret_bytes, _) = load_and_decrypt_state(&store_shared.lock().unwrap(), &id, &enc_key)?;
             validate_persisted_timing(&state)?;
 
             let (role, params, my_pubkey, counterparty_pubkey) = match &state {
@@ -1224,16 +1232,16 @@ async fn main() -> anyhow::Result<()> {
             })?;
             let encrypted = encrypt_secret(&enc_key, &*secret_bytes);
             let state_json = serde_json::to_string(&state)?;
-            store.save_with_secret(&swap_id_bytes, &state_json, Some(&encrypted))?;
+            store_shared.lock().unwrap().save_with_secret(&swap_id_bytes, &state_json, Some(&encrypted))?;
         }
 
         Command::ExchangePreSig { swap_id, message } => {
             let password = get_password(cli.password.as_deref())?;
-            let salt = store.get_or_create_salt()?;
+            let salt = store_shared.lock().unwrap().get_or_create_salt()?;
             let enc_key = derive_key(password.as_bytes(), &salt);
 
             let id = parse_swap_id(&swap_id)?;
-            let (state, secret_bytes, _) = load_and_decrypt_state(&store, &id, &enc_key)?;
+            let (state, secret_bytes, _) = load_and_decrypt_state(&store_shared.lock().unwrap(), &id, &enc_key)?;
 
             let msg: ProtocolMessage = decode_message(&message)?;
             let pre_sig = match msg {
@@ -1248,7 +1256,7 @@ async fn main() -> anyhow::Result<()> {
             })?;
             let encrypted = encrypt_secret(&enc_key, &*secret_bytes);
             let state_json = serde_json::to_string(&state)?;
-            store.save_with_secret(&swap_id_bytes, &state_json, Some(&encrypted))?;
+            store_shared.lock().unwrap().save_with_secret(&swap_id_bytes, &state_json, Some(&encrypted))?;
 
             println!("Counterparty pre-signature verified and stored.");
         }
@@ -1261,11 +1269,11 @@ async fn main() -> anyhow::Result<()> {
             scan_from,
         } => {
             let password = get_password(cli.password.as_deref())?;
-            let salt = store.get_or_create_salt()?;
+            let salt = store_shared.lock().unwrap().get_or_create_salt()?;
             let enc_key = derive_key(password.as_bytes(), &salt);
 
             let id = parse_swap_id(&swap_id)?;
-            let (state, secret_bytes, _) = load_and_decrypt_state(&store, &id, &enc_key)?;
+            let (state, secret_bytes, _) = load_and_decrypt_state(&store_shared.lock().unwrap(), &id, &enc_key)?;
 
             let (role, my_pubkey, counterparty_pubkey, my_adaptor_pre_sig) = match &state {
                 SwapState::WowLocked {
@@ -1351,7 +1359,7 @@ async fn main() -> anyhow::Result<()> {
                 anyhow::anyhow!("swap state has no swap_id (still in KeyGeneration phase?)")
             })?;
             let state_json = serde_json::to_string(&complete_state)?;
-            store.save_with_secret(&swap_id_bytes, &state_json, None)?;
+            store_shared.lock().unwrap().save_with_secret(&swap_id_bytes, &state_json, None)?;
         }
 
         Command::ClaimXmr {
@@ -1362,11 +1370,11 @@ async fn main() -> anyhow::Result<()> {
             scan_from,
         } => {
             let password = get_password(cli.password.as_deref())?;
-            let salt = store.get_or_create_salt()?;
+            let salt = store_shared.lock().unwrap().get_or_create_salt()?;
             let enc_key = derive_key(password.as_bytes(), &salt);
 
             let id = parse_swap_id(&swap_id)?;
-            let (state, secret_bytes, _) = load_and_decrypt_state(&store, &id, &enc_key)?;
+            let (state, secret_bytes, _) = load_and_decrypt_state(&store_shared.lock().unwrap(), &id, &enc_key)?;
 
             let (role, my_pubkey, counterparty_pubkey, my_adaptor_pre_sig, counterparty_pre_sig) =
                 match &state {
@@ -1456,7 +1464,7 @@ async fn main() -> anyhow::Result<()> {
                 anyhow::anyhow!("swap state has no swap_id (still in KeyGeneration phase?)")
             })?;
             let state_json = serde_json::to_string(&complete_state)?;
-            store.save_with_secret(&swap_id_bytes, &state_json, None)?;
+            store_shared.lock().unwrap().save_with_secret(&swap_id_bytes, &state_json, None)?;
 
             println!("XMR claimed. Swap complete.");
         }
@@ -1490,11 +1498,11 @@ async fn main() -> anyhow::Result<()> {
             wow_daemon,
         } => {
             let password = get_password(cli.password.as_deref())?;
-            let salt = store.get_or_create_salt()?;
+            let salt = store_shared.lock().unwrap().get_or_create_salt()?;
             let enc_key = derive_key(password.as_bytes(), &salt);
 
             let id = parse_swap_id(&swap_id)?;
-            let (state, _secret_bytes, _) = load_and_decrypt_state(&store, &id, &enc_key)?;
+            let (state, _secret_bytes, _) = load_and_decrypt_state(&store_shared.lock().unwrap(), &id, &enc_key)?;
             let _ = (xmr_daemon, wow_daemon);
             validate_persisted_timing(&state)?;
             let decision = guarantee_decision(GuaranteeMode::LegacyRefundNoEvidence);
@@ -1503,11 +1511,11 @@ async fn main() -> anyhow::Result<()> {
 
         Command::GenerateRefundCooperate { swap_id } => {
             let password = get_password(cli.password.as_deref())?;
-            let salt = store.get_or_create_salt()?;
+            let salt = store_shared.lock().unwrap().get_or_create_salt()?;
             let enc_key = derive_key(password.as_bytes(), &salt);
 
             let id = parse_swap_id(&swap_id)?;
-            let (state, _secret_bytes, _) = load_and_decrypt_state(&store, &id, &enc_key)?;
+            let (state, _secret_bytes, _) = load_and_decrypt_state(&store_shared.lock().unwrap(), &id, &enc_key)?;
             validate_persisted_timing(&state)?;
             let decision = guarantee_decision(GuaranteeMode::CooperativeRefundCommands);
             return Err(guarantee_failure("generate-refund-cooperate", decision));
@@ -1522,7 +1530,7 @@ async fn main() -> anyhow::Result<()> {
             scan_from,
         } => {
             let password = get_password(cli.password.as_deref())?;
-            let salt = store.get_or_create_salt()?;
+            let salt = store_shared.lock().unwrap().get_or_create_salt()?;
             let enc_key = derive_key(password.as_bytes(), &salt);
 
             let id = parse_swap_id(&swap_id)?;
@@ -1533,7 +1541,7 @@ async fn main() -> anyhow::Result<()> {
                 wow_daemon,
                 scan_from,
             );
-            let (state, _secret_bytes, _) = load_and_decrypt_state(&store, &id, &enc_key)?;
+            let (state, _secret_bytes, _) = load_and_decrypt_state(&store_shared.lock().unwrap(), &id, &enc_key)?;
             validate_persisted_timing(&state)?;
             let decision = guarantee_decision(GuaranteeMode::CooperativeRefundCommands);
             return Err(guarantee_failure("build-refund", decision));
@@ -1545,12 +1553,12 @@ async fn main() -> anyhow::Result<()> {
             wow_daemon,
         } => {
             let password = get_password(cli.password.as_deref())?;
-            let salt = store.get_or_create_salt()?;
+            let salt = store_shared.lock().unwrap().get_or_create_salt()?;
             let enc_key = derive_key(password.as_bytes(), &salt);
 
             let id = parse_swap_id(&swap_id)?;
             let _ = (xmr_daemon, wow_daemon);
-            let (state, _secret_bytes, _) = load_and_decrypt_state(&store, &id, &enc_key)?;
+            let (state, _secret_bytes, _) = load_and_decrypt_state(&store_shared.lock().unwrap(), &id, &enc_key)?;
             validate_persisted_timing(&state)?;
 
             let decision = match &state {
@@ -1566,12 +1574,12 @@ async fn main() -> anyhow::Result<()> {
 
         Command::Resume { swap_id } => {
             let password = get_password(cli.password.as_deref())?;
-            let salt = store.get_or_create_salt()?;
+            let salt = store_shared.lock().unwrap().get_or_create_salt()?;
             let enc_key = derive_key(password.as_bytes(), &salt);
 
             let id = parse_swap_id(&swap_id)?;
 
-            let (state_json, encrypted_secret) = store
+            let (state_json, encrypted_secret) = store_shared.lock().unwrap()
                 .load_with_secret(&id)?
                 .ok_or_else(|| anyhow::anyhow!("swap {} not found", swap_id))?;
 
@@ -1750,6 +1758,9 @@ async fn main() -> anyhow::Result<()> {
             }
         }
     }
+
+    // messenger is held here to suppress unused variable warning until Plan 02 wires it
+    let _ = &messenger;
 
     Ok(())
 }

@@ -99,7 +99,7 @@ impl SwapStore {
 
     /// Save swap state with an optional encrypted secret.
     ///
-    /// CRITICAL per Pitfall 1: This MUST be called BEFORE broadcasting any
+    /// This MUST be called BEFORE broadcasting any
     /// lock transaction. If the process crashes after broadcast but before
     /// persistence, funds are permanently lost.
     ///
@@ -208,6 +208,36 @@ impl SwapStore {
         Ok(result)
     }
 
+    /// Returns the receive cursor for `coord_id`, or 0 if unset.
+    pub fn get_cursor(&self, coord_id: &[u8; 32]) -> anyhow::Result<usize> {
+        let key = format!("cursor:{}", hex::encode(coord_id));
+        let result = self.conn.query_row(
+            "SELECT value FROM config WHERE key = ?1",
+            params![key],
+            |row| row.get::<_, Vec<u8>>(0),
+        );
+        match result {
+            Ok(blob) => {
+                let arr: [u8; 8] = blob.try_into()
+                    .map_err(|_| rusqlite::Error::InvalidColumnType(0, key.clone(), rusqlite::types::Type::Blob))?;
+                Ok(u64::from_le_bytes(arr) as usize)
+            }
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(0),
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Persists the receive cursor for `coord_id`.
+    pub fn set_cursor(&self, coord_id: &[u8; 32], index: usize) -> anyhow::Result<()> {
+        let key = format!("cursor:{}", hex::encode(coord_id));
+        let blob = (index as u64).to_le_bytes().to_vec();
+        self.conn.execute(
+            "INSERT OR REPLACE INTO config (key, value) VALUES (?1, ?2)",
+            params![key, blob],
+        )?;
+        Ok(())
+    }
+
     pub fn delete(&self, swap_id: &[u8; 32]) -> anyhow::Result<()> {
         self.conn.execute(
             "DELETE FROM swaps WHERE swap_id = ?1",
@@ -306,6 +336,33 @@ mod tests {
         let salt2 = store.get_or_create_salt().unwrap();
         assert_eq!(salt1.len(), 16);
         assert_eq!(salt1, salt2, "same store must return same salt");
+    }
+
+    #[test]
+    fn cursor_default_is_zero() {
+        let store = SwapStore::open_in_memory().unwrap();
+        let id = [0xCCu8; 32];
+        let cursor = store.get_cursor(&id).unwrap();
+        assert_eq!(cursor, 0, "get_cursor on unknown coord_id must return 0");
+    }
+
+    #[test]
+    fn cursor_set_then_get() {
+        let store = SwapStore::open_in_memory().unwrap();
+        let id = [0xDDu8; 32];
+        store.set_cursor(&id, 42).unwrap();
+        let cursor = store.get_cursor(&id).unwrap();
+        assert_eq!(cursor, 42, "get_cursor must return previously set value");
+    }
+
+    #[test]
+    fn cursor_overwrite() {
+        let store = SwapStore::open_in_memory().unwrap();
+        let id = [0xEEu8; 32];
+        store.set_cursor(&id, 1).unwrap();
+        store.set_cursor(&id, 5).unwrap();
+        let cursor = store.get_cursor(&id).unwrap();
+        assert_eq!(cursor, 5, "set_cursor must overwrite previous value for same coord_id");
     }
 
     #[test]
