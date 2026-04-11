@@ -14,6 +14,7 @@ use xmr_wow_client::{
     GuaranteeMode, ProtocolMessage, RefundCheckpointName, SwapParams, SwapRole, SwapState,
     SwapStore,
 };
+use xmr_wow_client::coord_message::{wrap_protocol_message, unwrap_protocol_message};
 use xmr_wow_crypto::{
     derive_view_key, encode_address, keccak256, mnemonic_to_scalar, scalar_to_mnemonic,
     KeyContribution, Network, SeedCoin,
@@ -105,21 +106,24 @@ enum Command {
     },
     /// Bob: respond to Alice's swap initiation
     InitBob {
-        /// Alice's xmrwow1: initiation message
+        /// Counterparty's xmrwow1: initiation message (optional when --transport sharechain)
         #[arg(long)]
-        message: String,
+        message: Option<String>,
         /// Bob refund destination for his WOW if the swap fails
         #[arg(long)]
         bob_refund_address: String,
+        /// Coordination channel ID from Alice (required when --transport sharechain without --message)
+        #[arg(long)]
+        swap_id: Option<String>,
     },
     /// Import counterparty's response message to advance swap state
     Import {
         /// Swap ID (hex) to import the response into
         #[arg(long)]
         swap_id: String,
-        /// Counterparty's xmrwow1: response message
+        /// Counterparty's xmrwow1: response message (optional when --transport sharechain)
         #[arg(long)]
-        message: String,
+        message: Option<String>,
     },
     /// Show the status of a swap
     Show {
@@ -182,9 +186,9 @@ enum Command {
     ExchangePreSig {
         #[arg(long)]
         swap_id: String,
-        /// Counterparty's xmrwow1: adaptor pre-sig message
+        /// Counterparty's xmrwow1: adaptor pre-sig message (optional when --transport sharechain)
         #[arg(long)]
-        message: String,
+        message: Option<String>,
     },
     /// Alice: claim WOW using Bob's completed adaptor signature
     ClaimWow {
@@ -192,8 +196,9 @@ enum Command {
         swap_id: String,
         #[arg(long)]
         wow_daemon: String,
+        /// Bob's claim proof (optional when --transport sharechain)
         #[arg(long)]
-        message: String,
+        message: Option<String>,
         #[arg(long)]
         destination: String,
         #[arg(long, default_value = "0")]
@@ -205,8 +210,9 @@ enum Command {
         swap_id: String,
         #[arg(long)]
         xmr_daemon: String,
+        /// Alice's claim proof (optional when --transport sharechain)
         #[arg(long)]
-        message: String,
+        message: Option<String>,
         #[arg(long)]
         destination: String,
         #[arg(long, default_value = "0")]
@@ -621,6 +627,72 @@ fn load_and_decrypt_state(
     Ok((state, secret_bytes, encrypted_blob))
 }
 
+/// Resolves an incoming protocol message from `--message` or sharechain auto-poll.
+/// Explicit `--message` wins. With sharechain transport and no `--message`, poll
+/// the coord channel; with out-of-band and no `--message`, error.
+async fn resolve_incoming_message(
+    message: Option<String>,
+    transport: &TransportMode,
+    messenger: &(dyn xmr_wow_client::swap_messenger::SwapMessenger + Send + Sync),
+    coord_id: &[u8; 32],
+) -> anyhow::Result<ProtocolMessage> {
+    match (message, transport) {
+        (Some(s), _) => {
+            // Explicit --message wins regardless of transport
+            Ok(decode_message(&s)?)
+        }
+        (None, TransportMode::Sharechain) => {
+            let coord = messenger
+                .receive(coord_id)
+                .await
+                .map_err(|e| anyhow::anyhow!("sharechain receive failed: {}", e))?
+                .ok_or_else(|| anyhow::anyhow!(
+                    "No message from counterparty yet under coord ID {}. \
+                     Re-run when counterparty has published.",
+                    hex::encode(coord_id)
+                ))?;
+            let proto = unwrap_protocol_message(&coord)
+                .map_err(|e| anyhow::anyhow!("unwrap failed: {}", e))?;
+            Ok(proto)
+        }
+        (None, TransportMode::OutOfBand) => {
+            anyhow::bail!("Provide --message when using out-of-band transport");
+        }
+    }
+}
+
+/// Sends `msg` over sharechain or prints it as an `xmrwow1:` string for OOB.
+async fn dispatch_outgoing_message(
+    transport: &TransportMode,
+    messenger: &(dyn xmr_wow_client::swap_messenger::SwapMessenger + Send + Sync),
+    coord_id: &[u8; 32],
+    msg: &ProtocolMessage,
+    label: &str,
+) -> anyhow::Result<()> {
+    match transport {
+        TransportMode::Sharechain => {
+            let coord = wrap_protocol_message(*coord_id, msg)
+                .map_err(|e| anyhow::anyhow!("wrap failed: {}", e))?;
+            messenger.send(coord).await
+                .map_err(|e| anyhow::anyhow!("sharechain send failed: {}", e))?;
+            println!("Published {} to sharechain.", label);
+        }
+        TransportMode::OutOfBand => {
+            println!("Send this {} to counterparty:", label);
+            println!("{}", encode_message(msg));
+        }
+    }
+    Ok(())
+}
+
+/// Coord channel ID is always `keccak256(alice_pubkey)`, regardless of role.
+fn derive_coord_id(role: SwapRole, my_pubkey: &[u8; 32], counterparty_pubkey: &[u8; 32]) -> [u8; 32] {
+    match role {
+        SwapRole::Alice => keccak256(my_pubkey),
+        SwapRole::Bob => keccak256(counterparty_pubkey),
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt::init();
@@ -714,32 +786,82 @@ async fn main() -> anyhow::Result<()> {
                 refund_timing: Some(refund_timing.clone()),
                 alice_refund_address: Some(alice_refund_address.clone()),
             };
-            let encoded = encode_message(&msg);
 
-            println!("Swap initialized as Alice.");
-            println!("Temp swap ID: {}", hex::encode(temp_id));
-            println!(
-                "Recorded XMR base height: {}",
-                refund_timing.xmr_base_height
-            );
-            println!(
-                "Recorded WOW base height: {}",
-                refund_timing.wow_base_height
-            );
-            println!();
-            println!("Send this message to Bob:");
-            println!("{}", encoded);
+            match &cli.transport {
+                TransportMode::Sharechain => {
+                    let coord = wrap_protocol_message(temp_id, &msg)
+                        .map_err(|e| anyhow::anyhow!("wrap failed: {}", e))?;
+                    messenger.send(coord).await
+                        .map_err(|e| anyhow::anyhow!("sharechain send failed: {}", e))?;
+                    // Advance past Alice's own Init so subsequent receives return Bob's Response.
+                    {
+                        let store = store_shared.lock().unwrap();
+                        store.set_cursor(&temp_id, 1)?;
+                    }
+                    println!("Swap initialized as Alice.");
+                    println!("Swap coord ID: {}", hex::encode(temp_id));
+                    println!("Published Init to sharechain.");
+                    println!("Give the coord ID to Bob so he can run init-bob --swap-id {}.", hex::encode(temp_id));
+                }
+                TransportMode::OutOfBand => {
+                    println!("Swap initialized as Alice.");
+                    println!("Temp swap ID: {}", hex::encode(temp_id));
+                    println!(
+                        "Recorded XMR base height: {}",
+                        refund_timing.xmr_base_height
+                    );
+                    println!(
+                        "Recorded WOW base height: {}",
+                        refund_timing.wow_base_height
+                    );
+                    println!();
+                    println!("Send this message to Bob:");
+                    println!("{}", encode_message(&msg));
+                }
+            }
         }
 
         Command::InitBob {
             message,
             bob_refund_address,
+            swap_id: swap_id_arg,
         } => {
             let password = get_password(cli.password.as_deref())?;
             let salt = store_shared.lock().unwrap().get_or_create_salt()?;
             let enc_key = derive_key(password.as_bytes(), &salt);
 
-            let init_msg: ProtocolMessage = decode_message(&message)?;
+            // Determine coord_id for sharechain polling
+            let coord_id: Option<[u8; 32]> = match (&message, &cli.transport) {
+                (None, TransportMode::Sharechain) => {
+                    let hex_str = swap_id_arg.as_ref().ok_or_else(|| anyhow::anyhow!(
+                        "--swap-id <hex> is required when using --transport sharechain without --message. \
+                         Alice prints her coord ID during init-alice."
+                    ))?;
+                    Some(parse_swap_id(hex_str)?)
+                }
+                _ => None,
+            };
+
+            let init_msg: ProtocolMessage = match (message, &cli.transport) {
+                (Some(s), _) => decode_message(&s)?,
+                (None, TransportMode::Sharechain) => {
+                    let cid = coord_id.unwrap(); // safe: set above
+                    let coord = messenger
+                        .receive(&cid)
+                        .await
+                        .map_err(|e| anyhow::anyhow!("sharechain receive failed: {}", e))?
+                        .ok_or_else(|| anyhow::anyhow!(
+                            "No message from counterparty yet under coord ID {}. \
+                             Re-run when counterparty has published.",
+                            hex::encode(cid)
+                        ))?;
+                    unwrap_protocol_message(&coord)
+                        .map_err(|e| anyhow::anyhow!("unwrap failed: {}", e))?
+                }
+                (None, TransportMode::OutOfBand) => {
+                    anyhow::bail!("Provide --message when using out-of-band transport");
+                }
+            };
             let (
                 alice_pubkey,
                 alice_proof,
@@ -830,7 +952,6 @@ async fn main() -> anyhow::Result<()> {
                 proof: my_proof,
                 bob_refund_address: Some(bob_refund_address.clone()),
             };
-            let encoded = encode_message(&response);
 
             println!("Swap initialized as Bob.");
             println!("Swap ID: {}", hex::encode(swap_id));
@@ -845,8 +966,28 @@ async fn main() -> anyhow::Result<()> {
                 refund_timing.wow_base_height
             );
             println!();
-            println!("Send this response to Alice:");
-            println!("{}", encoded);
+
+            match &cli.transport {
+                TransportMode::Sharechain => {
+                    // Prefer explicit --swap-id; otherwise derive coord_id from alice_pubkey
+                    // (covers the mixed case: --message with --transport sharechain).
+                    let cid = coord_id.unwrap_or_else(|| keccak256(&alice_pubkey));
+                    let coord = wrap_protocol_message(cid, &response)
+                        .map_err(|e| anyhow::anyhow!("wrap failed: {}", e))?;
+                    messenger.send(coord).await
+                        .map_err(|e| anyhow::anyhow!("sharechain send failed: {}", e))?;
+                    // Bob's Response sits at index 1 (Alice's Init at 0); advance past it.
+                    {
+                        let store = store_shared.lock().unwrap();
+                        store.set_cursor(&cid, 2)?;
+                    }
+                    println!("Published Response to sharechain.");
+                }
+                TransportMode::OutOfBand => {
+                    println!("Send this response to Alice:");
+                    println!("{}", encode_message(&response));
+                }
+            }
         }
 
         Command::Import { swap_id, message } => {
@@ -869,7 +1010,12 @@ async fn main() -> anyhow::Result<()> {
             let state: SwapState = serde_json::from_str(&state_json)?;
             let state = restore_secret_into_state(state, *secret_bytes)?;
 
-            let response_msg: ProtocolMessage = decode_message(&message)?;
+            let response_msg = resolve_incoming_message(
+                message,
+                &cli.transport,
+                &*messenger,
+                &temp_id,
+            ).await?;
             let (bob_pubkey, bob_proof, bob_refund_address) = match response_msg {
                 ProtocolMessage::Response {
                     pubkey,
@@ -1142,14 +1288,14 @@ async fn main() -> anyhow::Result<()> {
                 _ => unreachable!(),
             };
 
-            // Print before saving so the user has the message even if the save fails.
+            let coord_id = derive_coord_id(role, &my_pubkey, &counterparty_pubkey);
             let pre_sig_msg = ProtocolMessage::AdaptorPreSig {
                 pre_sig: my_adaptor_pre_sig,
             };
             println!("XMR locked successfully.");
-            println!();
-            println!("Send this adaptor pre-signature to Bob:");
-            println!("{}", encode_message(&pre_sig_msg));
+            dispatch_outgoing_message(
+                &cli.transport, &*messenger, &coord_id, &pre_sig_msg, "adaptor pre-signature"
+            ).await?;
 
             let swap_id_bytes = state.swap_id().ok_or_else(|| {
                 anyhow::anyhow!("swap state has no swap_id (still in KeyGeneration phase?)")
@@ -1218,14 +1364,14 @@ async fn main() -> anyhow::Result<()> {
                 _ => unreachable!(),
             };
 
-            // Print before saving so the user has the message even if the save fails.
+            let coord_id = derive_coord_id(role, &my_pubkey, &counterparty_pubkey);
             let pre_sig_msg = ProtocolMessage::AdaptorPreSig {
                 pre_sig: my_adaptor_pre_sig,
             };
             println!("WOW locked successfully.");
-            println!();
-            println!("Send this adaptor pre-signature to Alice:");
-            println!("{}", encode_message(&pre_sig_msg));
+            dispatch_outgoing_message(
+                &cli.transport, &*messenger, &coord_id, &pre_sig_msg, "adaptor pre-signature"
+            ).await?;
 
             let swap_id_bytes = state.swap_id().ok_or_else(|| {
                 anyhow::anyhow!("swap state has no swap_id (still in KeyGeneration phase?)")
@@ -1243,7 +1389,21 @@ async fn main() -> anyhow::Result<()> {
             let id = parse_swap_id(&swap_id)?;
             let (state, secret_bytes, _) = load_and_decrypt_state(&store_shared.lock().unwrap(), &id, &enc_key)?;
 
-            let msg: ProtocolMessage = decode_message(&message)?;
+            let (role, my_pubkey, counterparty_pubkey) = match &state {
+                SwapState::XmrLocked { role, my_pubkey, counterparty_pubkey, .. } |
+                SwapState::WowLocked { role, my_pubkey, counterparty_pubkey, .. } => {
+                    (*role, *my_pubkey, *counterparty_pubkey)
+                }
+                other => anyhow::bail!("expected XmrLocked or WowLocked state for exchange-pre-sig, got {}", phase_name(other)),
+            };
+            let coord_id = derive_coord_id(role, &my_pubkey, &counterparty_pubkey);
+
+            let msg = resolve_incoming_message(
+                message,
+                &cli.transport,
+                &*messenger,
+                &coord_id,
+            ).await?;
             let pre_sig = match msg {
                 ProtocolMessage::AdaptorPreSig { pre_sig } => pre_sig,
                 _ => anyhow::bail!("Expected AdaptorPreSig message"),
@@ -1313,7 +1473,11 @@ async fn main() -> anyhow::Result<()> {
                 ),
             };
 
-            let claim_msg: ProtocolMessage = decode_message(&message)?;
+            let coord_id = derive_coord_id(role, &my_pubkey, &counterparty_pubkey);
+
+            let claim_msg = resolve_incoming_message(
+                message, &cli.transport, &*messenger, &coord_id,
+            ).await?;
             let bob_completed_sig = match claim_msg {
                 ProtocolMessage::ClaimProof { completed_sig } => completed_sig,
                 _ => anyhow::bail!("Expected ClaimProof message from Bob"),
@@ -1349,11 +1513,10 @@ async fn main() -> anyhow::Result<()> {
                 completed_sig: alice_completed,
             };
 
-            // Print before saving so the user has the message even if the save fails.
             println!("WOW claimed successfully.");
-            println!();
-            println!("Send this claim proof to Bob so he can claim XMR:");
-            println!("{}", encode_message(&claim_proof));
+            dispatch_outgoing_message(
+                &cli.transport, &*messenger, &coord_id, &claim_proof, "claim proof"
+            ).await?;
 
             let swap_id_bytes = complete_state.swap_id().ok_or_else(|| {
                 anyhow::anyhow!("swap state has no swap_id (still in KeyGeneration phase?)")
@@ -1401,6 +1564,8 @@ async fn main() -> anyhow::Result<()> {
                     other => anyhow::bail!("expected WowLocked state, got {}", phase_name(other)),
                 };
 
+            let coord_id = derive_coord_id(role, &my_pubkey, &counterparty_pubkey);
+
             let my_scalar = Scalar::from_canonical_bytes(*secret_bytes)
                 .into_option()
                 .ok_or_else(|| anyhow::anyhow!("invalid secret scalar"))?;
@@ -1413,11 +1578,14 @@ async fn main() -> anyhow::Result<()> {
                 completed_sig: bob_completed,
             };
 
-            println!("Your claim proof (send to Alice FIRST):");
-            println!("{}", encode_message(&bob_claim_proof));
+            dispatch_outgoing_message(
+                &cli.transport, &*messenger, &coord_id, &bob_claim_proof, "claim proof"
+            ).await?;
             println!();
 
-            let claim_msg: ProtocolMessage = decode_message(&message)?;
+            let claim_msg = resolve_incoming_message(
+                message, &cli.transport, &*messenger, &coord_id,
+            ).await?;
             let alice_completed_sig = match claim_msg {
                 ProtocolMessage::ClaimProof { completed_sig } => completed_sig,
                 _ => anyhow::bail!("Expected ClaimProof message from Alice"),
@@ -1758,9 +1926,6 @@ async fn main() -> anyhow::Result<()> {
             }
         }
     }
-
-    // messenger is held here to suppress unused variable warning until Plan 02 wires it
-    let _ = &messenger;
 
     Ok(())
 }
