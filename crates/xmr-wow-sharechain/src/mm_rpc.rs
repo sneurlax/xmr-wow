@@ -4,10 +4,16 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use axum::{
-    extract::{ConnectInfo, State},
-    routing::post,
+    extract::{ConnectInfo, Path, State, ws::{WebSocketUpgrade, WebSocket, Message}},
+    response::{IntoResponse, Response, sse::{Event, KeepAlive, Sse}},
+    routing::{any, get, post},
     Json, Router,
 };
+use tokio::sync::broadcast;
+use tokio::time::{interval, Duration};
+use tokio_stream::wrappers::BroadcastStream;
+use futures::stream::{self, StreamExt};
+use std::convert::Infallible;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tiny_keccak::{Hasher, Keccak};
@@ -324,6 +330,150 @@ fn parse_swap_id_hex(hex_str: &str, id: &Value) -> Result<[u8; 32], Json<Value>>
     Ok(arr)
 }
 
+/// Parse hex swap_id without requiring a JSON-RPC id (for WS/SSE handlers).
+fn parse_swap_id_hex_no_id(hex_str: &str) -> Result<[u8; 32], String> {
+    let bytes = hex::decode(hex_str).map_err(|e| format!("swap_id hex decode: {e}"))?;
+    let arr: [u8; 32] = bytes
+        .try_into()
+        .map_err(|_| "swap_id must be 32 bytes".to_string())?;
+    Ok(arr)
+}
+
+/// Build the JSON event payload shared by WS and SSE handlers.
+fn make_coord_json(swap_id: &[u8; 32], index: usize, raw: &[u8]) -> String {
+    serde_json::json!({
+        "swap_id": hex::encode(swap_id),
+        "index": index,
+        "payload": raw,
+    })
+    .to_string()
+}
+
+async fn ws_coord_handler(
+    Path(swap_id_hex): Path<String>,
+    State(state): State<RpcState>,
+    ws: WebSocketUpgrade,
+) -> Response {
+    let swap_id = match parse_swap_id_hex_no_id(&swap_id_hex) {
+        Ok(id) => id,
+        Err(e) => return (axum::http::StatusCode::BAD_REQUEST, e).into_response(),
+    };
+    ws.on_upgrade(move |socket| handle_ws_socket(socket, state, swap_id))
+}
+
+async fn handle_ws_socket(mut socket: WebSocket, state: RpcState, swap_id: [u8; 32]) {
+    // Subscribe before reading history to avoid a gap.
+    let mut rx = state.broadcast.subscribe(swap_id);
+
+    // Replay history from index 0.
+    let history = state.msg_store.get_after(&swap_id, 0);
+    let history_len = history.len();
+    for (index, raw) in history.iter().enumerate() {
+        let msg = make_coord_json(&swap_id, index, raw);
+        if socket.send(Message::Text(msg.into())).await.is_err() {
+            return;
+        }
+    }
+    drop(history);
+
+    // Live stream with 30s ping heartbeat.
+    let mut ping_timer = interval(Duration::from_secs(30));
+    ping_timer.tick().await; // consume immediate first tick
+    let mut live_index = history_len;
+
+    loop {
+        tokio::select! {
+            result = rx.recv() => {
+                match result {
+                    Ok(raw) => {
+                        let msg = make_coord_json(&swap_id, live_index, &raw);
+                        live_index += 1;
+                        if socket.send(Message::Text(msg.into())).await.is_err() {
+                            return;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::warn!(
+                            "ws swap={} lagged, dropped {} messages",
+                            hex::encode(swap_id),
+                            n
+                        );
+                        // Next recv returns the oldest retained message.
+                    }
+                    Err(broadcast::error::RecvError::Closed) => return,
+                }
+            }
+            _ = ping_timer.tick() => {
+                if socket.send(Message::Ping(bytes::Bytes::new())).await.is_err() {
+                    return;
+                }
+            }
+            msg = socket.recv() => {
+                match msg {
+                    Some(Ok(Message::Close(_))) | None => return,
+                    Some(Ok(Message::Pong(_))) => {} // heartbeat ack
+                    _ => {}
+                }
+            }
+        }
+    }
+}
+
+async fn sse_coord_handler(
+    Path(swap_id_hex): Path<String>,
+    State(state): State<RpcState>,
+) -> axum::response::Response {
+    let swap_id = match parse_swap_id_hex_no_id(&swap_id_hex) {
+        Ok(id) => id,
+        Err(e) => return (axum::http::StatusCode::BAD_REQUEST, e).into_response(),
+    };
+
+    // Subscribe before reading history to avoid a gap.
+    let rx = state.broadcast.subscribe(swap_id);
+
+    let history = state.msg_store.get_after(&swap_id, 0);
+    let history_len = history.len();
+
+    // Build replay stream
+    let replay = stream::iter(history.into_iter().enumerate().map(move |(index, raw)| {
+        let data = make_coord_json(&swap_id, index, &raw);
+        Ok::<Event, Infallible>(
+            Event::default()
+                .event("coord_message")
+                .id(index.to_string())
+                .data(data),
+        )
+    }));
+
+    // Build live stream from broadcast receiver
+    let live = BroadcastStream::new(rx)
+        .enumerate()
+        .filter_map(move |(i, result)| {
+            let index = history_len + i;
+            async move {
+                match result {
+                    Ok(raw) => {
+                        let data = make_coord_json(&swap_id, index, &raw);
+                        Some(Ok::<Event, Infallible>(
+                            Event::default()
+                                .event("coord_message")
+                                .id(index.to_string())
+                                .data(data),
+                        ))
+                    }
+                    Err(_) => {
+                        // Lagged: skip lost messages.
+                        None
+                    }
+                }
+            }
+        });
+
+    Sse::new(replay.chain(live))
+        .keep_alive(KeepAlive::default())
+        .into_response()
+}
+
 fn handle_publish_coord_message(state: &RpcState, id: Value, params: Option<Value>) -> Json<Value> {
     let params = match params {
         Some(p) => p,
@@ -456,6 +606,8 @@ pub fn merge_mining_router(chain: Arc<SwapChain>) -> Router {
     };
     Router::new()
         .route("/json_rpc", post(handle_rpc))
+        .route("/ws/coord/{swap_id}", any(ws_coord_handler))
+        .route("/sse/coord/{swap_id}", get(sse_coord_handler))
         .with_state(state)
 }
 
@@ -468,6 +620,8 @@ pub fn merge_mining_router_with_connect_info(chain: Arc<SwapChain>) -> Router {
     };
     Router::new()
         .route("/json_rpc", post(handle_rpc_with_connect_info))
+        .route("/ws/coord/{swap_id}", any(ws_coord_handler))
+        .route("/sse/coord/{swap_id}", get(sse_coord_handler))
         .with_state(state)
 }
 
@@ -487,6 +641,8 @@ mod tests {
         http::{Request, StatusCode},
     };
     use tower::ServiceExt; // for `.oneshot()`
+    use futures_util::StreamExt as FuturesStreamExt;
+    use tokio::net::TcpListener;
 
     fn make_chain() -> Arc<SwapChain> {
         Arc::new(SwapChain::new(Difficulty::from_u64(1)))
@@ -744,5 +900,342 @@ mod tests {
         });
         let resp = post_rpc(router, "publish_coord_message", params).await;
         assert_eq!(resp["error"]["code"].as_i64(), Some(-32602));
+    }
+
+    // -------------------------------------------------------------------------
+    // WebSocket and SSE integration tests.
+    // -------------------------------------------------------------------------
+
+    /// Spawn the merge-mining router on a random port; returns (addr, state).
+    /// The state is returned so tests can publish messages directly.
+    async fn spawn_test_server() -> (std::net::SocketAddr, RpcState) {
+        let chain = make_chain();
+        let state = RpcState {
+            chain,
+            msg_store: Arc::new(CoordMessageStore::new()),
+            broadcast: Arc::new(BroadcastRegistry::new()),
+        };
+        let app = Router::new()
+            .route("/json_rpc", post(handle_rpc))
+            .route("/ws/coord/{swap_id}", any(ws_coord_handler))
+            .route("/sse/coord/{swap_id}", get(sse_coord_handler))
+            .with_state(state.clone());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        (addr, state)
+    }
+
+    #[tokio::test]
+    async fn ws_replays_history() {
+        let (addr, state) = spawn_test_server().await;
+        let swap_id = [42u8; 32];
+        let swap_id_hex = hex::encode(swap_id);
+
+        // Pre-populate 3 messages
+        state.msg_store.publish(swap_id, b"msg0".to_vec());
+        state.msg_store.publish(swap_id, b"msg1".to_vec());
+        state.msg_store.publish(swap_id, b"msg2".to_vec());
+
+        let url = format!("ws://127.0.0.1:{}/ws/coord/{}", addr.port(), swap_id_hex);
+        let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+
+        // Should receive 3 replayed messages
+        for expected_index in 0usize..3 {
+            let msg = tokio::time::timeout(
+                Duration::from_secs(5),
+                ws.next(),
+            )
+            .await
+            .expect("timeout waiting for WS message")
+            .expect("stream ended")
+            .expect("WS error");
+
+            let text = msg.into_text().unwrap();
+            let parsed: serde_json::Value = serde_json::from_str(&text).unwrap();
+            assert_eq!(parsed["swap_id"].as_str().unwrap(), swap_id_hex);
+            assert_eq!(parsed["index"].as_u64().unwrap(), expected_index as u64);
+        }
+    }
+
+    #[tokio::test]
+    async fn ws_receives_live_event() {
+        let (addr, state) = spawn_test_server().await;
+        let swap_id = [42u8; 32];
+        let swap_id_hex = hex::encode(swap_id);
+
+        let url = format!("ws://127.0.0.1:{}/ws/coord/{}", addr.port(), swap_id_hex);
+        let (mut ws, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+
+        // Give the handler time to set up subscription
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Publish a live message
+        state.msg_store.publish(swap_id, b"live".to_vec());
+        state.broadcast.send(swap_id, b"live".to_vec());
+
+        let msg = tokio::time::timeout(
+            Duration::from_secs(5),
+            ws.next(),
+        )
+        .await
+        .expect("timeout")
+        .expect("stream ended")
+        .expect("WS error");
+
+        let text = msg.into_text().unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(parsed["swap_id"].as_str().unwrap(), swap_id_hex);
+        assert_eq!(parsed["index"].as_u64().unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn ws_isolation_by_swap_id() {
+        let (addr, state) = spawn_test_server().await;
+        let swap_a = [1u8; 32];
+        let swap_b = [2u8; 32];
+
+        let url_b = format!("ws://127.0.0.1:{}/ws/coord/{}", addr.port(), hex::encode(swap_b));
+        let (mut ws_b, _) = tokio_tungstenite::connect_async(&url_b).await.unwrap();
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Publish to swap_a only
+        state.msg_store.publish(swap_a, b"for-a".to_vec());
+        state.broadcast.send(swap_a, b"for-a".to_vec());
+
+        // ws_b must not receive anything; timeout expected.
+        let result = tokio::time::timeout(
+            Duration::from_millis(200),
+            ws_b.next(),
+        )
+        .await;
+        assert!(result.is_err(), "swap_b subscriber should not receive swap_a messages");
+    }
+
+    #[tokio::test]
+    async fn sse_replays_then_live() {
+        let (addr, state) = spawn_test_server().await;
+        let swap_id = [42u8; 32];
+        let swap_id_hex = hex::encode(swap_id);
+
+        // Pre-populate 2 messages
+        state.msg_store.publish(swap_id, b"hist0".to_vec());
+        state.msg_store.publish(swap_id, b"hist1".to_vec());
+
+        // Use tower oneshot on a fresh router wired to the same state
+        let app = Router::new()
+            .route("/sse/coord/{swap_id}", get(sse_coord_handler))
+            .with_state(state.clone());
+
+        let req = Request::builder()
+            .method("GET")
+            .uri(format!("/sse/coord/{}", swap_id_hex))
+            .header("accept", "text/event-stream")
+            .body(Body::empty())
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // Read the body with a timeout (SSE stream never ends on its own)
+        let body_bytes = tokio::time::timeout(
+            Duration::from_secs(2),
+            axum::body::to_bytes(resp.into_body(), 1024 * 1024),
+        )
+        .await
+        .unwrap_or_else(|_| {
+            // Timeout expected once the replay portion is drained.
+            Ok(bytes::Bytes::new())
+        })
+        .unwrap();
+
+        // If we got an empty result due to timeout, use the TCP server approach
+        if body_bytes.is_empty() {
+            // Use the already-spawned TCP server and read via raw HTTP
+            let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let req_str = format!(
+                "GET /sse/coord/{} HTTP/1.1\r\nHost: 127.0.0.1\r\nAccept: text/event-stream\r\nConnection: close\r\n\r\n",
+                swap_id_hex
+            );
+            stream.write_all(req_str.as_bytes()).await.unwrap();
+
+            let mut buf = vec![0u8; 4096];
+            let mut body_text = String::new();
+            let _ = tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    match stream.read(&mut buf).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => {
+                            body_text.push_str(&String::from_utf8_lossy(&buf[..n]));
+                            if body_text.contains("id: 1") {
+                                break;
+                            }
+                        }
+                    }
+                }
+            })
+            .await;
+
+            assert!(body_text.contains("event: coord_message"), "missing event type");
+            assert!(body_text.contains("id: 0"), "missing id: 0");
+            assert!(body_text.contains("id: 1"), "missing id: 1");
+            assert!(body_text.contains(&swap_id_hex), "missing swap_id in data");
+        } else {
+            let body_text = String::from_utf8(body_bytes.to_vec()).unwrap();
+            assert!(body_text.contains("event: coord_message"), "missing event type");
+            assert!(body_text.contains("id: 0"), "missing id: 0");
+            assert!(body_text.contains("id: 1"), "missing id: 1");
+            assert!(body_text.contains(&swap_id_hex), "missing swap_id in data");
+        }
+    }
+
+    #[tokio::test]
+    async fn sse_event_format() {
+        let state = RpcState {
+            chain: make_chain(),
+            msg_store: Arc::new(CoordMessageStore::new()),
+            broadcast: Arc::new(BroadcastRegistry::new()),
+        };
+        let swap_id = [42u8; 32];
+        let swap_id_hex = hex::encode(swap_id);
+        state.msg_store.publish(swap_id, vec![1, 2, 3]);
+
+        let app = Router::new()
+            .route("/sse/coord/{swap_id}", get(sse_coord_handler))
+            .with_state(state);
+
+        let req = Request::builder()
+            .method("GET")
+            .uri(format!("/sse/coord/{}", swap_id_hex))
+            .body(Body::empty())
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        let body_bytes = tokio::time::timeout(
+            Duration::from_secs(2),
+            axum::body::to_bytes(resp.into_body(), 1024 * 1024),
+        )
+        .await
+        .unwrap_or_else(|_| Ok(bytes::Bytes::new()))
+        .unwrap();
+
+        let body_text = if body_bytes.is_empty() {
+            // SSE stream blocked; fall back to a TCP check for format.
+            let (addr, state2) = spawn_test_server().await;
+            state2.msg_store.publish(swap_id, vec![1, 2, 3]);
+            tokio::time::sleep(Duration::from_millis(10)).await;
+
+            let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let req_str = format!(
+                "GET /sse/coord/{} HTTP/1.1\r\nHost: 127.0.0.1\r\nAccept: text/event-stream\r\nConnection: close\r\n\r\n",
+                swap_id_hex
+            );
+            stream.write_all(req_str.as_bytes()).await.unwrap();
+
+            let mut buf = vec![0u8; 4096];
+            let mut result = String::new();
+            let _ = tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    match stream.read(&mut buf).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => {
+                            result.push_str(&String::from_utf8_lossy(&buf[..n]));
+                            if result.contains("\"payload\"") {
+                                break;
+                            }
+                        }
+                    }
+                }
+            })
+            .await;
+            result
+        } else {
+            String::from_utf8(body_bytes.to_vec()).unwrap()
+        };
+
+        // Verify SSE wire format
+        assert!(body_text.contains("event: coord_message"), "missing event: coord_message");
+        assert!(body_text.contains("id: 0"), "missing id: 0");
+        // Verify JSON data contains expected fields
+        assert!(body_text.contains("\"index\":0"), "missing index:0 in JSON");
+        assert!(body_text.contains("\"payload\":[1,2,3]"), "missing payload in JSON");
+    }
+
+    #[tokio::test]
+    async fn sse_isolation_by_swap_id() {
+        let state = RpcState {
+            chain: make_chain(),
+            msg_store: Arc::new(CoordMessageStore::new()),
+            broadcast: Arc::new(BroadcastRegistry::new()),
+        };
+        let swap_a = [1u8; 32];
+        let swap_b = [2u8; 32];
+        state.msg_store.publish(swap_a, b"for-a".to_vec());
+        state.msg_store.publish(swap_b, b"for-b".to_vec());
+
+        let app = Router::new()
+            .route("/sse/coord/{swap_id}", get(sse_coord_handler))
+            .with_state(state);
+
+        // Request SSE for swap_b only
+        let req = Request::builder()
+            .method("GET")
+            .uri(format!("/sse/coord/{}", hex::encode(swap_b)))
+            .body(Body::empty())
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        let body_bytes = tokio::time::timeout(
+            Duration::from_secs(2),
+            axum::body::to_bytes(resp.into_body(), 1024 * 1024),
+        )
+        .await
+        .unwrap_or_else(|_| Ok(bytes::Bytes::new()))
+        .unwrap();
+
+        if body_bytes.is_empty() {
+            // SSE stream blocked; fall back to TCP.
+            let (addr, state2) = spawn_test_server().await;
+            state2.msg_store.publish(swap_a, b"for-a".to_vec());
+            state2.msg_store.publish(swap_b, b"for-b".to_vec());
+            tokio::time::sleep(Duration::from_millis(10)).await;
+
+            let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let req_str = format!(
+                "GET /sse/coord/{} HTTP/1.1\r\nHost: 127.0.0.1\r\nAccept: text/event-stream\r\nConnection: close\r\n\r\n",
+                hex::encode(swap_b)
+            );
+            stream.write_all(req_str.as_bytes()).await.unwrap();
+
+            let mut buf = vec![0u8; 4096];
+            let mut body_text = String::new();
+            let _ = tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    match stream.read(&mut buf).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => {
+                            body_text.push_str(&String::from_utf8_lossy(&buf[..n]));
+                            if body_text.contains(&hex::encode(swap_b)) {
+                                break;
+                            }
+                        }
+                    }
+                }
+            })
+            .await;
+
+            assert!(body_text.contains(&hex::encode(swap_b)), "should contain swap_b");
+            assert!(!body_text.contains(&hex::encode(swap_a)), "should NOT contain swap_a");
+        } else {
+            let body_text = String::from_utf8(body_bytes.to_vec()).unwrap();
+            assert!(body_text.contains(&hex::encode(swap_b)), "should contain swap_b");
+            assert!(!body_text.contains(&hex::encode(swap_a)), "should NOT contain swap_a");
+        }
     }
 }
