@@ -200,6 +200,14 @@ class XmrWowSharechainAgent(BaseAgent):
             os.remove(self.db)
         self.node_rpc_port = int(self.attributes.get("node_rpc_port", "18091"))
         self.node_p2p_port = int(self.attributes.get("node_p2p_port", "37891"))
+        # Plan 38.1-07 Task 2 Branch A: optional override to point this agent's
+        # CLI at a DIFFERENT xmr-wow-node (not its locally-spawned one). Used
+        # to work around the fact that xmr-wow-node has no P2P gossip (see
+        # plan 38.1-07 task 1d localhost smoke test result + main.rs:48
+        # "full P2P is future work" comment). Empty/unset means "use local".
+        self.node_url_override = str(
+            self.attributes.get("node_url_override", "")
+        ).strip() or None
         parsed_node_peers = self._parse_node_peers(self.attributes.get("node_peers", []))
         self.node_peers = [str(peer) for peer in parsed_node_peers]
         self.node_peers = [self._resolve_peer_address(peer) for peer in self.node_peers]
@@ -342,24 +350,85 @@ class XmrWowSharechainAgent(BaseAgent):
         for peer in self.node_peers:
             cmd.extend(["--peer", peer])
         self.logger.info("starting sharechain node: %s", " ".join(cmd))
-        node_log_dir = self.shared_dir / "sharechain-node-logs"
-        node_log_dir.mkdir(parents=True, exist_ok=True)
-        self.node_stdout_handle = open(
-            node_log_dir / f"{self.agent_id}.stdout.log",
-            "a",
-            encoding="utf-8",
+        # Iteration 5 diagnostic instrumentation (Plan 38.1-07 Task 1b):
+        # Write xmr-wow-node logs to per-host /tmp (which Shadow preserves in
+        # archive/shadow.data/hosts/{host}/tmp/... after the run). The previous
+        # path under shared_dir was (a) wiped by monerosim at bootstrap,
+        # (b) ambiguous about which file belonged to which agent, and
+        # (c) produced 0-byte files in iteration 4 for reasons that were
+        # explanation-ambiguous. The new path is unambiguous AND survives into
+        # the monerosim archive for post-run inspection.
+        node_stdout_path = f"/tmp/{self.agent_id}-xmr-wow-node.stdout.log"
+        node_stderr_path = f"/tmp/{self.agent_id}-xmr-wow-node.stderr.log"
+        self.node_stdout_handle = open(node_stdout_path, "a", encoding="utf-8")
+        self.node_stderr_handle = open(node_stderr_path, "a", encoding="utf-8")
+        self.logger.info(
+            "sharechain node stdout=%s stderr=%s (iter5 diagnostic paths)",
+            node_stdout_path,
+            node_stderr_path,
         )
-        self.node_stderr_handle = open(
-            node_log_dir / f"{self.agent_id}.stderr.log",
-            "a",
-            encoding="utf-8",
-        )
+        # Iteration 5 diagnostic instrumentation (Plan 38.1-07 Task 1a):
+        # Force verbose tracing from xmr-wow-node so we can see
+        # (1) whether the node ran past main() at all (main.rs line 40 tracing::info!),
+        # (2) whether argparse succeeded and --peer was parsed (main.rs line 50-52),
+        # (3) whether axum::serve() actually bound the RPC port (main.rs line 41 listener bind).
+        # Tracing target filter uses underscore-form crate names (verified via
+        # Cargo.toml grep). Full backtrace makes any panic stack traces
+        # readable in the captured stderr.
+        node_env = {
+            **os.environ,
+            "RUST_LOG": "info,xmr_wow_node=trace,xmr_wow_sharechain=trace",
+            "RUST_BACKTRACE": "full",
+        }
         self.node_process = subprocess.Popen(
             cmd,
             stdout=self.node_stdout_handle,
             stderr=self.node_stderr_handle,
+            env=node_env,
         )
-        time.sleep(2.0)
+
+        # Iteration 5 diagnostic instrumentation (Plan 38.1-07 Task 1c):
+        # Poll the node's RPC TCP listener until it accepts connections, with
+        # a 30-second budget. Replaces the previous blind 2-second sleep which
+        # was racy under Shadow's compute-time-dilation. A successful TCP connect
+        # proves axum::serve() got past the listener bind at main.rs:41, which
+        # is a prerequisite for any publish/poll RPC to succeed. If this probe
+        # times out, the node either crashed early or failed to bind; both of
+        # which are root cause candidates worth surfacing via the RUN-REPORT.
+        import socket as _socket  # local import to avoid polluting module namespace
+        ready_deadline = time.monotonic() + 30.0
+        ready_attempts = 0
+        last_err: Optional[Exception] = None
+        while time.monotonic() < ready_deadline:
+            ready_attempts += 1
+            # Check if the child process is still alive; a dead process will
+            # never become ready, so fail fast.
+            if self.node_process.poll() is not None:
+                raise RuntimeError(
+                    f"xmr-wow-node exited before becoming ready (exit code "
+                    f"{self.node_process.returncode}); stderr path: "
+                    f"{node_stderr_path}"
+                )
+            try:
+                with _socket.create_connection(
+                    ("127.0.0.1", self.node_rpc_port),
+                    timeout=1.0,
+                ):
+                    self.logger.info(
+                        "sharechain node ready after %d attempts (rpc_port=%d)",
+                        ready_attempts,
+                        self.node_rpc_port,
+                    )
+                    break
+            except (ConnectionRefusedError, OSError) as exc:
+                last_err = exc
+                time.sleep(0.5)
+        else:
+            raise RuntimeError(
+                f"xmr-wow-node RPC not ready on 127.0.0.1:{self.node_rpc_port} "
+                f"after 30s ({ready_attempts} attempts, last err: {last_err}); "
+                f"stderr path: {node_stderr_path}"
+            )
 
     def _cleanup_agent(self) -> None:
         self._stop_wow_background_mining()
@@ -736,6 +805,12 @@ class XmrWowSharechainAgent(BaseAgent):
         return True
 
     def _node_url(self) -> str:
+        # Plan 38.1-07 Task 2 Branch A: honor node_url_override attribute to
+        # let one agent point its CLI at another agent's xmr-wow-node. Used
+        # to make Bob's publish/poll RPCs land on Alice's node so both agents
+        # share the same in-memory coord_store. Empty/unset -> local loopback.
+        if self.node_url_override:
+            return self.node_url_override
         return f"http://127.0.0.1:{self.node_rpc_port}"
 
     def _start_wow_runtime(self) -> None:

@@ -102,6 +102,20 @@ agents:
       node_rpc_port: '18092'
       node_p2p_port: '37892'
       node_peers: '["alice:37891"]'
+      # Plan 38.1-07 Task 2 Branch A: Point Bob's CLI at Alice's xmr-wow-node
+      # so both agents share the same in-memory coord_store. Iteration 4
+      # + iteration 5 Task 1d localhost smoke test diagnosed that xmr-wow-node
+      # has no P2P gossip (main.rs line 48: "full P2P is future work ; server
+      # stub is available"; mm_rpc.rs handle_publish_coord_message writes to
+      # per-process state.msg_store with NO cross-process propagation;
+      # state.broadcast is tokio::sync::broadcast, local-process only). Two
+      # independent per-agent nodes have disjoint msg_stores; empirically
+      # confirmed by the localhost smoke test in Plan 38.1-07 Task 1d
+      # (publish_coord_message to node A, poll_coord_messages to node B
+      # returned messages: []). Simplest fix: share the node. Bob's own
+      # xmr-wow-node still spawns (harmless; just unused) to avoid a broader
+      # YAML/agent refactor in this iteration.
+      node_url_override: 'http://alice:18091'
       wow_local_daemon: 'true'
       wow_daemon_binary: wownerod
       wow_network: testnet
