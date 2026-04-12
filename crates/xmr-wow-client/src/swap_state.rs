@@ -1479,6 +1479,29 @@ impl SwapState {
         Ok(())
     }
 
+    pub fn proof_harness_checkpoint_allowed(&self, name: RefundCheckpointName) -> bool {
+        let checkpoint = match self.checkpoint(name) {
+            Some(checkpoint) => checkpoint,
+            None => return false,
+        };
+
+        if checkpoint.refund_address.is_none() {
+            return false;
+        }
+
+        let expected = match name {
+            RefundCheckpointName::BeforeWowLock => {
+                guarantee_decision(GuaranteeMode::CurrentSingleSignerPreLockArtifact)
+            }
+            RefundCheckpointName::BeforeXmrLock => {
+                guarantee_decision(GuaranteeMode::LiveXmrUnlockTimeRefund)
+            }
+        };
+
+        checkpoint.status == Self::checkpoint_status(expected.status)
+            && checkpoint.reason == expected.reason
+    }
+
     pub fn next_safe_action(&self) -> String {
         let swap_id = self
             .swap_id()
@@ -2387,6 +2410,54 @@ mod tests {
         assert!(
             err_msg.contains("pre-sig"),
             "error should mention pre-sig, got: {err_msg}"
+        );
+    }
+
+    /// Happy-path unit test for proof_harness_checkpoint_allowed.
+    ///
+    /// Uses the existing make_alice_bob() helpers extended with refund addresses.
+    /// Verifies that BeforeXmrLock allows proof-harness bypass when status and
+    /// reason match the expected LiveXmrUnlockTimeRefund guarantee decision.
+    #[test]
+    fn proof_harness_checkpoint_allowed_behavior() {
+        let mut params = sample_params();
+        params.alice_refund_address = Some("alice-refund-test-address".into());
+        params.bob_refund_address = Some("bob-refund-test-address".into());
+
+        let (alice, _alice_secret) =
+            SwapState::generate(SwapRole::Alice, params.clone(), &mut OsRng);
+        let (bob, _bob_secret) = SwapState::generate(SwapRole::Bob, params, &mut OsRng);
+
+        let (bob_pub, bob_proof) = get_pubkey_and_proof(&bob);
+        let (alice_pub, alice_proof) = get_pubkey_and_proof(&alice);
+
+        let alice_joint = alice
+            .receive_counterparty_key(bob_pub, &bob_proof)
+            .unwrap()
+            .derive_joint_addresses()
+            .unwrap();
+        // Bob also needs to advance so Alice can record his lock.
+        let _bob_joint = bob
+            .receive_counterparty_key(alice_pub, &alice_proof)
+            .unwrap()
+            .derive_joint_addresses()
+            .unwrap();
+
+        // Verify bypass is denied when checkpoint is absent (JointAddress state, pre-lock).
+        // We must check this BEFORE consuming alice_joint with record_wow_lock.
+        assert!(
+            !alice_joint.proof_harness_checkpoint_allowed(RefundCheckpointName::BeforeXmrLock),
+            "proof_harness_checkpoint_allowed should return false when checkpoint is absent"
+        );
+
+        // Alice records Bob's WOW lock; populates BeforeXmrLock checkpoint.
+        let alice_wow_locked = alice_joint.record_wow_lock([0xCC; 32]).unwrap();
+
+        // Verify the bypass is allowed (matching Blocked status, expected reason, Some address).
+        assert!(
+            alice_wow_locked.proof_harness_checkpoint_allowed(RefundCheckpointName::BeforeXmrLock),
+            "proof_harness_checkpoint_allowed should return true for BeforeXmrLock \
+             when status/reason match LiveXmrUnlockTimeRefund and refund_address is Some"
         );
     }
 }

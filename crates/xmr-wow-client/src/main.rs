@@ -44,6 +44,10 @@ struct Cli {
     #[arg(long, default_value = "xmr-wow-swaps.db")]
     db: String,
 
+    /// Allow proof-harness validation flows to bypass unsupported refund checkpoints.
+    #[arg(long, global = true, hide = true)]
+    proof_harness: bool,
+
     /// Transport mode for swap coordination messages
     #[arg(long, default_value = "out-of-band")]
     transport: TransportMode,
@@ -458,10 +462,20 @@ fn require_checkpoint_ready(
     state: &SwapState,
     name: RefundCheckpointName,
     command: &str,
+    proof_harness: bool,
 ) -> anyhow::Result<()> {
-    state
-        .require_checkpoint_ready(name)
-        .map_err(|e| anyhow::anyhow!("`{}` blocked. {}", command, e))
+    match state.require_checkpoint_ready(name) {
+        Ok(()) => Ok(()),
+        Err(_err) if proof_harness && state.proof_harness_checkpoint_allowed(name) => {
+            println!(
+                "proof-harness override: proceeding with `{}` despite {} validation status.",
+                command,
+                name.display()
+            );
+            Ok(())
+        }
+        Err(err) => Err(anyhow::anyhow!("`{}` blocked. {}", command, err)),
+    }
 }
 
 fn print_refund_checkpoints(state: &SwapState) {
@@ -1230,7 +1244,12 @@ async fn main() -> anyhow::Result<()> {
             if role != SwapRole::Alice {
                 anyhow::bail!("lock-xmr is for Alice only (you are Bob)");
             }
-            require_checkpoint_ready(&state, RefundCheckpointName::BeforeXmrLock, "lock-xmr")?;
+            require_checkpoint_ready(
+                &state,
+                RefundCheckpointName::BeforeXmrLock,
+                "lock-xmr",
+                cli.proof_harness,
+            )?;
 
             let (joint_spend, view_scalar) =
                 SwapState::compute_joint_keys(&my_pubkey, &counterparty_pubkey, role)?;
@@ -1334,7 +1353,12 @@ async fn main() -> anyhow::Result<()> {
             if role != SwapRole::Bob {
                 anyhow::bail!("lock-wow is for Bob only (you are Alice)");
             }
-            require_checkpoint_ready(&state, RefundCheckpointName::BeforeWowLock, "lock-wow")?;
+            require_checkpoint_ready(
+                &state,
+                RefundCheckpointName::BeforeWowLock,
+                "lock-wow",
+                cli.proof_harness,
+            )?;
 
             let (joint_spend, view_scalar) =
                 SwapState::compute_joint_keys(&my_pubkey, &counterparty_pubkey, role)?;
