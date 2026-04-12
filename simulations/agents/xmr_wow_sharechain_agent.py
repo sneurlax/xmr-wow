@@ -21,6 +21,16 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from urllib import request as urlrequest
 
+# Retry-classifier marker for the CLI's "wait for counterparty to publish" error.
+# Source of truth: crates/xmr-wow-client/src/main.rs:666-670 and :877-881, both
+# formatted as:
+#     "No message from counterparty yet under coord ID {hex}. Re-run when counterparty has published."
+# This single substring covers all coordination wait states (Init, Response,
+# AdaptorPreSig, ClaimProof) because the CLI uses the same error text for every
+# state ; the state name lives only in the CoordMessage payload, not in the
+# human-readable error. Collapsed here to prevent future drift.
+COORD_WAIT_RETRY_PATTERN = "No message from counterparty yet under coord ID"
+
 try:
     from .base_agent import BaseAgent
 except ImportError:
@@ -464,7 +474,7 @@ class XmrWowSharechainAgent(BaseAgent):
                 "--swap-id", alice_swap_id,
             ])
         except RuntimeError as exc:
-            if self._is_retryable_error(exc, "no sharechain coordination message found for Init"):
+            if self._is_retryable_error(exc, COORD_WAIT_RETRY_PATTERN):
                 self.logger.info("bob waiting for sharechain Init message")
                 return False
             if self._is_retryable_error(exc, "wallet RPC"):
@@ -491,7 +501,7 @@ class XmrWowSharechainAgent(BaseAgent):
             self.swap_id = self._extract_swap_id(output)
             self.logger.info("alice swap_id after import: %s", self.swap_id)
         except RuntimeError as exc:
-            if self._is_retryable_error(exc, "no sharechain coordination message found for Response"):
+            if self._is_retryable_error(exc, COORD_WAIT_RETRY_PATTERN):
                 self.logger.info("alice waiting for sharechain Response message")
                 return False
             latest = self._latest_swap_record_from_db()
@@ -624,7 +634,7 @@ class XmrWowSharechainAgent(BaseAgent):
         except RuntimeError as exc:
             if self._is_retryable_error(
                 exc,
-                "no sharechain coordination message found for AdaptorPreSig",
+                COORD_WAIT_RETRY_PATTERN,
                 "RPC connection failed",
             ):
                 self.logger.info(
@@ -675,8 +685,7 @@ class XmrWowSharechainAgent(BaseAgent):
             except RuntimeError as exc:
                 if self._is_retryable_error(
                     exc,
-                    "no sharechain coordination message found for AdaptorPreSig",
-                    "no sharechain coordination message found for ClaimProof",
+                    COORD_WAIT_RETRY_PATTERN,
                     "no spendable outputs at joint address yet",
                     "confirmation timeout",
                     "RPC connection failed",
@@ -716,8 +725,7 @@ class XmrWowSharechainAgent(BaseAgent):
                 return False
             if self._is_retryable_error(
                 exc,
-                "no sharechain coordination message found for AdaptorPreSig",
-                "no sharechain coordination message found for ClaimProof",
+                COORD_WAIT_RETRY_PATTERN,
                 "confirmation timeout",
                 "RPC connection failed",
                 "wallet RPC",
