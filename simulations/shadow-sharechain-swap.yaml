@@ -1,27 +1,40 @@
 # Shadow / monerosim scenario that drives the xmr-wow CLI with --transport sharechain.
 #
-# Proves a sharechain-mediated atomic swap completes without any manual protocol
-# message exchange. All Init, Response, AdaptorPreSig, and ClaimProof messages
-# route through the sharechain-node process running xmr-wow-node --rpc-only.
+# Ported from git 7ef5ea20 (shadow-sharechain-offer-flow.yaml) with targeted updates
+# for Phase 38.1: direct init-alice/init-bob flow (no offer publication), per-agent
+# inline xmr-wow-node (no standalone sharechain-node host), Phase 35 flag shape.
 #
-# Alice and Bob agents both point --node-url at sharechain-node:18091.
+# Alice and Bob each spawn their own xmr-wow-node process via node_binary attributes.
+# Alice's node listens on RPC 18091, Bob's on 18092; they peer with each other via
+# node_peers. No separate sharechain-node host is needed (monerosim does not support
+# standalone process hosts).
 
 metadata:
   scenario: shadow_xmr_wow_sharechain_swap
   generator: manual
   version: '1.0'
-  purpose: 'Sharechain-mediated atomic swap with no manual message exchange'
+  purpose: 'Sharechain-mediated atomic swap; no manual message exchange, per-agent inline xmr-wow-node'
 
 general:
-  stop_time: 4h
+  stop_time: 24h
   parallelism: 0
-  simulation_seed: 143
+  simulation_seed: 211
   enable_dns_server: true
   shadow_log_level: warning
-  bootstrap_end_time: 2.5h
+  bootstrap_end_time: 4h
   progress: true
   runahead: 100ms
   process_threads: 2
+  daemon_defaults:
+    log-level: 1
+    max-log-file-size: 0
+    db-sync-mode: fastest
+    no-zmq: true
+    non-interactive: true
+    disable-rpc-ban: true
+    allow-local-ip: true
+  wallet_defaults:
+    log-level: 1
 
 network:
   type: 1_gbit_switch
@@ -29,15 +42,6 @@ network:
   peer_mode: Dynamic
 
 agents:
-  sharechain-node:
-    # Minimal RPC-only xmr-wow-node for Init/Response/AdaptorPreSig/ClaimProof.
-    # routing so Alice and Bob never exchange protocol messages out-of-band.
-    # No daemon or wallet needed; just the sharechain coordination server.
-    start_time: 0s
-    attributes:
-      binary: target/release/xmr-wow-node
-      args: '--rpc-port 18091 --rpc-only'
-
   xmr-miner:
     daemon: monerod
     wallet: 'monero-wallet-rpc'
@@ -58,33 +62,59 @@ agents:
     daemon: monerod
     wallet: 'monero-wallet-rpc'
     script: agents.xmr_wow_sharechain_agent
-    start_time: 60s
+    start_time: 15000s
+    can_receive_distributions: true
     attributes:
       role: alice
+      counterparty: bob
       binary: target/release/xmr-wow
-      node_url: 'http://sharechain-node:18091'
-      db: /tmp/alice-sharechain.db
+      node_binary: target/release/xmr-wow-node
+      db: /tmp/alice-shadow-sharechain.db
       password: shadow-test
       amount_xmr: '1000000000000'
       amount_wow: '500000000000'
       xmr_lock_blocks: '120'
-      wow_lock_blocks: '260'
-      alice_refund_address: 'SHADOW_ALICE_REFUND'
+      wow_lock_blocks: '320'
       destination: 'SHADOW_ALICE_DESTINATION'
+      alice_refund_address: 'SHADOW_ALICE_REFUND_DESTINATION'
+      node_rpc_port: '18091'
+      node_p2p_port: '37891'
+      node_peers: '["bob:37892"]'
+      wow_daemon_host: bob
+      wow_daemon_port: '34568'
+      cli_timeout: '14400'
 
   bob:
     daemon: monerod
     wallet: 'monero-wallet-rpc'
     script: agents.xmr_wow_sharechain_agent
-    start_time: 60s
+    start_time: 12600s
+    can_receive_distributions: true
     attributes:
       role: bob
+      counterparty: alice
       binary: target/release/xmr-wow
-      node_url: 'http://sharechain-node:18091'
-      db: /tmp/bob-sharechain.db
+      node_binary: target/release/xmr-wow-node
+      db: /tmp/bob-shadow-sharechain.db
       password: shadow-test
-      bob_refund_address: 'SHADOW_BOB_REFUND'
       destination: 'SHADOW_BOB_DESTINATION'
+      bob_refund_address: 'SHADOW_BOB_REFUND_DESTINATION'
+      node_rpc_port: '18092'
+      node_p2p_port: '37892'
+      node_peers: '["alice:37891"]'
+      wow_local_daemon: 'true'
+      wow_daemon_binary: wownerod
+      wow_network: testnet
+      wow_keep_fakechain: 'true'
+      wow_offline: 'true'
+      wow_bootstrap_fixed_difficulty: '1'
+      wow_fixed_difficulty: '1'
+      wow_daemon_port: '34568'
+      wow_wallet_binary: wownero-wallet-rpc
+      wow_wallet_rpc_port: '34569'
+      wow_wallet_name: bob_wow_wallet
+      wow_generate_blocks: '1000'
+      cli_timeout: '14400'
 
   miner-distributor:
     script: agents.miner_distributor

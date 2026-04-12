@@ -7,14 +7,14 @@
 # use the same monerod binary but run independently. The swap_agent Python
 # script coordinates the cross-chain protocol steps.
 #
-# Swap Protocol Phases:
-#   Phase 1: Mine maturity blocks (76 blocks) on both chains
-#   Phase 2: Alice generates keys, sends init message to Bob
-#   Phase 3: Bob receives, generates response
-#   Phase 4: Alice locks XMR (chain A)
-#   Phase 5: Bob verifies Alice's lock, locks WOW (chain B)
-#   Phase 6: Alice claims WOW, revealing secret
-#   Phase 7: Bob uses revealed secret to claim XMR
+# Swap Protocol Steps:
+#   1. Mine maturity blocks (76 blocks) on both chains
+#   2. Alice generates keys, sends init message to Bob
+#   3. Bob receives, generates response
+#   4. Alice locks XMR (chain A)
+#   5. Bob verifies Alice's lock, locks WOW (chain B)
+#   6. Alice claims WOW, revealing secret
+#   7. Bob uses revealed secret to claim XMR
 #
 # Timeline:
 #   t=0s:       Miners start on both chains
