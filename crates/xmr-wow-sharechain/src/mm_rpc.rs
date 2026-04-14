@@ -496,8 +496,19 @@ fn handle_publish_coord_message(state: &RpcState, id: Value, params: Option<Valu
         Err(e) => return err(id, -32602, format!("payload deserialize: {e}")),
     };
 
+    let payload_bytes = raw.len();
     let index = state.msg_store.publish(swap_id, raw.clone());
     state.broadcast.send(swap_id, raw);
+    // Plan 38.1-08 Task 3: diagnostic tracing for gap-closure iteration 6+.
+    // Iteration 5 identified these mm_rpc handlers as a silent instrumentation
+    // blind spot. Additive only -- no behavior change. Activation gated on
+    // RUST_LOG=xmr_wow_sharechain=trace configured by iteration 5's Task 1a.
+    tracing::debug!(
+        swap_id = %hex::encode(swap_id),
+        payload_bytes,
+        index,
+        "handle_publish_coord_message accepted"
+    );
     ok(id, serde_json::json!({ "accepted": true, "index": index }))
 }
 
@@ -521,6 +532,14 @@ fn handle_poll_coord_messages(state: &RpcState, id: Value, params: Option<Value>
 
     let messages = state.msg_store.get_after(&swap_id, after_index);
     let next_index = after_index + messages.len();
+    // Plan 38.1-08 Task 3: diagnostic tracing for gap-closure iteration 6+.
+    tracing::debug!(
+        swap_id = %hex::encode(swap_id),
+        after_index,
+        message_count = messages.len(),
+        next_index,
+        "handle_poll_coord_messages returned"
+    );
     ok(id, serde_json::json!({ "messages": messages, "next_index": next_index }))
 }
 

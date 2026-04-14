@@ -1244,13 +1244,20 @@ async fn main() -> anyhow::Result<()> {
             if role != SwapRole::Alice {
                 anyhow::bail!("lock-xmr is for Alice only (you are Bob)");
             }
-            require_checkpoint_ready(
-                &state,
-                RefundCheckpointName::BeforeXmrLock,
-                "lock-xmr",
-                cli.proof_harness,
-            )?;
 
+            // ===== Plan 38.1-08 Track 1 fix =====
+            // Scan Bob's WOW lock BEFORE the BeforeXmrLock checkpoint guard so we
+            // can transition Alice's persisted state from JointAddress -> WowLocked.
+            // Previous body ran verify_lock AFTER require_checkpoint_ready(BeforeXmrLock),
+            // which failed because JointAddress has no before_xmr_lock_checkpoint field
+            // (refresh_refund_readiness only populates it on WowLocked/XmrLocked).
+            // The fix reorders: verify Bob's WOW lock first, then call
+            // state.record_wow_lock(scan_result.tx_hash) to transition to WowLocked,
+            // which internally runs refresh_refund_readiness and populates
+            // before_xmr_lock_checkpoint. The existing test at
+            // crates/xmr-wow-client/src/swap_state.rs:2447-2459 proves Alice's call
+            // to record_wow_lock is semantically correct. See iteration 5 diagnosis:
+            // .planning/phases/38.1-multi-client-swap-orchestration/38.1-07-RUN-REPORT.md
             let (joint_spend, view_scalar) =
                 SwapState::compute_joint_keys(&my_pubkey, &counterparty_pubkey, role)?;
 
@@ -1281,6 +1288,24 @@ async fn main() -> anyhow::Result<()> {
                 "Verified: Bob locked {} WOW at height {}",
                 scan_result.amount, scan_result.block_height
             );
+
+            // Transition JointAddress -> WowLocked using the real Bob-WOW-lock tx_hash
+            // from the verify_lock scan. This populates before_xmr_lock_checkpoint via
+            // record_wow_lock's internal refresh_refund_readiness chain, unblocking
+            // the BeforeXmrLock checkpoint guard below. Idempotent no-op when the
+            // state is already WowLocked (e.g. resumed lock-xmr after partial run).
+            let state = match state {
+                SwapState::JointAddress { .. } => state.record_wow_lock(scan_result.tx_hash)?,
+                other => other,
+            };
+
+            require_checkpoint_ready(
+                &state,
+                RefundCheckpointName::BeforeXmrLock,
+                "lock-xmr",
+                cli.proof_harness,
+            )?;
+            // ===== end Track 1 fix =====
 
             let (sender_spend, sender_view) =
                 resolve_sender_keys(&mnemonic, &spend_key, &view_key, SeedCoin::Monero)?;

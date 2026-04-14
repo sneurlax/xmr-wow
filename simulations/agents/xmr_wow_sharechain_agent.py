@@ -621,6 +621,73 @@ class XmrWowSharechainAgent(BaseAgent):
                     required_amount,
                 )
                 return False
+
+            # Plan 38.1-08 Track 2 fix: ensure the WOW chain has enough mature
+            # RCT outputs for ring-signature decoy selection before invoking
+            # lock-wow. Iteration 5 terminal error was "decoy selection:
+            # interface error (hit decoy selection round limit)" at sim time
+            # 04:10:28 -- only ~11 sim-seconds after init-bob completed and
+            # ~40 sim-minutes after the 1000-block bootstrap. The coinbase
+            # outputs mined during the bootstrap need CRYPTONOTE_MINED_MONEY_
+            # UNLOCK_WINDOW (60 blocks in Wownero, per deps/wownero-simnet/)
+            # to become spendable AND contribute to the decoy pool. At
+            # bootstrap height 1000, we want tip height >= 1000 + 60 = 1060
+            # before lock-wow. Additionally, Wownero's ringsize is 22 (vs
+            # Monero's 16), so the decoy pool needs more distinct RCT outputs
+            # than a raw unlock-window count might suggest. Target a safety
+            # margin: tip height >= wow_generate_blocks + 128 (double the
+            # unlock window plus a ring-size buffer).
+            if self.wow_generate_blocks > 0:
+                try:
+                    height_resp = self._daemon_json_rpc(
+                        self.wow_daemon, "get_block_count"
+                    )
+                    current_height = int(height_resp.get("count", 0))
+                except Exception as exc:
+                    self.logger.info(
+                        "bob could not fetch WOW height (%s); retrying", exc
+                    )
+                    return False
+                maturity_target = self.wow_generate_blocks + 128
+                if current_height < maturity_target:
+                    missing_blocks = maturity_target - current_height
+                    self.logger.info(
+                        "bob mining %d more WOW blocks for decoy-selection maturity (current=%d target=%d)",
+                        missing_blocks,
+                        current_height,
+                        maturity_target,
+                    )
+                    # Bounded burst: mine in groups of wow_retry_block_burst
+                    # until we reach target or hit a hard cap of 16 bursts per
+                    # retry iteration (to protect Shadow's sim ratio). The
+                    # outer retry loop will re-enter on the next tick.
+                    burst_cap = 16
+                    bursts = 0
+                    while current_height < maturity_target and bursts < burst_cap:
+                        self._generate_wow_blocks(
+                            max(self.wow_retry_block_burst, 1)
+                        )
+                        bursts += 1
+                        try:
+                            height_resp = self._daemon_json_rpc(
+                                self.wow_daemon, "get_block_count"
+                            )
+                            current_height = int(height_resp.get("count", 0))
+                        except Exception as exc:
+                            self.logger.info(
+                                "bob WOW height fetch failed mid-burst (%s); yielding",
+                                exc,
+                            )
+                            return False
+                    if current_height < maturity_target:
+                        self.logger.info(
+                            "bob still waiting for WOW maturity (current=%d target=%d after %d bursts)",
+                            current_height,
+                            maturity_target,
+                            bursts,
+                        )
+                        return False
+
             # Issue a discrete WOW block burst to advance the chain a small,
             # bounded amount before invoking lock-wow. The previous unbounded
             # background mining call left start_mining running for the
@@ -646,9 +713,20 @@ class XmrWowSharechainAgent(BaseAgent):
                     "no outputs found at joint address",
                     "insufficient funds",
                     "confirmation timeout",
+                    # Plan 38.1-08 Track 2: iteration 5 terminal error was
+                    # "transaction building failed: decoy selection: interface
+                    # error (internal error (hit decoy selection round limit))".
+                    # This is recoverable by mining more blocks so that
+                    # additional mature coinbase RCT outputs become available
+                    # in the decoy pool. The retry loop's natural
+                    # _generate_wow_blocks burst + maturity-wait gate above
+                    # advances the chain on each retry cycle.
+                    "decoy selection",
+                    "hit decoy selection round limit",
+                    "transaction building failed",
                 ):
                     self.logger.info(
-                        "bob waiting for daemon, wallet RPC, spendable WOW outputs, or lock-wow confirmation"
+                        "bob waiting for daemon, wallet RPC, spendable WOW outputs, decoy pool depth, or lock-wow confirmation"
                     )
                     return False
                 raise
