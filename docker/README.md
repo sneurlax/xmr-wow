@@ -76,28 +76,12 @@ Note: WOW mainnet daemon default port is 34568 (not 34567).
 **End-to-end swap execution is not yet implemented in the entrypoint scripts.**
 
 This Docker Compose infrastructure is a structural deliverable. The actual
-multi-container end-to-end swap run joins the Phase 38 milestone blocker list:
-both require working production-mode swap orchestration between two clients
-with real daemons, which depends on either restoring the `--proof-harness`
-behavior or implementing full daemon-polling orchestration under the Phase 35
-transport dispatch.
+multi-container end-to-end swap run requires working production-mode swap
+orchestration between two clients with real daemons (daemon-polling
+orchestration via the sharechain transport dispatch).
 
 The entrypoint scripts (`alice-entrypoint.sh`, `bob-entrypoint.sh`) print the
-correct CLI invocation pattern and exit. Once the Phase 38 blocker is resolved,
-replace the stub bodies with real swap-driving loops modeled on
+correct CLI invocation pattern and exit. Replace the stub bodies with real
+swap-driving loops modeled on
 `simulations/agents/xmr_wow_sharechain_agent.py`.
 
-## Phase 38.3 Deferred: Docker Entrypoint Port
-
-The Docker alice-entrypoint.sh and bob-entrypoint.sh scripts are STUBs as of
-Phase 39. The production-mode swap orchestration logic (wallet funding polls,
-mining coordination, state machine driver) lives in
-`simulations/agents/xmr_wow_sharechain_agent.py`; the Python Shadow agent
-ported in Phase 38.1-02 from git commit 7ef5ea20.
-
-Once Phase 38.1's Shadow run reaches terminal state (see Phase 38.1-03), the
-same orchestration logic will be ported to the Docker entrypoint shell scripts
-in **Phase 38.3**. Until then, running `docker compose up` against the current
-entrypoints will not complete a real swap end-to-end.
-
-Docker compose end-to-end swap coverage is pending.
