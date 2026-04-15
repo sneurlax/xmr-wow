@@ -7,19 +7,19 @@ use clap::{Parser, Subcommand};
 use curve25519_dalek::constants::ED25519_BASEPOINT_POINT as G;
 use curve25519_dalek::scalar::Scalar;
 use rand::rngs::OsRng;
-use zeroize::Zeroizing;
+use xmr_wow_client::coord_message::{unwrap_protocol_message, wrap_protocol_message};
 use xmr_wow_client::{
     build_observed_refund_timing, decode_message, decrypt_secret, derive_key, encode_message,
     encrypt_secret, guarantee_decision, restore_secret_into_state, GuaranteeDecision,
     GuaranteeMode, ProtocolMessage, RefundCheckpointName, SwapParams, SwapRole, SwapState,
     SwapStore,
 };
-use xmr_wow_client::coord_message::{wrap_protocol_message, unwrap_protocol_message};
 use xmr_wow_crypto::{
     derive_view_key, encode_address, keccak256, mnemonic_to_scalar, scalar_to_mnemonic,
     KeyContribution, Network, SeedCoin,
 };
-use xmr_wow_wallet::{CryptoNoteWallet, TxHash, WowWallet, XmrWallet};
+use xmr_wow_wallet::{CryptoNoteWallet, ScanResult, TxHash, WowWallet, XmrWallet};
+use zeroize::Zeroizing;
 
 /// Transport mode for swap coordination messages.
 #[derive(clap::ValueEnum, Clone, Debug, Default)]
@@ -70,14 +70,14 @@ fn make_messenger(
         TransportMode::OutOfBand => Ok(Box::new(xmr_wow_client::swap_messenger::OobMessenger)),
         TransportMode::Sharechain => {
             let url = node_url.ok_or_else(|| {
-                anyhow::anyhow!(
-                    "--node-url is required when --transport sharechain is selected"
-                )
+                anyhow::anyhow!("--node-url is required when --transport sharechain is selected")
             })?;
-            Ok(Box::new(xmr_wow_client::swap_messenger::SharechainMessenger {
-                node_url: url.to_string(),
-                store,
-            }))
+            Ok(Box::new(
+                xmr_wow_client::swap_messenger::SharechainMessenger {
+                    node_url: url.to_string(),
+                    store,
+                },
+            ))
         }
     }
 }
@@ -660,11 +660,13 @@ async fn resolve_incoming_message(
                 .receive(coord_id)
                 .await
                 .map_err(|e| anyhow::anyhow!("sharechain receive failed: {}", e))?
-                .ok_or_else(|| anyhow::anyhow!(
-                    "No message from counterparty yet under coord ID {}. \
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "No message from counterparty yet under coord ID {}. \
                      Re-run when counterparty has published.",
-                    hex::encode(coord_id)
-                ))?;
+                        hex::encode(coord_id)
+                    )
+                })?;
             let proto = unwrap_protocol_message(&coord)
                 .map_err(|e| anyhow::anyhow!("unwrap failed: {}", e))?;
             Ok(proto)
@@ -687,7 +689,9 @@ async fn dispatch_outgoing_message(
         TransportMode::Sharechain => {
             let coord = wrap_protocol_message(*coord_id, msg)
                 .map_err(|e| anyhow::anyhow!("wrap failed: {}", e))?;
-            messenger.send(coord).await
+            messenger
+                .send(coord)
+                .await
                 .map_err(|e| anyhow::anyhow!("sharechain send failed: {}", e))?;
             println!("Published {} to sharechain.", label);
         }
@@ -699,12 +703,104 @@ async fn dispatch_outgoing_message(
     Ok(())
 }
 
-/// Coord channel ID is always `keccak256(alice_pubkey)`, regardless of role.
-fn derive_coord_id(role: SwapRole, my_pubkey: &[u8; 32], counterparty_pubkey: &[u8; 32]) -> [u8; 32] {
+/// Coord channel ID for the initial Init/Response handshake.
+/// Always `keccak256(alice_pubkey)`: Bob does not know his own channel until
+/// Alice imports the response.
+fn derive_coord_id(
+    role: SwapRole,
+    my_pubkey: &[u8; 32],
+    counterparty_pubkey: &[u8; 32],
+) -> [u8; 32] {
     match role {
         SwapRole::Alice => keccak256(my_pubkey),
         SwapRole::Bob => keccak256(counterparty_pubkey),
     }
+}
+
+/// Derive Bob's sharechain coordination channel ID once both pubkeys are known.
+fn derive_bob_coord_id(
+    role: SwapRole,
+    my_pubkey: &[u8; 32],
+    counterparty_pubkey: &[u8; 32],
+) -> [u8; 32] {
+    match role {
+        SwapRole::Alice => keccak256(counterparty_pubkey),
+        SwapRole::Bob => keccak256(my_pubkey),
+    }
+}
+
+/// Outgoing post-handshake messages are directional: Alice publishes on
+/// Alice's channel, Bob publishes on Bob's channel.
+fn derive_send_coord_id(
+    role: SwapRole,
+    my_pubkey: &[u8; 32],
+    counterparty_pubkey: &[u8; 32],
+) -> [u8; 32] {
+    match role {
+        SwapRole::Alice => derive_coord_id(role, my_pubkey, counterparty_pubkey),
+        SwapRole::Bob => derive_bob_coord_id(role, my_pubkey, counterparty_pubkey),
+    }
+}
+
+/// Incoming post-handshake messages arrive on the counterparty's directional
+/// channel: Alice reads Bob's channel, Bob reads Alice's channel.
+fn derive_receive_coord_id(
+    role: SwapRole,
+    my_pubkey: &[u8; 32],
+    counterparty_pubkey: &[u8; 32],
+) -> [u8; 32] {
+    match role {
+        SwapRole::Alice => derive_bob_coord_id(role, my_pubkey, counterparty_pubkey),
+        SwapRole::Bob => derive_coord_id(role, my_pubkey, counterparty_pubkey),
+    }
+}
+
+fn resolve_lock_xmr_verify_scan_from(
+    wow_height: u64,
+    explicit_scan_from: u64,
+    observed_wow_base_height: Option<u64>,
+) -> u64 {
+    if explicit_scan_from > 0 {
+        return explicit_scan_from.min(wow_height);
+    }
+
+    let rolling_window_start = wow_height.saturating_sub(500);
+    observed_wow_base_height
+        .map(|base_height| base_height.min(rolling_window_start))
+        .unwrap_or(rolling_window_start)
+}
+
+const XMR_OUTPUT_SPENDABLE_AGE: u64 = 10;
+
+fn ensure_claim_xmr_outputs_spendable(
+    current_height: u64,
+    scan_results: &[ScanResult],
+) -> anyhow::Result<()> {
+    if scan_results.iter().any(|result| {
+        current_height >= result.block_height.saturating_add(XMR_OUTPUT_SPENDABLE_AGE)
+    }) {
+        return Ok(());
+    }
+
+    if scan_results.is_empty() {
+        anyhow::bail!(
+            "no spendable outputs at joint address yet (current height {}, waiting for Alice's XMR lock output to scan)",
+            current_height
+        );
+    }
+
+    let earliest_unlock_height = scan_results
+        .iter()
+        .map(|result| result.block_height.saturating_add(XMR_OUTPUT_SPENDABLE_AGE))
+        .min()
+        .unwrap_or(current_height.saturating_add(XMR_OUTPUT_SPENDABLE_AGE));
+
+    anyhow::bail!(
+        "no spendable outputs at joint address yet (current height {}, earliest unlock height {}, required confirmations {})",
+        current_height,
+        earliest_unlock_height,
+        XMR_OUTPUT_SPENDABLE_AGE
+    );
 }
 
 #[tokio::main]
@@ -714,7 +810,11 @@ async fn main() -> anyhow::Result<()> {
     let store = SwapStore::open(&cli.db)?;
     let store_shared = Arc::new(Mutex::new(store));
     // Fail fast on bad transport config before entering command handlers.
-    let messenger = make_messenger(&cli.transport, cli.node_url.as_deref(), store_shared.clone())?;
+    let messenger = make_messenger(
+        &cli.transport,
+        cli.node_url.as_deref(),
+        store_shared.clone(),
+    )?;
 
     match cli.cmd {
         Command::InitAlice {
@@ -788,7 +888,11 @@ async fn main() -> anyhow::Result<()> {
             let temp_id = keccak256(&my_pubkey);
 
             let state_json = serde_json::to_string(&state)?;
-            store_shared.lock().unwrap().save_with_secret(&temp_id, &state_json, Some(&encrypted))?;
+            store_shared.lock().unwrap().save_with_secret(
+                &temp_id,
+                &state_json,
+                Some(&encrypted),
+            )?;
 
             let msg = ProtocolMessage::Init {
                 pubkey: my_pubkey,
@@ -805,7 +909,9 @@ async fn main() -> anyhow::Result<()> {
                 TransportMode::Sharechain => {
                     let coord = wrap_protocol_message(temp_id, &msg)
                         .map_err(|e| anyhow::anyhow!("wrap failed: {}", e))?;
-                    messenger.send(coord).await
+                    messenger
+                        .send(coord)
+                        .await
                         .map_err(|e| anyhow::anyhow!("sharechain send failed: {}", e))?;
                     // Advance past Alice's own Init so subsequent receives return Bob's Response.
                     {
@@ -815,7 +921,10 @@ async fn main() -> anyhow::Result<()> {
                     println!("Swap initialized as Alice.");
                     println!("Swap coord ID: {}", hex::encode(temp_id));
                     println!("Published Init to sharechain.");
-                    println!("Give the coord ID to Bob so he can run init-bob --swap-id {}.", hex::encode(temp_id));
+                    println!(
+                        "Give the coord ID to Bob so he can run init-bob --swap-id {}.",
+                        hex::encode(temp_id)
+                    );
                 }
                 TransportMode::OutOfBand => {
                     println!("Swap initialized as Alice.");
@@ -864,11 +973,13 @@ async fn main() -> anyhow::Result<()> {
                         .receive(&cid)
                         .await
                         .map_err(|e| anyhow::anyhow!("sharechain receive failed: {}", e))?
-                        .ok_or_else(|| anyhow::anyhow!(
-                            "No message from counterparty yet under coord ID {}. \
+                        .ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "No message from counterparty yet under coord ID {}. \
                              Re-run when counterparty has published.",
-                            hex::encode(cid)
-                        ))?;
+                                hex::encode(cid)
+                            )
+                        })?;
                     unwrap_protocol_message(&coord)
                         .map_err(|e| anyhow::anyhow!("unwrap failed: {}", e))?
                 }
@@ -909,9 +1020,7 @@ async fn main() -> anyhow::Result<()> {
             };
 
             let refund_timing = refund_timing.ok_or_else(|| {
-                anyhow::anyhow!(
-                    "legacy init transcripts without refund_timing are unsupported"
-                )
+                anyhow::anyhow!("legacy init transcripts without refund_timing are unsupported")
             })?;
             let alice_refund_address = alice_refund_address.ok_or_else(|| {
                 anyhow::anyhow!(
@@ -959,7 +1068,11 @@ async fn main() -> anyhow::Result<()> {
             };
 
             let state_json = serde_json::to_string(&state)?;
-            store_shared.lock().unwrap().save_with_secret(&swap_id, &state_json, Some(&encrypted))?;
+            store_shared.lock().unwrap().save_with_secret(
+                &swap_id,
+                &state_json,
+                Some(&encrypted),
+            )?;
 
             let response = ProtocolMessage::Response {
                 pubkey: my_pubkey,
@@ -988,7 +1101,9 @@ async fn main() -> anyhow::Result<()> {
                     let cid = coord_id.unwrap_or_else(|| keccak256(&alice_pubkey));
                     let coord = wrap_protocol_message(cid, &response)
                         .map_err(|e| anyhow::anyhow!("wrap failed: {}", e))?;
-                    messenger.send(coord).await
+                    messenger
+                        .send(coord)
+                        .await
                         .map_err(|e| anyhow::anyhow!("sharechain send failed: {}", e))?;
                     // Bob's Response sits at index 1 (Alice's Init at 0); advance past it.
                     {
@@ -1011,7 +1126,9 @@ async fn main() -> anyhow::Result<()> {
 
             let temp_id = parse_swap_id(&swap_id)?;
 
-            let (state_json, encrypted_secret) = store_shared.lock().unwrap()
+            let (state_json, encrypted_secret) = store_shared
+                .lock()
+                .unwrap()
                 .load_with_secret(&temp_id)?
                 .ok_or_else(|| anyhow::anyhow!("swap {} not found", swap_id))?;
 
@@ -1024,12 +1141,8 @@ async fn main() -> anyhow::Result<()> {
             let state: SwapState = serde_json::from_str(&state_json)?;
             let state = restore_secret_into_state(state, *secret_bytes)?;
 
-            let response_msg = resolve_incoming_message(
-                message,
-                &cli.transport,
-                &*messenger,
-                &temp_id,
-            ).await?;
+            let response_msg =
+                resolve_incoming_message(message, &cli.transport, &*messenger, &temp_id).await?;
             let (bob_pubkey, bob_proof, bob_refund_address) = match response_msg {
                 ProtocolMessage::Response {
                     pubkey,
@@ -1176,11 +1289,11 @@ async fn main() -> anyhow::Result<()> {
         }
 
         Command::Status { swap_id } => {
-            let id_bytes = hex::decode(&swap_id)
-                .map_err(|e| anyhow::anyhow!("invalid swap_id hex: {}", e))?;
-            let id: [u8; 32] = id_bytes
-                .try_into()
-                .map_err(|_| anyhow::anyhow!("swap_id must be exactly 64 hex characters (32 bytes)"))?;
+            let id_bytes =
+                hex::decode(&swap_id).map_err(|e| anyhow::anyhow!("invalid swap_id hex: {}", e))?;
+            let id: [u8; 32] = id_bytes.try_into().map_err(|_| {
+                anyhow::anyhow!("swap_id must be exactly 64 hex characters (32 bytes)")
+            })?;
 
             let url = cli.node_url.as_deref().ok_or_else(|| {
                 anyhow::anyhow!(
@@ -1217,7 +1330,8 @@ async fn main() -> anyhow::Result<()> {
             let enc_key = derive_key(password.as_bytes(), &salt);
 
             let id = parse_swap_id(&swap_id)?;
-            let (state, secret_bytes, _) = load_and_decrypt_state(&store_shared.lock().unwrap(), &id, &enc_key)?;
+            let (state, secret_bytes, _) =
+                load_and_decrypt_state(&store_shared.lock().unwrap(), &id, &enc_key)?;
             let state = state.refresh_refund_readiness()?;
             validate_persisted_timing(&state)?;
 
@@ -1270,7 +1384,12 @@ async fn main() -> anyhow::Result<()> {
                     .send().await?.json().await?;
                     resp["result"]["count"].as_u64().unwrap_or(0)
                 };
-            let verify_from = wow_height.saturating_sub(500);
+            let observed_wow_base_height = params
+                .refund_timing
+                .as_ref()
+                .map(|timing| timing.wow_base_height);
+            let verify_from =
+                resolve_lock_xmr_verify_scan_from(wow_height, scan_from, observed_wow_base_height);
             println!(
                 "Verifying Bob's WOW lock (scanning {} blocks from {})...",
                 wow_height - verify_from,
@@ -1332,21 +1451,30 @@ async fn main() -> anyhow::Result<()> {
                 _ => unreachable!(),
             };
 
-            let coord_id = derive_coord_id(role, &my_pubkey, &counterparty_pubkey);
+            let coord_id = derive_send_coord_id(role, &my_pubkey, &counterparty_pubkey);
             let pre_sig_msg = ProtocolMessage::AdaptorPreSig {
                 pre_sig: my_adaptor_pre_sig,
             };
             println!("XMR locked successfully.");
             dispatch_outgoing_message(
-                &cli.transport, &*messenger, &coord_id, &pre_sig_msg, "adaptor pre-signature"
-            ).await?;
+                &cli.transport,
+                &*messenger,
+                &coord_id,
+                &pre_sig_msg,
+                "adaptor pre-signature",
+            )
+            .await?;
 
             let swap_id_bytes = state.swap_id().ok_or_else(|| {
                 anyhow::anyhow!("swap state has no swap_id (still in KeyGeneration phase?)")
             })?;
             let encrypted = encrypt_secret(&enc_key, &*secret_bytes);
             let state_json = serde_json::to_string(&state)?;
-            store_shared.lock().unwrap().save_with_secret(&swap_id_bytes, &state_json, Some(&encrypted))?;
+            store_shared.lock().unwrap().save_with_secret(
+                &swap_id_bytes,
+                &state_json,
+                Some(&encrypted),
+            )?;
         }
 
         Command::LockWow {
@@ -1362,7 +1490,8 @@ async fn main() -> anyhow::Result<()> {
             let enc_key = derive_key(password.as_bytes(), &salt);
 
             let id = parse_swap_id(&swap_id)?;
-            let (state, secret_bytes, _) = load_and_decrypt_state(&store_shared.lock().unwrap(), &id, &enc_key)?;
+            let (state, secret_bytes, _) =
+                load_and_decrypt_state(&store_shared.lock().unwrap(), &id, &enc_key)?;
             validate_persisted_timing(&state)?;
 
             let (role, params, my_pubkey, counterparty_pubkey) = match &state {
@@ -1372,39 +1501,111 @@ async fn main() -> anyhow::Result<()> {
                     my_pubkey,
                     counterparty_pubkey,
                     ..
+                }
+                | SwapState::WowLocked {
+                    role,
+                    params,
+                    my_pubkey,
+                    counterparty_pubkey,
+                    ..
                 } => (*role, params.clone(), *my_pubkey, *counterparty_pubkey),
-                other => anyhow::bail!("expected JointAddress state, got {}", phase_name(other)),
+                other => anyhow::bail!(
+                    "expected JointAddress or WowLocked state, got {}",
+                    phase_name(other)
+                ),
             };
             if role != SwapRole::Bob {
                 anyhow::bail!("lock-wow is for Bob only (you are Alice)");
             }
-            require_checkpoint_ready(
-                &state,
-                RefundCheckpointName::BeforeWowLock,
-                "lock-wow",
-                cli.proof_harness,
-            )?;
 
             let (joint_spend, view_scalar) =
                 SwapState::compute_joint_keys(&my_pubkey, &counterparty_pubkey, role)?;
+            let state = match state {
+                state @ SwapState::WowLocked { .. } => {
+                    println!(
+                        "WOW lock already recorded in local state; reusing persisted adaptor pre-signature."
+                    );
+                    state
+                }
+                joint_state @ SwapState::JointAddress { .. } => {
+                    require_checkpoint_ready(
+                        &joint_state,
+                        RefundCheckpointName::BeforeWowLock,
+                        "lock-wow",
+                        cli.proof_harness,
+                    )?;
 
-            let (sender_spend, sender_view) =
-                resolve_sender_keys(&mnemonic, &spend_key, &view_key, SeedCoin::Wownero)?;
-            let wow_wallet = WowWallet::with_sender_keys(&wow_daemon, sender_spend, sender_view)
-                .with_scan_from(scan_from);
-            println!(
-                "Locking {} WOW atomic units to joint address...",
-                params.amount_wow
-            );
-            let wow_tx_hash = wow_wallet
-                .lock(&joint_spend, &view_scalar, params.amount_wow)
-                .await?;
-            println!("WOW lock tx: {}", hex::encode(wow_tx_hash));
+                    let wow_wallet_verify = WowWallet::new(&wow_daemon);
+                    let wow_height: u64 = {
+                        let resp: serde_json::Value = reqwest::Client::new()
+                            .post(format!("{}/json_rpc", wow_daemon))
+                            .json(&serde_json::json!({"jsonrpc":"2.0","id":"0","method":"get_block_count"}))
+                            .send()
+                            .await?
+                            .json()
+                            .await?;
+                        resp["result"]["count"].as_u64().unwrap_or(0)
+                    };
+                    let observed_wow_base_height = params
+                        .refund_timing
+                        .as_ref()
+                        .map(|timing| timing.wow_base_height);
+                    let verify_from = resolve_lock_xmr_verify_scan_from(
+                        wow_height,
+                        scan_from,
+                        observed_wow_base_height,
+                    );
 
-            println!("Waiting for WOW confirmation...");
-            wait_for_confirmation(&wow_wallet, &wow_tx_hash, 1, 10).await?;
+                    match xmr_wow_wallet::verify_lock(
+                        &wow_wallet_verify,
+                        &joint_spend,
+                        &view_scalar,
+                        params.amount_wow,
+                        verify_from,
+                    )
+                    .await
+                    {
+                        Ok(scan_result) => {
+                            println!(
+                                "Found existing WOW lock on-chain while resuming (scanned {} blocks from {}).",
+                                wow_height.saturating_sub(verify_from),
+                                verify_from
+                            );
+                            println!(
+                                "Verified: Bob locked {} WOW at height {}",
+                                scan_result.amount, scan_result.block_height
+                            );
+                            joint_state.record_wow_lock(scan_result.tx_hash)?
+                        }
+                        Err(xmr_wow_wallet::WalletError::NoOutputsFound) => {
+                            let (sender_spend, sender_view) = resolve_sender_keys(
+                                &mnemonic,
+                                &spend_key,
+                                &view_key,
+                                SeedCoin::Wownero,
+                            )?;
+                            let wow_wallet =
+                                WowWallet::with_sender_keys(&wow_daemon, sender_spend, sender_view)
+                                    .with_scan_from(scan_from);
+                            println!(
+                                "Locking {} WOW atomic units to joint address...",
+                                params.amount_wow
+                            );
+                            let wow_tx_hash = wow_wallet
+                                .lock(&joint_spend, &view_scalar, params.amount_wow)
+                                .await?;
+                            println!("WOW lock tx: {}", hex::encode(wow_tx_hash));
 
-            let state = state.record_wow_lock(wow_tx_hash)?;
+                            println!("Waiting for WOW confirmation...");
+                            wait_for_confirmation(&wow_wallet, &wow_tx_hash, 1, 10).await?;
+
+                            joint_state.record_wow_lock(wow_tx_hash)?
+                        }
+                        Err(err) => return Err(err.into()),
+                    }
+                }
+                _ => unreachable!(),
+            };
 
             let my_adaptor_pre_sig = match &state {
                 SwapState::WowLocked {
@@ -1413,21 +1614,30 @@ async fn main() -> anyhow::Result<()> {
                 _ => unreachable!(),
             };
 
-            let coord_id = derive_coord_id(role, &my_pubkey, &counterparty_pubkey);
+            let coord_id = derive_send_coord_id(role, &my_pubkey, &counterparty_pubkey);
             let pre_sig_msg = ProtocolMessage::AdaptorPreSig {
                 pre_sig: my_adaptor_pre_sig,
             };
             println!("WOW locked successfully.");
             dispatch_outgoing_message(
-                &cli.transport, &*messenger, &coord_id, &pre_sig_msg, "adaptor pre-signature"
-            ).await?;
+                &cli.transport,
+                &*messenger,
+                &coord_id,
+                &pre_sig_msg,
+                "adaptor pre-signature",
+            )
+            .await?;
 
             let swap_id_bytes = state.swap_id().ok_or_else(|| {
                 anyhow::anyhow!("swap state has no swap_id (still in KeyGeneration phase?)")
             })?;
             let encrypted = encrypt_secret(&enc_key, &*secret_bytes);
             let state_json = serde_json::to_string(&state)?;
-            store_shared.lock().unwrap().save_with_secret(&swap_id_bytes, &state_json, Some(&encrypted))?;
+            store_shared.lock().unwrap().save_with_secret(
+                &swap_id_bytes,
+                &state_json,
+                Some(&encrypted),
+            )?;
         }
 
         Command::ExchangePreSig { swap_id, message } => {
@@ -1436,23 +1646,31 @@ async fn main() -> anyhow::Result<()> {
             let enc_key = derive_key(password.as_bytes(), &salt);
 
             let id = parse_swap_id(&swap_id)?;
-            let (state, secret_bytes, _) = load_and_decrypt_state(&store_shared.lock().unwrap(), &id, &enc_key)?;
+            let (state, secret_bytes, _) =
+                load_and_decrypt_state(&store_shared.lock().unwrap(), &id, &enc_key)?;
 
             let (role, my_pubkey, counterparty_pubkey) = match &state {
-                SwapState::XmrLocked { role, my_pubkey, counterparty_pubkey, .. } |
-                SwapState::WowLocked { role, my_pubkey, counterparty_pubkey, .. } => {
-                    (*role, *my_pubkey, *counterparty_pubkey)
+                SwapState::XmrLocked {
+                    role,
+                    my_pubkey,
+                    counterparty_pubkey,
+                    ..
                 }
-                other => anyhow::bail!("expected XmrLocked or WowLocked state for exchange-pre-sig, got {}", phase_name(other)),
+                | SwapState::WowLocked {
+                    role,
+                    my_pubkey,
+                    counterparty_pubkey,
+                    ..
+                } => (*role, *my_pubkey, *counterparty_pubkey),
+                other => anyhow::bail!(
+                    "expected XmrLocked or WowLocked state for exchange-pre-sig, got {}",
+                    phase_name(other)
+                ),
             };
-            let coord_id = derive_coord_id(role, &my_pubkey, &counterparty_pubkey);
+            let coord_id = derive_receive_coord_id(role, &my_pubkey, &counterparty_pubkey);
 
-            let msg = resolve_incoming_message(
-                message,
-                &cli.transport,
-                &*messenger,
-                &coord_id,
-            ).await?;
+            let msg =
+                resolve_incoming_message(message, &cli.transport, &*messenger, &coord_id).await?;
             let pre_sig = match msg {
                 ProtocolMessage::AdaptorPreSig { pre_sig } => pre_sig,
                 _ => anyhow::bail!("Expected AdaptorPreSig message"),
@@ -1465,7 +1683,11 @@ async fn main() -> anyhow::Result<()> {
             })?;
             let encrypted = encrypt_secret(&enc_key, &*secret_bytes);
             let state_json = serde_json::to_string(&state)?;
-            store_shared.lock().unwrap().save_with_secret(&swap_id_bytes, &state_json, Some(&encrypted))?;
+            store_shared.lock().unwrap().save_with_secret(
+                &swap_id_bytes,
+                &state_json,
+                Some(&encrypted),
+            )?;
 
             println!("Counterparty pre-signature verified and stored.");
         }
@@ -1482,7 +1704,8 @@ async fn main() -> anyhow::Result<()> {
             let enc_key = derive_key(password.as_bytes(), &salt);
 
             let id = parse_swap_id(&swap_id)?;
-            let (state, secret_bytes, _) = load_and_decrypt_state(&store_shared.lock().unwrap(), &id, &enc_key)?;
+            let (state, secret_bytes, _) =
+                load_and_decrypt_state(&store_shared.lock().unwrap(), &id, &enc_key)?;
 
             let (role, my_pubkey, counterparty_pubkey, my_adaptor_pre_sig) = match &state {
                 SwapState::WowLocked {
@@ -1522,11 +1745,11 @@ async fn main() -> anyhow::Result<()> {
                 ),
             };
 
-            let coord_id = derive_coord_id(role, &my_pubkey, &counterparty_pubkey);
+            let coord_id = derive_receive_coord_id(role, &my_pubkey, &counterparty_pubkey);
+            let publish_coord_id = derive_send_coord_id(role, &my_pubkey, &counterparty_pubkey);
 
-            let claim_msg = resolve_incoming_message(
-                message, &cli.transport, &*messenger, &coord_id,
-            ).await?;
+            let claim_msg =
+                resolve_incoming_message(message, &cli.transport, &*messenger, &coord_id).await?;
             let bob_completed_sig = match claim_msg {
                 ProtocolMessage::ClaimProof { completed_sig } => completed_sig,
                 _ => anyhow::bail!("Expected ClaimProof message from Bob"),
@@ -1564,14 +1787,22 @@ async fn main() -> anyhow::Result<()> {
 
             println!("WOW claimed successfully.");
             dispatch_outgoing_message(
-                &cli.transport, &*messenger, &coord_id, &claim_proof, "claim proof"
-            ).await?;
+                &cli.transport,
+                &*messenger,
+                &publish_coord_id,
+                &claim_proof,
+                "claim proof",
+            )
+            .await?;
 
             let swap_id_bytes = complete_state.swap_id().ok_or_else(|| {
                 anyhow::anyhow!("swap state has no swap_id (still in KeyGeneration phase?)")
             })?;
             let state_json = serde_json::to_string(&complete_state)?;
-            store_shared.lock().unwrap().save_with_secret(&swap_id_bytes, &state_json, None)?;
+            store_shared
+                .lock()
+                .unwrap()
+                .save_with_secret(&swap_id_bytes, &state_json, None)?;
         }
 
         Command::ClaimXmr {
@@ -1586,7 +1817,8 @@ async fn main() -> anyhow::Result<()> {
             let enc_key = derive_key(password.as_bytes(), &salt);
 
             let id = parse_swap_id(&swap_id)?;
-            let (state, secret_bytes, _) = load_and_decrypt_state(&store_shared.lock().unwrap(), &id, &enc_key)?;
+            let (state, secret_bytes, _) =
+                load_and_decrypt_state(&store_shared.lock().unwrap(), &id, &enc_key)?;
 
             let (role, my_pubkey, counterparty_pubkey, my_adaptor_pre_sig, counterparty_pre_sig) =
                 match &state {
@@ -1613,7 +1845,8 @@ async fn main() -> anyhow::Result<()> {
                     other => anyhow::bail!("expected WowLocked state, got {}", phase_name(other)),
                 };
 
-            let coord_id = derive_coord_id(role, &my_pubkey, &counterparty_pubkey);
+            let coord_id = derive_receive_coord_id(role, &my_pubkey, &counterparty_pubkey);
+            let publish_coord_id = derive_send_coord_id(role, &my_pubkey, &counterparty_pubkey);
 
             let my_scalar = Scalar::from_canonical_bytes(*secret_bytes)
                 .into_option()
@@ -1628,13 +1861,26 @@ async fn main() -> anyhow::Result<()> {
             };
 
             dispatch_outgoing_message(
-                &cli.transport, &*messenger, &coord_id, &bob_claim_proof, "claim proof"
-            ).await?;
+                &cli.transport,
+                &*messenger,
+                &publish_coord_id,
+                &bob_claim_proof,
+                "claim proof",
+            )
+            .await?;
             println!();
 
-            let claim_msg = resolve_incoming_message(
-                message, &cli.transport, &*messenger, &coord_id,
-            ).await?;
+            let (joint_spend_point, view_scalar) =
+                SwapState::compute_joint_keys(&my_pubkey, &counterparty_pubkey, role)?;
+            let xmr_wallet = XmrWallet::new(&xmr_daemon).with_scan_from(scan_from);
+            let current_xmr_height = xmr_wallet.get_current_height().await?;
+            let scan_results = xmr_wallet
+                .scan(&joint_spend_point, &view_scalar, scan_from)
+                .await?;
+            ensure_claim_xmr_outputs_spendable(current_xmr_height, &scan_results)?;
+
+            let claim_msg =
+                resolve_incoming_message(message, &cli.transport, &*messenger, &coord_id).await?;
             let alice_completed_sig = match claim_msg {
                 ProtocolMessage::ClaimProof { completed_sig } => completed_sig,
                 _ => anyhow::bail!("Expected ClaimProof message from Alice"),
@@ -1653,11 +1899,6 @@ async fn main() -> anyhow::Result<()> {
             println!("Extracted Alice's secret from her completed adaptor signature.");
 
             let combined = alice_secret + my_scalar;
-
-            let (_, view_scalar) =
-                SwapState::compute_joint_keys(&my_pubkey, &counterparty_pubkey, role)?;
-
-            let xmr_wallet = XmrWallet::new(&xmr_daemon).with_scan_from(scan_from);
             println!("Sweeping XMR from joint address to {}...", destination);
             let sweep_tx = xmr_wallet
                 .sweep(&combined, &view_scalar, &destination)
@@ -1681,7 +1922,10 @@ async fn main() -> anyhow::Result<()> {
                 anyhow::anyhow!("swap state has no swap_id (still in KeyGeneration phase?)")
             })?;
             let state_json = serde_json::to_string(&complete_state)?;
-            store_shared.lock().unwrap().save_with_secret(&swap_id_bytes, &state_json, None)?;
+            store_shared
+                .lock()
+                .unwrap()
+                .save_with_secret(&swap_id_bytes, &state_json, None)?;
 
             println!("XMR claimed. Swap complete.");
         }
@@ -1719,7 +1963,8 @@ async fn main() -> anyhow::Result<()> {
             let enc_key = derive_key(password.as_bytes(), &salt);
 
             let id = parse_swap_id(&swap_id)?;
-            let (state, _secret_bytes, _) = load_and_decrypt_state(&store_shared.lock().unwrap(), &id, &enc_key)?;
+            let (state, _secret_bytes, _) =
+                load_and_decrypt_state(&store_shared.lock().unwrap(), &id, &enc_key)?;
             let _ = (xmr_daemon, wow_daemon);
             validate_persisted_timing(&state)?;
             let decision = guarantee_decision(GuaranteeMode::LegacyRefundNoEvidence);
@@ -1732,7 +1977,8 @@ async fn main() -> anyhow::Result<()> {
             let enc_key = derive_key(password.as_bytes(), &salt);
 
             let id = parse_swap_id(&swap_id)?;
-            let (state, _secret_bytes, _) = load_and_decrypt_state(&store_shared.lock().unwrap(), &id, &enc_key)?;
+            let (state, _secret_bytes, _) =
+                load_and_decrypt_state(&store_shared.lock().unwrap(), &id, &enc_key)?;
             validate_persisted_timing(&state)?;
             let decision = guarantee_decision(GuaranteeMode::CooperativeRefundCommands);
             return Err(guarantee_failure("generate-refund-cooperate", decision));
@@ -1758,7 +2004,8 @@ async fn main() -> anyhow::Result<()> {
                 wow_daemon,
                 scan_from,
             );
-            let (state, _secret_bytes, _) = load_and_decrypt_state(&store_shared.lock().unwrap(), &id, &enc_key)?;
+            let (state, _secret_bytes, _) =
+                load_and_decrypt_state(&store_shared.lock().unwrap(), &id, &enc_key)?;
             validate_persisted_timing(&state)?;
             let decision = guarantee_decision(GuaranteeMode::CooperativeRefundCommands);
             return Err(guarantee_failure("build-refund", decision));
@@ -1775,7 +2022,8 @@ async fn main() -> anyhow::Result<()> {
 
             let id = parse_swap_id(&swap_id)?;
             let _ = (xmr_daemon, wow_daemon);
-            let (state, _secret_bytes, _) = load_and_decrypt_state(&store_shared.lock().unwrap(), &id, &enc_key)?;
+            let (state, _secret_bytes, _) =
+                load_and_decrypt_state(&store_shared.lock().unwrap(), &id, &enc_key)?;
             validate_persisted_timing(&state)?;
 
             let decision = match &state {
@@ -1796,7 +2044,9 @@ async fn main() -> anyhow::Result<()> {
 
             let id = parse_swap_id(&swap_id)?;
 
-            let (state_json, encrypted_secret) = store_shared.lock().unwrap()
+            let (state_json, encrypted_secret) = store_shared
+                .lock()
+                .unwrap()
                 .load_with_secret(&id)?
                 .ok_or_else(|| anyhow::anyhow!("swap {} not found", swap_id))?;
 
@@ -1982,9 +2232,9 @@ async fn main() -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rand::rngs::OsRng;
     use xmr_wow_client::coord_message::wrap_protocol_message;
     use xmr_wow_crypto::{AdaptorSignature, CompletedSignature, DleqProof, KeyContribution};
-    use rand::rngs::OsRng;
 
     fn dummy_swap_id() -> [u8; 32] {
         [0x42u8; 32]
@@ -2101,5 +2351,99 @@ mod tests {
         assert_eq!(count, 4);
         assert_eq!(last, "ClaimProof");
         assert_eq!(inferred, "Complete (claim seen)");
+    }
+
+    #[test]
+    fn directional_coord_helpers_split_post_handshake_channels() {
+        let alice_pubkey = [0x11u8; 32];
+        let bob_pubkey = [0x22u8; 32];
+        let alice_channel = keccak256(&alice_pubkey);
+        let bob_channel = keccak256(&bob_pubkey);
+
+        assert_eq!(
+            derive_send_coord_id(SwapRole::Alice, &alice_pubkey, &bob_pubkey),
+            alice_channel,
+            "Alice must keep publishing on Alice's channel after the handshake",
+        );
+        assert_eq!(
+            derive_receive_coord_id(SwapRole::Alice, &alice_pubkey, &bob_pubkey),
+            bob_channel,
+            "Alice must read Bob's post-handshake messages from Bob's channel",
+        );
+        assert_eq!(
+            derive_send_coord_id(SwapRole::Bob, &bob_pubkey, &alice_pubkey),
+            bob_channel,
+            "Bob must publish post-handshake messages on Bob's channel",
+        );
+        assert_eq!(
+            derive_receive_coord_id(SwapRole::Bob, &bob_pubkey, &alice_pubkey),
+            alice_channel,
+            "Bob must keep reading Alice's post-handshake messages from Alice's channel",
+        );
+    }
+
+    #[test]
+    fn lock_xmr_verify_scan_from_uses_observed_base_height_when_tip_drifted() {
+        assert_eq!(
+            resolve_lock_xmr_verify_scan_from(11_604, 0, Some(1_000)),
+            1_000,
+            "lock-xmr must not lose Bob's WOW lock just because confirmation mining pushed the tip far ahead",
+        );
+    }
+
+    #[test]
+    fn lock_xmr_verify_scan_from_falls_back_to_recent_window_without_timing_basis() {
+        assert_eq!(resolve_lock_xmr_verify_scan_from(11_604, 0, None), 11_104);
+    }
+
+    #[test]
+    fn lock_xmr_verify_scan_from_respects_explicit_override() {
+        assert_eq!(
+            resolve_lock_xmr_verify_scan_from(11_604, 2_343, Some(1_000)),
+            2_343,
+        );
+    }
+
+    #[test]
+    fn claim_xmr_preflight_requires_ten_confirmations() {
+        let scans = vec![ScanResult {
+            found: true,
+            amount: 1_000_000_000_000,
+            tx_hash: [0x11; 32],
+            output_index: 0,
+            block_height: 141,
+        }];
+
+        let err = ensure_claim_xmr_outputs_spendable(149, &scans)
+            .expect_err("output should still be locked before 10 confirmations")
+            .to_string();
+        assert!(err.contains("no spendable outputs at joint address yet"));
+        assert!(err.contains("earliest unlock height 151"));
+
+        ensure_claim_xmr_outputs_spendable(151, &scans)
+            .expect("output should become spendable once 10 blocks have passed");
+    }
+
+    #[test]
+    fn claim_xmr_preflight_accepts_any_mature_output() {
+        let scans = vec![
+            ScanResult {
+                found: true,
+                amount: 1,
+                tx_hash: [0x11; 32],
+                output_index: 0,
+                block_height: 141,
+            },
+            ScanResult {
+                found: true,
+                amount: 2,
+                tx_hash: [0x22; 32],
+                output_index: 1,
+                block_height: 148,
+            },
+        ];
+
+        ensure_claim_xmr_outputs_spendable(151, &scans)
+            .expect("a mature joint output should unblock claim-xmr preflight");
     }
 }

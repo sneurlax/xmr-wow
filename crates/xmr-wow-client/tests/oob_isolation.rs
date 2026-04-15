@@ -12,7 +12,9 @@ fn oob_messenger_is_zero_sized() {
 
 #[test]
 fn sharechain_messenger_requires_node_url() {
-    let store = Arc::new(Mutex::new(xmr_wow_client::SwapStore::open_in_memory().unwrap()));
+    let store = Arc::new(Mutex::new(
+        xmr_wow_client::SwapStore::open_in_memory().unwrap(),
+    ));
     let m = SharechainMessenger {
         node_url: "http://127.0.0.1:34568".into(),
         store,

@@ -31,6 +31,7 @@
 use curve25519_dalek::{
     constants::ED25519_BASEPOINT_POINT as G, edwards::EdwardsPoint, scalar::Scalar,
 };
+use std::cmp::Reverse;
 use tracing;
 use zeroize::Zeroizing;
 
@@ -40,6 +41,10 @@ use crate::trait_def::{ConfirmationStatus, CryptoNoteWallet, RefundChain, ScanRe
 /// WOW mainnet default JSON-RPC port.
 /// Note: 34567 is the P2P port, 34568 is the JSON-RPC port.
 const WOW_MAINNET_DEFAULT_PORT: u16 = 34568;
+const WOW_FEE_RATE_SANITY_BOUND: u64 = 100_000_000;
+const WOW_LOCK_BASE_FEE_ESTIMATE: u64 = 19_000_000;
+const WOW_LOCK_FEE_PER_INPUT_ESTIMATE: u64 = 16_000_000;
+const WOW_SWEEP_FEE_PROBE_AMOUNT: u64 = 1;
 
 /// Wownero wallet adapter.
 ///
@@ -63,6 +68,186 @@ pub struct WowWallet {
 }
 
 impl WowWallet {
+    fn estimate_lock_fee(num_inputs: usize) -> u64 {
+        WOW_LOCK_BASE_FEE_ESTIMATE + (num_inputs as u64 * WOW_LOCK_FEE_PER_INPUT_ESTIMATE)
+    }
+
+    fn select_lock_output_indices(amounts: &[u64], amount: u64) -> Result<Vec<usize>, WalletError> {
+        if amounts.is_empty() {
+            return Err(WalletError::NoOutputsFound);
+        }
+
+        let total_available: u64 = amounts.iter().sum();
+        let single_output_target = amount.saturating_add(Self::estimate_lock_fee(1));
+
+        // Prefer the smallest single output which can fund the lock by itself.
+        // Fewer inputs materially reduces the number of decoy sets the daemon
+        // has to provide for this pre-broadcast `lock-wow` path.
+        let mut ascending: Vec<(usize, u64)> = amounts.iter().copied().enumerate().collect();
+        ascending.sort_by_key(|(_, output_amount)| *output_amount);
+        if let Some((selected_idx, _)) = ascending
+            .into_iter()
+            .find(|(_, output_amount)| *output_amount >= single_output_target)
+        {
+            return Ok(vec![selected_idx]);
+        }
+
+        // If no single output works, greedily add the largest outputs first so
+        // we reach the target with the minimum practical input count.
+        let mut descending: Vec<(usize, u64)> = amounts.iter().copied().enumerate().collect();
+        descending.sort_by_key(|(_, output_amount)| Reverse(*output_amount));
+
+        let mut selected = Vec::new();
+        let mut selected_total = 0u64;
+        for (selected_idx, output_amount) in descending {
+            selected.push(selected_idx);
+            selected_total = selected_total.saturating_add(output_amount);
+            let estimated_fee = Self::estimate_lock_fee(selected.len());
+            if selected_total >= amount.saturating_add(estimated_fee) {
+                return Ok(selected);
+            }
+        }
+
+        Err(WalletError::InsufficientFunds {
+            need: amount.saturating_add(Self::estimate_lock_fee(amounts.len().max(1))),
+            have: total_available,
+        })
+    }
+
+    fn exact_sweep_payment_amount(
+        total_amount: u64,
+        outgoing_view_key: &Zeroizing<[u8; 32]>,
+        inputs_with_decoys: &[wownero_wallet::OutputWithDecoys],
+        dest_addr: wownero_wallet::address::MoneroAddress,
+        fee_rate: wownero_interface::FeeRate,
+        additional_timelock: Option<wownero_oxide::transaction::Timelock>,
+    ) -> Result<u64, WalletError> {
+        let probe_result = match additional_timelock {
+            Some(additional_timelock) => {
+                wownero_wallet::send::SignableTransaction::new_with_timelock(
+                    wownero_oxide::ringct::RctType::WowneroClsagBulletproofPlus,
+                    outgoing_view_key.clone(),
+                    inputs_with_decoys.to_vec(),
+                    vec![(dest_addr, WOW_SWEEP_FEE_PROBE_AMOUNT)],
+                    wownero_wallet::send::Change::fingerprintable(Some(dest_addr)),
+                    vec![],
+                    fee_rate,
+                    additional_timelock,
+                )
+            }
+            None => wownero_wallet::send::SignableTransaction::new(
+                wownero_oxide::ringct::RctType::WowneroClsagBulletproofPlus,
+                outgoing_view_key.clone(),
+                inputs_with_decoys.to_vec(),
+                vec![(dest_addr, WOW_SWEEP_FEE_PROBE_AMOUNT)],
+                wownero_wallet::send::Change::fingerprintable(Some(dest_addr)),
+                vec![],
+                fee_rate,
+            ),
+        };
+
+        let probe_signable = match probe_result {
+            Ok(probe_signable) => probe_signable,
+            Err(wownero_wallet::send::SendError::NotEnoughFunds {
+                outputs,
+                necessary_fee,
+                ..
+            }) => {
+                return Err(WalletError::InsufficientFunds {
+                    need: outputs.saturating_add(necessary_fee.unwrap_or_default()),
+                    have: total_amount,
+                });
+            }
+            Err(err) => {
+                return Err(WalletError::TxBuildFailed(format!(
+                    "probe sweep tx: {}",
+                    err
+                )));
+            }
+        };
+
+        let exact_fee = probe_signable.necessary_fee();
+        let sweep_amount = total_amount.saturating_sub(exact_fee);
+        if sweep_amount == 0 {
+            return Err(WalletError::InsufficientFunds {
+                need: exact_fee,
+                have: total_amount,
+            });
+        }
+
+        tracing::info!(
+            target: "wow_wallet",
+            total_amount = total_amount,
+            exact_fee = exact_fee,
+            sweep_amount = sweep_amount,
+            timelocked = additional_timelock.is_some(),
+            "calculated exact WOW sweep amount"
+        );
+
+        Ok(sweep_amount)
+    }
+
+    fn is_decoy_round_limit_error(err: &wownero_interface::TransactionsError) -> bool {
+        matches!(
+            err,
+            wownero_interface::TransactionsError::InterfaceError(
+                wownero_interface::InterfaceError::InternalError(message)
+                    | wownero_interface::InterfaceError::InterfaceError(message)
+            ) if message.contains("hit decoy selection round limit")
+        )
+    }
+
+    async fn select_sweep_decoys(
+        rng: &mut (impl Send + Sync + rand_core::RngCore + rand_core::CryptoRng),
+        daemon: &impl wownero_interface::ProvidesDecoys,
+        ring_len: u8,
+        block_number: usize,
+        output: wownero_wallet::WalletOutput,
+    ) -> Result<wownero_wallet::OutputWithDecoys, WalletError> {
+        let output_amount = output.commitment().amount;
+        let output_global_index = output.index_on_blockchain();
+
+        match wownero_wallet::OutputWithDecoys::new(
+            rng,
+            daemon,
+            ring_len,
+            block_number,
+            output.clone(),
+        )
+        .await
+        {
+            Ok(output_with_decoys) => Ok(output_with_decoys),
+            Err(err) if Self::is_decoy_round_limit_error(&err) => {
+                tracing::warn!(
+                    target: "wow_wallet",
+                    output_amount = output_amount,
+                    global_index = output_global_index,
+                    error = %err,
+                    "random WOW decoy selection hit round limit; retrying with deterministic decoys"
+                );
+
+                wownero_wallet::OutputWithDecoys::fingerprintable_deterministic_new(
+                    rng,
+                    daemon,
+                    ring_len,
+                    block_number,
+                    output,
+                )
+                .await
+                .map_err(|fallback_err| {
+                    WalletError::TxBuildFailed(format!(
+                        "decoy selection fallback after round limit (initial: {}; fallback: {})",
+                        err, fallback_err
+                    ))
+                })
+            }
+            Err(err) => Err(WalletError::TxBuildFailed(format!(
+                "decoy selection: {}",
+                err
+            ))),
+        }
+    }
+
     /// Create a new WowWallet pointing at the given wownerod RPC endpoint.
     ///
     /// This wallet can scan and poll but cannot lock (no sender keys).
@@ -229,33 +414,59 @@ impl WowWallet {
 
         if !block.transactions.is_empty() {
             let tx_hashes: Vec<String> = block.transactions.iter().map(hex::encode).collect();
+            let request_body = serde_json::to_vec(&serde_json::json!({
+                "txs_hashes": tx_hashes,
+                "decode_as_json": false,
+                "prune": true,
+            }))
+            .map_err(|e| WalletError::RpcRequest(format!("serialize get_transactions: {}", e)))?;
 
-            let tx_resp = client
-                .post(format!("{}/get_transactions", daemon_url))
-                .json(&serde_json::json!({
-                    "txs_hashes": tx_hashes,
-                    "decode_as_json": false,
-                    "prune": false,
-                }))
-                .send()
-                .await
-                .map_err(|e| {
-                    WalletError::RpcConnection(format!(
-                        "get_transactions (daemon: {}): {}",
-                        daemon_url, e
-                    ))
-                })?;
+            let body_bytes = crate::rpc_transport::post_json_http1_identity_raw(
+                daemon_url,
+                "get_transactions",
+                &request_body,
+            )
+            .await
+            .map_err(|e| {
+                WalletError::RpcConnection(format!(
+                    "get_transactions (daemon: {}): {}",
+                    daemon_url, e
+                ))
+            })?;
 
-            let tx_json: serde_json::Value = tx_resp
-                .json()
-                .await
-                .map_err(|e| WalletError::RpcRequest(format!("parse get_transactions: {}", e)))?;
+            let tx_json: serde_json::Value = serde_json::from_slice(&body_bytes).map_err(|e| {
+                WalletError::RpcRequest(format!(
+                    "parse get_transactions ({} bytes, first 500: {:?}): {}",
+                    body_bytes.len(),
+                    String::from_utf8_lossy(&body_bytes[..body_bytes.len().min(500)]),
+                    e
+                ))
+            })?;
 
             if let Some(txs) = tx_json["txs"].as_array() {
                 for tx_entry in txs {
-                    let tx_hex = tx_entry["as_hex"]
+                    if let Some(pruned_hex) = tx_entry["pruned_as_hex"]
                         .as_str()
-                        .ok_or_else(|| WalletError::ScanFailed("missing as_hex in tx".into()))?;
+                        .filter(|value| !value.is_empty())
+                    {
+                        let tx_bytes = hex::decode(pruned_hex).map_err(|e| {
+                            WalletError::ScanFailed(format!("invalid pruned tx hex: {}", e))
+                        })?;
+
+                        let pruned_tx = wownero_oxide::transaction::Transaction::<
+                            wownero_oxide::transaction::Pruned,
+                        >::read(&mut tx_bytes.as_slice())
+                        .map_err(|e| {
+                            WalletError::ScanFailed(format!("failed to parse pruned tx: {}", e))
+                        })?;
+
+                        pruned_txs.push(pruned_tx);
+                        continue;
+                    }
+
+                    let tx_hex = tx_entry["as_hex"].as_str().ok_or_else(|| {
+                        WalletError::ScanFailed("missing pruned_as_hex/as_hex in tx".into())
+                    })?;
 
                     let tx_bytes = hex::decode(tx_hex)
                         .map_err(|e| WalletError::ScanFailed(format!("invalid tx hex: {}", e)))?;
@@ -272,7 +483,7 @@ impl WowWallet {
 
         // Step 3: Get output_index_for_first_ringct_output
         let output_index =
-            Self::get_first_ringct_output_index(client, daemon_url, &block, &pruned_txs).await?;
+            Self::get_first_ringct_output_index(daemon_url, &block, &pruned_txs).await?;
 
         Ok(wownero_interface::ScannableBlock {
             block,
@@ -283,62 +494,82 @@ impl WowWallet {
 
     /// Get the global output index for the first RingCT output in a block.
     ///
-    /// Queries wownerod's `/get_o_indexes.bin` endpoint for the miner transaction,
-    /// falling back to `/get_transactions` if the binary endpoint is unavailable.
+    /// Uses `/get_transactions` to recover the first RingCT transaction's
+    /// output indexes.
+    ///
+    /// The old scan path attempted to POST JSON to wownerod's binary
+    /// `/get_o_indexes.bin` route. Real daemons reject that body format, which
+    /// turns every scanned block into an avoidable server-side parse failure
+    /// under Shadow. Keep the JSON fallback as the primary path until the scan
+    /// adapter is wired to the daemon interface's real EPEE transport.
     async fn get_first_ringct_output_index(
-        client: &reqwest::Client,
         daemon_url: &str,
         block: &wownero_oxide::block::Block,
-        _txs: &[wownero_oxide::transaction::Transaction<wownero_oxide::transaction::Pruned>],
+        txs: &[wownero_oxide::transaction::Transaction<wownero_oxide::transaction::Pruned>],
     ) -> Result<Option<u64>, WalletError> {
-        let miner_tx = block.miner_transaction();
-        let is_v2_miner = matches!(miner_tx, wownero_oxide::transaction::Transaction::V2 { .. });
+        let ringct_hash = if matches!(
+            block.miner_transaction(),
+            wownero_oxide::transaction::Transaction::V2 { .. }
+        ) && !block.miner_transaction().prefix().outputs.is_empty()
+        {
+            Some(block.miner_transaction().hash())
+        } else {
+            block
+                .transactions
+                .iter()
+                .zip(txs.iter())
+                .find(|(_, tx)| {
+                    matches!(tx, wownero_oxide::transaction::Transaction::V2 { .. })
+                        && !tx.prefix().outputs.is_empty()
+                })
+                .map(|(hash, _)| *hash)
+        };
 
-        if !is_v2_miner || miner_tx.prefix().outputs.is_empty() {
+        let Some(ringct_hash) = ringct_hash else {
             return Ok(None);
-        }
+        };
+        let ringct_hash = hex::encode(ringct_hash);
 
-        let miner_hash = hex::encode(miner_tx.hash());
+        // Query via get_transactions, which carries output_indices for the
+        // mined transaction without relying on the broken JSON->EPEE bridge.
+        let request_body = serde_json::to_vec(&serde_json::json!({
+            "txs_hashes": [ringct_hash],
+            "decode_as_json": true,
+        }))
+        .map_err(|e| WalletError::RpcRequest(format!("serialize o_indexes fallback: {}", e)))?;
 
-        let resp = client
-            .post(format!("{}/get_o_indexes.bin", daemon_url))
-            .header("Content-Type", "application/json")
-            .json(&serde_json::json!({ "txid": miner_hash }))
-            .send()
-            .await;
-
-        match resp {
-            Ok(r) if r.status().is_success() => {
-                let body: serde_json::Value = r.json().await.unwrap_or_default();
-                if let Some(indexes) = body["o_indexes"].as_array() {
-                    if let Some(first) = indexes.first() {
-                        return Ok(first.as_u64());
-                    }
-                }
+        let body_bytes = match crate::rpc_transport::post_json_http1_identity_raw(
+            daemon_url,
+            "get_transactions",
+            &request_body,
+        )
+        .await
+        {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                tracing::warn!(
+                    target: "wow_wallet",
+                    daemon_url = daemon_url,
+                    error = %e,
+                    "output index lookup via get_transactions failed; falling back to 0"
+                );
+                return Ok(Some(0));
             }
-            _ => {}
-        }
+        };
 
-        // Fallback: query via get_transactions which may include output_indices
-        let tx_resp = client
-            .post(format!("{}/get_transactions", daemon_url))
-            .json(&serde_json::json!({
-                "txs_hashes": [miner_hash],
-                "decode_as_json": true,
-            }))
-            .send()
-            .await
-            .map_err(|e| {
-                WalletError::RpcConnection(format!(
-                    "get_transactions for o_indexes (daemon: {}): {}",
-                    daemon_url, e
-                ))
-            })?;
-
-        let tx_json: serde_json::Value = tx_resp
-            .json()
-            .await
-            .map_err(|e| WalletError::RpcRequest(format!("parse o_indexes response: {}", e)))?;
+        let tx_json: serde_json::Value = match serde_json::from_slice(&body_bytes) {
+            Ok(json) => json,
+            Err(e) => {
+                tracing::warn!(
+                    target: "wow_wallet",
+                    daemon_url = daemon_url,
+                    body_len = body_bytes.len(),
+                    error = %e,
+                    "failed to parse output index fallback response; falling back to 0"
+                );
+                return Ok(Some(0));
+            }
+        };
 
         if let Some(txs) = tx_json["txs"].as_array() {
             if let Some(tx) = txs.first() {
@@ -666,15 +897,20 @@ impl CryptoNoteWallet for WowWallet {
 
         let sender_outputs =
             Self::filter_unspent(client, &self.daemon_url, sender_spend, mature_outputs).await?;
+        let available_unspent = sender_outputs.len();
 
-        tracing::info!(target: "wow_wallet", unspent = sender_outputs.len(), "after spent filter");
+        tracing::info!(target: "wow_wallet", unspent = available_unspent, "after spent filter");
 
         if sender_outputs.is_empty() {
             return Err(WalletError::NoOutputsFound);
         }
 
         // Step 2: Select outputs covering amount + fee estimate
-        let total_available: u64 = sender_outputs.iter().map(|o| o.commitment().amount).sum();
+        let sender_amounts: Vec<u64> = sender_outputs
+            .iter()
+            .map(|output| output.commitment().amount)
+            .collect();
+        let total_available: u64 = sender_amounts.iter().sum();
 
         if total_available < amount {
             return Err(WalletError::InsufficientFunds {
@@ -682,6 +918,27 @@ impl CryptoNoteWallet for WowWallet {
                 have: total_available,
             });
         }
+
+        let selected_indices = Self::select_lock_output_indices(&sender_amounts, amount)?;
+        let selected_total: u64 = selected_indices
+            .iter()
+            .map(|selected_idx| sender_amounts[*selected_idx])
+            .sum();
+        let estimated_fee = Self::estimate_lock_fee(selected_indices.len());
+        let sender_outputs: Vec<_> = selected_indices
+            .into_iter()
+            .map(|selected_idx| sender_outputs[selected_idx].clone())
+            .collect();
+
+        tracing::info!(
+            target: "wow_wallet",
+            available_unspent = available_unspent,
+            selected_inputs = sender_outputs.len(),
+            selected_total = selected_total,
+            estimated_fee = estimated_fee,
+            amount = amount,
+            "selected sender outputs for WOW lock"
+        );
 
         // Step 3: Build the recipient address as wownero-oxide MoneroAddress
         let oxide_spend = wownero_oxide::ed25519::Point::from(*spend_point);
@@ -707,7 +964,7 @@ impl CryptoNoteWallet for WowWallet {
         let fee_rate = daemon
             .fee_rate(
                 wownero_interface::FeePriority::Normal,
-                100_000_000, // max per_weight sanity bound (WOW fees are ~1M/weight)
+                WOW_FEE_RATE_SANITY_BOUND, // max per_weight sanity bound (WOW fees are ~1M/weight)
             )
             .await
             .map_err(|e| WalletError::TxBuildFailed(format!("fee rate: {}", e)))?;
@@ -872,7 +1129,7 @@ impl CryptoNoteWallet for WowWallet {
         let fee_rate = daemon
             .fee_rate(
                 wownero_interface::FeePriority::Normal,
-                100_000_000, // WOW fees are ~1M/weight
+                WOW_FEE_RATE_SANITY_BOUND,
             )
             .await
             .map_err(|e| WalletError::TxBuildFailed(format!("fee rate: {}", e)))?;
@@ -888,15 +1145,8 @@ impl CryptoNoteWallet for WowWallet {
 
         let mut inputs_with_decoys = Vec::with_capacity(joint_outputs.len());
         for output in joint_outputs {
-            let owd = wownero_wallet::OutputWithDecoys::new(
-                &mut rng,
-                &daemon,
-                ring_len,
-                block_number,
-                output,
-            )
-            .await
-            .map_err(|e| WalletError::TxBuildFailed(format!("decoy selection: {}", e)))?;
+            let owd = Self::select_sweep_decoys(&mut rng, &daemon, ring_len, block_number, output)
+                .await?;
             inputs_with_decoys.push(owd);
         }
 
@@ -911,14 +1161,14 @@ impl CryptoNoteWallet for WowWallet {
         // Sweep: send (total - estimated_fee) to destination.
         // Monero requires at least 2 outputs, so change goes to destination.
         let change = wownero_wallet::send::Change::fingerprintable(Some(dest_addr));
-        let estimated_fee = fee_rate.calculate_fee_from_weight(2000);
-        let sweep_amount = total_amount.saturating_sub(estimated_fee);
-        if sweep_amount == 0 {
-            return Err(WalletError::InsufficientFunds {
-                need: estimated_fee,
-                have: total_amount,
-            });
-        }
+        let sweep_amount = Self::exact_sweep_payment_amount(
+            total_amount,
+            &outgoing_view_key,
+            &inputs_with_decoys,
+            dest_addr,
+            fee_rate,
+            None,
+        )?;
         let payments = vec![(dest_addr, sweep_amount)];
 
         let signable = wownero_wallet::send::SignableTransaction::new(
@@ -1173,7 +1423,10 @@ impl CryptoNoteWallet for WowWallet {
             .map_err(|e| WalletError::TxBuildFailed(format!("daemon connection: {}", e)))?;
 
         let fee_rate = daemon
-            .fee_rate(wownero_interface::FeePriority::Normal, 100_000_000)
+            .fee_rate(
+                wownero_interface::FeePriority::Normal,
+                WOW_FEE_RATE_SANITY_BOUND,
+            )
             .await
             .map_err(|e| WalletError::TxBuildFailed(format!("fee rate: {}", e)))?;
 
@@ -1188,15 +1441,8 @@ impl CryptoNoteWallet for WowWallet {
 
         let mut inputs_with_decoys = Vec::with_capacity(joint_outputs.len());
         for output in joint_outputs {
-            let owd = wownero_wallet::OutputWithDecoys::new(
-                &mut rng,
-                &daemon,
-                ring_len,
-                block_number,
-                output,
-            )
-            .await
-            .map_err(|e| WalletError::TxBuildFailed(format!("decoy selection: {}", e)))?;
+            let owd = Self::select_sweep_decoys(&mut rng, &daemon, ring_len, block_number, output)
+                .await?;
             inputs_with_decoys.push(owd);
         }
 
@@ -1209,14 +1455,16 @@ impl CryptoNoteWallet for WowWallet {
         };
 
         let change = wownero_wallet::send::Change::fingerprintable(Some(dest_addr));
-        let estimated_fee = fee_rate.calculate_fee_from_weight(2000);
-        let sweep_amount = total_amount.saturating_sub(estimated_fee);
-        if sweep_amount == 0 {
-            return Err(WalletError::InsufficientFunds {
-                need: estimated_fee,
-                have: total_amount,
-            });
-        }
+        let sweep_amount = Self::exact_sweep_payment_amount(
+            total_amount,
+            &outgoing_view_key,
+            &inputs_with_decoys,
+            dest_addr,
+            fee_rate,
+            Some(wownero_oxide::transaction::Timelock::Block(
+                refund_height as usize,
+            )),
+        )?;
         let payments = vec![(dest_addr, sweep_amount)];
 
         // Use new_with_timelock to embed the refund height as unlock_time
@@ -1512,5 +1760,21 @@ mod tests {
         let estimated_fee: u64 = 10_000;
         let sweep_amount = total.saturating_sub(estimated_fee);
         assert_eq!(sweep_amount, 0, "saturating_sub must prevent underflow");
+    }
+
+    #[test]
+    fn test_wow_lock_selection_prefers_smallest_sufficient_single_output() {
+        let amounts = vec![900_000_000_000, 510_000_000_000, 700_000_000_000];
+        let selected = WowWallet::select_lock_output_indices(&amounts, 500_000_000_000).unwrap();
+        assert_eq!(selected, vec![1]);
+    }
+
+    #[test]
+    fn test_wow_lock_selection_prefers_minimal_input_count() {
+        let amounts = vec![260_000_000_000, 255_000_000_000, 120_000_000_000];
+        let selected = WowWallet::select_lock_output_indices(&amounts, 500_000_000_000).unwrap();
+        assert_eq!(selected.len(), 2);
+        let total: u64 = selected.iter().map(|idx| amounts[*idx]).sum();
+        assert!(total >= 500_000_000_000 + WowWallet::estimate_lock_fee(selected.len()));
     }
 }

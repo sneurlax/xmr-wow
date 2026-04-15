@@ -131,7 +131,9 @@ fn phase14_state_persists_symmetric_refund_artifact_record() {
 
 #[test]
 fn phase14_locked_state_rejects_artifact_with_wrong_chain_or_lock_identity() {
-    let wow_locked = make_joint_address(SwapRole::Bob).record_wow_lock([0xAA; 32]).unwrap();
+    let wow_locked = make_joint_address(SwapRole::Bob)
+        .record_wow_lock([0xAA; 32])
+        .unwrap();
     let wrong_chain = sample_artifact(
         RefundChain::Xmr,
         [0xAA; 32],

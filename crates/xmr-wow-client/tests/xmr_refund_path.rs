@@ -198,7 +198,10 @@ fn test_xmr_locked_to_refunded_transition() {
                 "evidence refund_tx_hash must match"
             );
         }
-        other => panic!("expected Refunded state, got {:?}", std::mem::discriminant(&other)),
+        other => panic!(
+            "expected Refunded state, got {:?}",
+            std::mem::discriminant(&other)
+        ),
     }
 }
 
@@ -222,9 +225,7 @@ fn test_xmr_refund_from_wrong_state_rejected() {
     let (alice, bob) = make_alice_bob(params.clone());
     let (bob_pub, bob_proof) = extract_pubkey_and_proof(&bob);
 
-    let alice_dleq = alice
-        .receive_counterparty_key(bob_pub, &bob_proof)
-        .unwrap();
+    let alice_dleq = alice.receive_counterparty_key(bob_pub, &bob_proof).unwrap();
 
     let err = alice_dleq.complete_with_refund([1u8; 32]).unwrap_err();
     assert!(

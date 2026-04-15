@@ -45,10 +45,11 @@ pub struct SharechainMessenger {
 #[async_trait]
 impl SwapMessenger for SharechainMessenger {
     async fn send(&self, msg: CoordMessage) -> Result<(), MessengerError> {
-        let raw = serde_json::to_vec(&msg)
-            .map_err(|e| MessengerError::Serialization(e.to_string()))?;
+        let raw =
+            serde_json::to_vec(&msg).map_err(|e| MessengerError::Serialization(e.to_string()))?;
         let client = NodeClient::new(&self.node_url);
-        client.publish_coord_message(&msg.swap_id, raw)
+        client
+            .publish_coord_message(&msg.swap_id, raw)
             .await
             .map_err(|e| MessengerError::Transport(e.to_string()))?;
         Ok(())
@@ -57,10 +58,13 @@ impl SwapMessenger for SharechainMessenger {
     async fn receive(&self, swap_id: &[u8; 32]) -> Result<Option<CoordMessage>, MessengerError> {
         let after_index = {
             let store = self.store.lock().unwrap();
-            store.get_cursor(swap_id).map_err(|e| MessengerError::Transport(e.to_string()))?
+            store
+                .get_cursor(swap_id)
+                .map_err(|e| MessengerError::Transport(e.to_string()))?
         };
         let client = NodeClient::new(&self.node_url);
-        let (msgs, next_index) = client.poll_coord_messages(swap_id, after_index)
+        let (msgs, next_index) = client
+            .poll_coord_messages(swap_id, after_index)
             .await
             .map_err(|e| MessengerError::Transport(e.to_string()))?;
         match msgs.into_iter().next() {
@@ -68,7 +72,8 @@ impl SwapMessenger for SharechainMessenger {
             Some(raw) => {
                 {
                     let store = self.store.lock().unwrap();
-                    store.set_cursor(swap_id, next_index)
+                    store
+                        .set_cursor(swap_id, next_index)
                         .map_err(|e| MessengerError::Transport(e.to_string()))?;
                 }
                 let coord: CoordMessage = serde_json::from_slice(&raw)
@@ -107,9 +112,8 @@ impl SwapMessenger for OobMessenger {
         if trimmed.is_empty() {
             return Ok(None);
         }
-        let proto: ProtocolMessage =
-            crate::protocol_message::decode_message(trimmed)
-                .map_err(|e| MessengerError::Transport(e.to_string()))?;
+        let proto: ProtocolMessage = crate::protocol_message::decode_message(trimmed)
+            .map_err(|e| MessengerError::Transport(e.to_string()))?;
         let coord = crate::coord_message::wrap_protocol_message(*swap_id, &proto)
             .map_err(|e| MessengerError::Serialization(e.to_string()))?;
         Ok(Some(coord))
@@ -175,10 +179,10 @@ mod tests {
     /// returns Ok(()): the xmrwow1: encoded string is printed to stdout as a side effect.
     #[tokio::test]
     async fn oob_send_returns_ok_with_valid_coord_message() {
-        use rand::rngs::OsRng;
-        use xmr_wow_crypto::{DleqProof, KeyContribution};
         use crate::coord_message::wrap_protocol_message;
         use crate::protocol_message::ProtocolMessage;
+        use rand::rngs::OsRng;
+        use xmr_wow_crypto::{DleqProof, KeyContribution};
 
         let contrib = KeyContribution::generate(&mut OsRng);
         let proof = DleqProof::prove(
@@ -202,7 +206,11 @@ mod tests {
 
         let m = OobMessenger;
         let result = m.send(coord).await;
-        assert!(result.is_ok(), "send must return Ok for a valid CoordMessage: {:?}", result);
+        assert!(
+            result.is_ok(),
+            "send must return Ok for a valid CoordMessage: {:?}",
+            result
+        );
     }
 
     #[test]

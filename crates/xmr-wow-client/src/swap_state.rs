@@ -1,14 +1,14 @@
-/// Swap state and timelock rules for the XMR<->WOW protocol.
-use serde::{Deserialize, Serialize};
 use crate::guarantee::{guarantee_decision, GuaranteeMode, GuaranteeStatus};
 use crate::readiness::{
     RefundCheckpoint, RefundCheckpointName, RefundCheckpointStatus, RefundEvidence,
 };
-use xmr_wow_wallet::{RefundArtifact, RefundArtifactMetadata, RefundChain, TxHash};
+/// Swap state and timelock rules for the XMR<->WOW protocol.
+use serde::{Deserialize, Serialize};
 use xmr_wow_crypto::{
     combine_public_keys, derive_view_key, joint_address, keccak256, AdaptorSignature,
     CompletedSignature, DleqProof, KeyContribution, Network,
 };
+use xmr_wow_wallet::{RefundArtifact, RefundArtifactMetadata, RefundChain, TxHash};
 /// The role of this party in the swap.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SwapRole {
@@ -301,98 +301,136 @@ pub enum SwapState {
 impl std::fmt::Debug for SwapState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            SwapState::KeyGeneration { role, params, my_pubkey, my_proof, secret_bytes: _ } => {
-                f.debug_struct("KeyGeneration")
-                    .field("role", role)
-                    .field("params", params)
-                    .field("my_pubkey", my_pubkey)
-                    .field("my_proof", my_proof)
-                    .field("secret_bytes", &"[REDACTED]")
-                    .finish()
-            }
-            SwapState::DleqExchange { role, params, my_pubkey, counterparty_pubkey, secret_bytes: _ } => {
-                f.debug_struct("DleqExchange")
-                    .field("role", role)
-                    .field("params", params)
-                    .field("my_pubkey", my_pubkey)
-                    .field("counterparty_pubkey", counterparty_pubkey)
-                    .field("secret_bytes", &"[REDACTED]")
-                    .finish()
-            }
+            SwapState::KeyGeneration {
+                role,
+                params,
+                my_pubkey,
+                my_proof,
+                secret_bytes: _,
+            } => f
+                .debug_struct("KeyGeneration")
+                .field("role", role)
+                .field("params", params)
+                .field("my_pubkey", my_pubkey)
+                .field("my_proof", my_proof)
+                .field("secret_bytes", &"[REDACTED]")
+                .finish(),
+            SwapState::DleqExchange {
+                role,
+                params,
+                my_pubkey,
+                counterparty_pubkey,
+                secret_bytes: _,
+            } => f
+                .debug_struct("DleqExchange")
+                .field("role", role)
+                .field("params", params)
+                .field("my_pubkey", my_pubkey)
+                .field("counterparty_pubkey", counterparty_pubkey)
+                .field("secret_bytes", &"[REDACTED]")
+                .finish(),
             SwapState::JointAddress {
-                role, params, addresses, my_pubkey, counterparty_pubkey,
-                before_wow_lock_checkpoint, secret_bytes: _,
-            } => {
-                f.debug_struct("JointAddress")
-                    .field("role", role)
-                    .field("params", params)
-                    .field("addresses", addresses)
-                    .field("my_pubkey", my_pubkey)
-                    .field("counterparty_pubkey", counterparty_pubkey)
-                    .field("before_wow_lock_checkpoint", before_wow_lock_checkpoint)
-                    .field("secret_bytes", &"[REDACTED]")
-                    .finish()
-            }
+                role,
+                params,
+                addresses,
+                my_pubkey,
+                counterparty_pubkey,
+                before_wow_lock_checkpoint,
+                secret_bytes: _,
+            } => f
+                .debug_struct("JointAddress")
+                .field("role", role)
+                .field("params", params)
+                .field("addresses", addresses)
+                .field("my_pubkey", my_pubkey)
+                .field("counterparty_pubkey", counterparty_pubkey)
+                .field("before_wow_lock_checkpoint", before_wow_lock_checkpoint)
+                .field("secret_bytes", &"[REDACTED]")
+                .finish(),
             SwapState::XmrLocked {
-                role, params, addresses, wow_lock_tx, xmr_lock_tx, my_pubkey,
-                counterparty_pubkey, my_adaptor_pre_sig, counterparty_pre_sig,
-                adaptor_point, before_wow_lock_checkpoint, before_xmr_lock_checkpoint,
-                refund_artifact, secret_bytes: _,
-            } => {
-                f.debug_struct("XmrLocked")
-                    .field("role", role)
-                    .field("params", params)
-                    .field("addresses", addresses)
-                    .field("wow_lock_tx", wow_lock_tx)
-                    .field("xmr_lock_tx", xmr_lock_tx)
-                    .field("my_pubkey", my_pubkey)
-                    .field("counterparty_pubkey", counterparty_pubkey)
-                    .field("my_adaptor_pre_sig", my_adaptor_pre_sig)
-                    .field("counterparty_pre_sig", counterparty_pre_sig)
-                    .field("adaptor_point", adaptor_point)
-                    .field("before_wow_lock_checkpoint", before_wow_lock_checkpoint)
-                    .field("before_xmr_lock_checkpoint", before_xmr_lock_checkpoint)
-                    .field("refund_artifact", refund_artifact)
-                    .field("secret_bytes", &"[REDACTED]")
-                    .finish()
-            }
+                role,
+                params,
+                addresses,
+                wow_lock_tx,
+                xmr_lock_tx,
+                my_pubkey,
+                counterparty_pubkey,
+                my_adaptor_pre_sig,
+                counterparty_pre_sig,
+                adaptor_point,
+                before_wow_lock_checkpoint,
+                before_xmr_lock_checkpoint,
+                refund_artifact,
+                secret_bytes: _,
+            } => f
+                .debug_struct("XmrLocked")
+                .field("role", role)
+                .field("params", params)
+                .field("addresses", addresses)
+                .field("wow_lock_tx", wow_lock_tx)
+                .field("xmr_lock_tx", xmr_lock_tx)
+                .field("my_pubkey", my_pubkey)
+                .field("counterparty_pubkey", counterparty_pubkey)
+                .field("my_adaptor_pre_sig", my_adaptor_pre_sig)
+                .field("counterparty_pre_sig", counterparty_pre_sig)
+                .field("adaptor_point", adaptor_point)
+                .field("before_wow_lock_checkpoint", before_wow_lock_checkpoint)
+                .field("before_xmr_lock_checkpoint", before_xmr_lock_checkpoint)
+                .field("refund_artifact", refund_artifact)
+                .field("secret_bytes", &"[REDACTED]")
+                .finish(),
             SwapState::WowLocked {
-                role, params, addresses, wow_lock_tx, my_pubkey, counterparty_pubkey,
-                my_adaptor_pre_sig, counterparty_pre_sig, adaptor_point,
-                before_wow_lock_checkpoint, before_xmr_lock_checkpoint,
-                refund_artifact, secret_bytes: _,
-            } => {
-                f.debug_struct("WowLocked")
-                    .field("role", role)
-                    .field("params", params)
-                    .field("addresses", addresses)
-                    .field("wow_lock_tx", wow_lock_tx)
-                    .field("my_pubkey", my_pubkey)
-                    .field("counterparty_pubkey", counterparty_pubkey)
-                    .field("my_adaptor_pre_sig", my_adaptor_pre_sig)
-                    .field("counterparty_pre_sig", counterparty_pre_sig)
-                    .field("adaptor_point", adaptor_point)
-                    .field("before_wow_lock_checkpoint", before_wow_lock_checkpoint)
-                    .field("before_xmr_lock_checkpoint", before_xmr_lock_checkpoint)
-                    .field("refund_artifact", refund_artifact)
-                    .field("secret_bytes", &"[REDACTED]")
-                    .finish()
-            }
-            SwapState::Complete { role, addresses, k_b_revealed } => {
-                f.debug_struct("Complete")
-                    .field("role", role)
-                    .field("addresses", addresses)
-                    .field("k_b_revealed", k_b_revealed)
-                    .finish()
-            }
-            SwapState::Refunded { role, addresses, refund_tx_hash, refund_evidence } => {
-                f.debug_struct("Refunded")
-                    .field("role", role)
-                    .field("addresses", addresses)
-                    .field("refund_tx_hash", refund_tx_hash)
-                    .field("refund_evidence", refund_evidence)
-                    .finish()
-            }
+                role,
+                params,
+                addresses,
+                wow_lock_tx,
+                my_pubkey,
+                counterparty_pubkey,
+                my_adaptor_pre_sig,
+                counterparty_pre_sig,
+                adaptor_point,
+                before_wow_lock_checkpoint,
+                before_xmr_lock_checkpoint,
+                refund_artifact,
+                secret_bytes: _,
+            } => f
+                .debug_struct("WowLocked")
+                .field("role", role)
+                .field("params", params)
+                .field("addresses", addresses)
+                .field("wow_lock_tx", wow_lock_tx)
+                .field("my_pubkey", my_pubkey)
+                .field("counterparty_pubkey", counterparty_pubkey)
+                .field("my_adaptor_pre_sig", my_adaptor_pre_sig)
+                .field("counterparty_pre_sig", counterparty_pre_sig)
+                .field("adaptor_point", adaptor_point)
+                .field("before_wow_lock_checkpoint", before_wow_lock_checkpoint)
+                .field("before_xmr_lock_checkpoint", before_xmr_lock_checkpoint)
+                .field("refund_artifact", refund_artifact)
+                .field("secret_bytes", &"[REDACTED]")
+                .finish(),
+            SwapState::Complete {
+                role,
+                addresses,
+                k_b_revealed,
+            } => f
+                .debug_struct("Complete")
+                .field("role", role)
+                .field("addresses", addresses)
+                .field("k_b_revealed", k_b_revealed)
+                .finish(),
+            SwapState::Refunded {
+                role,
+                addresses,
+                refund_tx_hash,
+                refund_evidence,
+            } => f
+                .debug_struct("Refunded")
+                .field("role", role)
+                .field("addresses", addresses)
+                .field("refund_tx_hash", refund_tx_hash)
+                .field("refund_evidence", refund_evidence)
+                .finish(),
         }
     }
 }
@@ -985,7 +1023,10 @@ impl SwapState {
             };
             (RefundCheckpointStatus::Blocked, reason)
         } else {
-            (Self::checkpoint_status(decision.status), decision.reason.to_string())
+            (
+                Self::checkpoint_status(decision.status),
+                decision.reason.to_string(),
+            )
         };
 
         RefundCheckpoint {
@@ -1164,17 +1205,19 @@ impl SwapState {
 
     pub fn refund_artifact(&self) -> Option<&PersistedRefundArtifact> {
         match self {
-            SwapState::XmrLocked { refund_artifact, .. }
-            | SwapState::WowLocked { refund_artifact, .. } => refund_artifact.as_ref(),
+            SwapState::XmrLocked {
+                refund_artifact, ..
+            }
+            | SwapState::WowLocked {
+                refund_artifact, ..
+            } => refund_artifact.as_ref(),
             _ => None,
         }
     }
 
     pub fn require_refund_artifact(&self) -> Result<&PersistedRefundArtifact, SwapError> {
         self.refund_artifact().ok_or_else(|| {
-            SwapError::InvalidRefundArtifact(
-                "refund artifact missing for locked state".into(),
-            )
+            SwapError::InvalidRefundArtifact("refund artifact missing for locked state".into())
         })
     }
 
@@ -1299,12 +1342,7 @@ impl SwapState {
                 let artifact_present = refund_artifact.is_some();
                 let artifact_validated = refund_artifact
                     .as_ref()
-                    .map(|_| {
-                        refund_artifact
-                            .as_ref()
-                            .map(|_| ())
-                            .is_some()
-                    })
+                    .map(|_| refund_artifact.as_ref().map(|_| ()).is_some())
                     .unwrap_or(false)
                     && Self::WowLocked {
                         role,
@@ -1395,7 +1433,9 @@ impl SwapState {
                     counterparty_pre_sig,
                     adaptor_point,
                     before_wow_lock_checkpoint: before_wow_lock_checkpoint.or_else(|| {
-                        Some(Self::build_before_wow_lock_checkpoint(&params, false, false))
+                        Some(Self::build_before_wow_lock_checkpoint(
+                            &params, false, false,
+                        ))
                     }),
                     before_xmr_lock_checkpoint: Some(Self::build_before_xmr_lock_checkpoint(
                         &params,
@@ -1449,10 +1489,7 @@ impl SwapState {
         }
     }
 
-    pub fn require_checkpoint_ready(
-        &self,
-        name: RefundCheckpointName,
-    ) -> Result<(), SwapError> {
+    pub fn require_checkpoint_ready(&self, name: RefundCheckpointName) -> Result<(), SwapError> {
         let checkpoint = self.checkpoint(name).ok_or_else(|| {
             SwapError::RefundCheckpointBlocked(format!(
                 "{} checkpoint missing from persisted state",
@@ -1607,9 +1644,7 @@ impl SwapState {
             SwapState::Complete { .. } => {
                 "Swap completed successfully. No further action needed.".into()
             }
-            SwapState::Refunded { .. } => {
-                "Refund recorded. No further action needed.".into()
-            }
+            SwapState::Refunded { .. } => "Refund recorded. No further action needed.".into(),
         }
     }
 

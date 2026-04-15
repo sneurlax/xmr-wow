@@ -1,7 +1,7 @@
 use rand::rngs::OsRng;
 use xmr_wow_client::{
-    build_observed_refund_timing, wrap_protocol_message, CoordMessage, ProtocolMessage,
-    SwapParams, SwapRole, SwapState,
+    build_observed_refund_timing, wrap_protocol_message, CoordMessage, ProtocolMessage, SwapParams,
+    SwapRole, SwapState,
 };
 use xmr_wow_crypto::{AdaptorSignature, CompletedSignature, DleqProof, KeyContribution};
 
@@ -125,9 +125,7 @@ fn complete_with_adaptor_claim_takes_completed_sig_not_coord_message() {
 fn forged_coord_message_does_not_advance_swap_state() {
     let (_alice_xmr, bob_wow) = advance_to_xmr_locked();
 
-    let swap_id = bob_wow
-        .swap_id()
-        .expect("WowLocked must have a swap_id");
+    let swap_id = bob_wow.swap_id().expect("WowLocked must have a swap_id");
 
     let forged_payload = b"forged claim proof";
     let forged_coord = CoordMessage {
@@ -210,10 +208,22 @@ fn coord_message_content_never_passed_to_state_transitions() {
     let coord_pre_sig = wrap_protocol_message(swap_id, &adaptor_pre_sig_msg).unwrap();
     let coord_claim = wrap_protocol_message(swap_id, &claim_proof_msg).unwrap();
 
-    assert!(!coord_init.payload.is_empty(), "Init payload must be non-empty");
-    assert!(!coord_response.payload.is_empty(), "Response payload must be non-empty");
-    assert!(!coord_pre_sig.payload.is_empty(), "AdaptorPreSig payload must be non-empty");
-    assert!(!coord_claim.payload.is_empty(), "ClaimProof payload must be non-empty");
+    assert!(
+        !coord_init.payload.is_empty(),
+        "Init payload must be non-empty"
+    );
+    assert!(
+        !coord_response.payload.is_empty(),
+        "Response payload must be non-empty"
+    );
+    assert!(
+        !coord_pre_sig.payload.is_empty(),
+        "AdaptorPreSig payload must be non-empty"
+    );
+    assert!(
+        !coord_claim.payload.is_empty(),
+        "ClaimProof payload must be non-empty"
+    );
 
     let recovered_init = xmr_wow_client::unwrap_protocol_message(&coord_init).unwrap();
     assert!(

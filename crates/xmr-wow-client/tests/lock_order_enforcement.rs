@@ -94,7 +94,11 @@ fn test_primary_path_wow_first_enforced() {
 
     // Verify: wow_lock_tx is non-zero (WOW was locked first)
     match bob_xmr_locked {
-        SwapState::XmrLocked { wow_lock_tx, xmr_lock_tx, .. } => {
+        SwapState::XmrLocked {
+            wow_lock_tx,
+            xmr_lock_tx,
+            ..
+        } => {
             assert_eq!(
                 wow_lock_tx, [0x11u8; 32],
                 "wow_lock_tx must be non-zero on primary path (WOW locked first)"
@@ -131,7 +135,11 @@ fn test_fallback_path_xmr_without_wow() {
     let alice_xmr_locked = alice_joint.record_xmr_lock([0x33; 32]).unwrap();
 
     match alice_xmr_locked {
-        SwapState::XmrLocked { wow_lock_tx, xmr_lock_tx, .. } => {
+        SwapState::XmrLocked {
+            wow_lock_tx,
+            xmr_lock_tx,
+            ..
+        } => {
             assert_eq!(
                 wow_lock_tx, [0u8; 32],
                 "wow_lock_tx must be zero sentinel on fallback path (WOW not locked first)"
@@ -175,9 +183,7 @@ fn test_xmr_lock_from_dleq_rejected() {
     let (alice, bob) = make_alice_bob(params);
 
     let (bob_pub, bob_proof) = extract_pubkey_and_proof(&bob);
-    let alice_dleq = alice
-        .receive_counterparty_key(bob_pub, &bob_proof)
-        .unwrap();
+    let alice_dleq = alice.receive_counterparty_key(bob_pub, &bob_proof).unwrap();
 
     // Verify we are in DleqExchange
     assert!(
@@ -220,7 +226,9 @@ fn test_wow_lock_only_from_joint_address() {
     // --- DleqExchange ---
     let (alice2, bob2) = make_alice_bob(params.clone());
     let (bob2_pub, bob2_proof) = extract_pubkey_and_proof(&bob2);
-    let dleq = alice2.receive_counterparty_key(bob2_pub, &bob2_proof).unwrap();
+    let dleq = alice2
+        .receive_counterparty_key(bob2_pub, &bob2_proof)
+        .unwrap();
     let err = dleq.record_wow_lock([0x44; 32]).unwrap_err().to_string();
     assert!(
         err.contains("invalid state transition"),

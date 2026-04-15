@@ -22,6 +22,8 @@
 //! - `monero_wallet::send::SignableTransaction` for transaction construction
 //! - `monero_oxide::block::Block` and `monero_oxide::transaction::Transaction` for parsing
 
+use std::cmp::Reverse;
+
 use curve25519_dalek::{
     constants::ED25519_BASEPOINT_POINT as G, edwards::EdwardsPoint, scalar::Scalar,
 };
@@ -33,6 +35,10 @@ use monero_rust::rpc_serai::NativeRpcClient;
 
 use crate::error::WalletError;
 use crate::trait_def::{ConfirmationStatus, CryptoNoteWallet, RefundChain, ScanResult, TxHash};
+
+const XMR_FEE_RATE_SANITY_BOUND: u64 = 100_000_000;
+const XMR_LOCK_BASE_FEE_ESTIMATE: u64 = 60_000_000;
+const XMR_LOCK_FEE_PER_INPUT_ESTIMATE: u64 = 20_000_000;
 
 /// XMR wallet adapter for Monero stagenet.
 ///
@@ -55,6 +61,51 @@ pub struct XmrWallet {
 }
 
 impl XmrWallet {
+    fn estimate_lock_fee(num_inputs: usize) -> u64 {
+        XMR_LOCK_BASE_FEE_ESTIMATE + (num_inputs as u64 * XMR_LOCK_FEE_PER_INPUT_ESTIMATE)
+    }
+
+    fn select_lock_output_indices(amounts: &[u64], amount: u64) -> Result<Vec<usize>, WalletError> {
+        if amounts.is_empty() {
+            return Err(WalletError::NoOutputsFound);
+        }
+
+        let total_available: u64 = amounts.iter().sum();
+        let single_output_target = amount.saturating_add(Self::estimate_lock_fee(1));
+
+        // Prefer the smallest single output which can fund the lock by itself.
+        // Fewer inputs means fewer decoy sets and a smaller XMR lock transaction.
+        let mut ascending: Vec<(usize, u64)> = amounts.iter().copied().enumerate().collect();
+        ascending.sort_by_key(|(_, output_amount)| *output_amount);
+        if let Some((selected_idx, _)) = ascending
+            .into_iter()
+            .find(|(_, output_amount)| *output_amount >= single_output_target)
+        {
+            return Ok(vec![selected_idx]);
+        }
+
+        // Otherwise greedily choose the largest outputs first to minimize
+        // input count while still covering amount plus a conservative fee.
+        let mut descending: Vec<(usize, u64)> = amounts.iter().copied().enumerate().collect();
+        descending.sort_by_key(|(_, output_amount)| Reverse(*output_amount));
+
+        let mut selected = Vec::new();
+        let mut selected_total = 0u64;
+        for (selected_idx, output_amount) in descending {
+            selected.push(selected_idx);
+            selected_total = selected_total.saturating_add(output_amount);
+            let estimated_fee = Self::estimate_lock_fee(selected.len());
+            if selected_total >= amount.saturating_add(estimated_fee) {
+                return Ok(selected);
+            }
+        }
+
+        Err(WalletError::InsufficientFunds {
+            need: amount.saturating_add(Self::estimate_lock_fee(amounts.len().max(1))),
+            have: total_available,
+        })
+    }
+
     /// Create a new XmrWallet pointing at the given monerod URL.
     ///
     /// This wallet can scan and poll but cannot lock (no sender keys).
@@ -221,27 +272,34 @@ impl XmrWallet {
 
         if !block.transactions.is_empty() {
             let tx_hashes: Vec<String> = block.transactions.iter().map(hex::encode).collect();
+            let request_body = serde_json::to_vec(&serde_json::json!({
+                "txs_hashes": tx_hashes,
+                "decode_as_json": false,
+                "prune": false,
+            }))
+            .map_err(|e| WalletError::RpcRequest(format!("serialize get_transactions: {}", e)))?;
 
-            let tx_resp = client
-                .post(format!("{}/get_transactions", daemon_url))
-                .json(&serde_json::json!({
-                    "txs_hashes": tx_hashes,
-                    "decode_as_json": false,
-                    "prune": false,
-                }))
-                .send()
-                .await
-                .map_err(|e| {
-                    WalletError::RpcConnection(format!(
-                        "get_transactions (daemon: {}): {}",
-                        daemon_url, e
-                    ))
-                })?;
+            let body_bytes = crate::rpc_transport::post_json_http1_identity_raw(
+                daemon_url,
+                "get_transactions",
+                &request_body,
+            )
+            .await
+            .map_err(|e| {
+                WalletError::RpcConnection(format!(
+                    "get_transactions (daemon: {}): {}",
+                    daemon_url, e
+                ))
+            })?;
 
-            let tx_json: serde_json::Value = tx_resp
-                .json()
-                .await
-                .map_err(|e| WalletError::RpcRequest(format!("parse get_transactions: {}", e)))?;
+            let tx_json: serde_json::Value = serde_json::from_slice(&body_bytes).map_err(|e| {
+                WalletError::RpcRequest(format!(
+                    "parse get_transactions ({} bytes, first 500: {:?}): {}",
+                    body_bytes.len(),
+                    String::from_utf8_lossy(&body_bytes[..body_bytes.len().min(500)]),
+                    e
+                ))
+            })?;
 
             if let Some(txs) = tx_json["txs"].as_array() {
                 for tx_entry in txs {
@@ -268,7 +326,7 @@ impl XmrWallet {
         // For the miner transaction's first output, query its global output index.
         // This is needed by the Scanner to correctly track output indexes on the blockchain.
         let output_index =
-            Self::get_first_ringct_output_index(client, daemon_url, &block, &pruned_txs).await?;
+            Self::get_first_ringct_output_index(daemon_url, &block, &pruned_txs).await?;
 
         Ok(monero_interface::ScannableBlock {
             block,
@@ -279,66 +337,70 @@ impl XmrWallet {
 
     /// Get the global output index for the first RingCT output in a block.
     ///
-    /// Queries monerod's `/get_o_indexes.bin` endpoint (via the JSON-RPC
-    /// `get_tx_global_outputs_indexes` equivalent) for the miner transaction.
+    /// Uses `/get_transactions` to recover the first RingCT transaction's
+    /// output indexes.
+    ///
+    /// The old scan path attempted to POST JSON to monerod's binary
+    /// `/get_o_indexes.bin` route. Real daemons reject that body format, so
+    /// the JSON fallback is used as the primary path until this adapter is
+    /// wired to the daemon interface's real EPEE transport.
     async fn get_first_ringct_output_index(
-        client: &reqwest::Client,
         daemon_url: &str,
         block: &monero_oxide::block::Block,
-        _txs: &[monero_oxide::transaction::Transaction<monero_oxide::transaction::Pruned>],
+        txs: &[monero_oxide::transaction::Transaction<monero_oxide::transaction::Pruned>],
     ) -> Result<Option<u64>, WalletError> {
-        // Check if the miner tx is v2 (has RingCT outputs)
-        let miner_tx = block.miner_transaction();
-        let is_v2_miner = matches!(miner_tx, monero_oxide::transaction::Transaction::V2 { .. });
+        let ringct_hash = if matches!(
+            block.miner_transaction(),
+            monero_oxide::transaction::Transaction::V2 { .. }
+        ) && !block.miner_transaction().prefix().outputs.is_empty()
+        {
+            Some(block.miner_transaction().hash())
+        } else {
+            block
+                .transactions
+                .iter()
+                .zip(txs.iter())
+                .find(|(_, tx)| {
+                    matches!(tx, monero_oxide::transaction::Transaction::V2 { .. })
+                        && !tx.prefix().outputs.is_empty()
+                })
+                .map(|(hash, _)| *hash)
+        };
 
-        if !is_v2_miner || miner_tx.prefix().outputs.is_empty() {
+        let Some(ringct_hash) = ringct_hash else {
             return Ok(None);
-        }
+        };
+        let ringct_hash = hex::encode(ringct_hash);
 
-        // Query the output indexes for the miner transaction
-        let miner_hash = hex::encode(miner_tx.hash());
+        // Query via get_transactions, which carries output_indices for the
+        // mined transaction without relying on the broken JSON->EPEE bridge.
+        let request_body = serde_json::to_vec(&serde_json::json!({
+            "txs_hashes": [ringct_hash],
+            "decode_as_json": true,
+        }))
+        .map_err(|e| WalletError::RpcRequest(format!("serialize o_indexes fallback: {}", e)))?;
 
-        let resp = client
-            .post(format!("{}/get_o_indexes.bin", daemon_url))
-            .header("Content-Type", "application/json")
-            .json(&serde_json::json!({ "txid": miner_hash }))
-            .send()
-            .await;
+        let body_bytes = crate::rpc_transport::post_json_http1_identity_raw(
+            daemon_url,
+            "get_transactions",
+            &request_body,
+        )
+        .await
+        .map_err(|e| {
+            WalletError::RpcConnection(format!(
+                "get_transactions for o_indexes (daemon: {}): {}",
+                daemon_url, e
+            ))
+        })?;
 
-        // If the binary endpoint doesn't work, try the JSON fallback approach:
-        // use get_transactions with decode_as_json to extract output global indexes
-        match resp {
-            Ok(r) if r.status().is_success() => {
-                let body: serde_json::Value = r.json().await.unwrap_or_default();
-                if let Some(indexes) = body["o_indexes"].as_array() {
-                    if let Some(first) = indexes.first() {
-                        return Ok(first.as_u64());
-                    }
-                }
-            }
-            _ => {}
-        }
-
-        // Fallback: query via get_transactions which may include output_indices
-        let tx_resp = client
-            .post(format!("{}/get_transactions", daemon_url))
-            .json(&serde_json::json!({
-                "txs_hashes": [miner_hash],
-                "decode_as_json": true,
-            }))
-            .send()
-            .await
-            .map_err(|e| {
-                WalletError::RpcConnection(format!(
-                    "get_transactions for o_indexes (daemon: {}): {}",
-                    daemon_url, e
-                ))
-            })?;
-
-        let tx_json: serde_json::Value = tx_resp
-            .json()
-            .await
-            .map_err(|e| WalletError::RpcRequest(format!("parse o_indexes response: {}", e)))?;
+        let tx_json: serde_json::Value = serde_json::from_slice(&body_bytes).map_err(|e| {
+            WalletError::RpcRequest(format!(
+                "parse o_indexes response ({} bytes, first 500: {:?}): {}",
+                body_bytes.len(),
+                String::from_utf8_lossy(&body_bytes[..body_bytes.len().min(500)]),
+                e
+            ))
+        })?;
 
         if let Some(txs) = tx_json["txs"].as_array() {
             if let Some(tx) = txs.first() {
@@ -679,16 +741,31 @@ impl CryptoNoteWallet for XmrWallet {
             return Err(WalletError::NoOutputsFound);
         }
 
-        // Step 2: Select outputs covering amount + fee estimate
-        // Simple selection: use all outputs (for PoC; production would optimize)
-        let total_available: u64 = sender_outputs.iter().map(|o| o.commitment().amount).sum();
-
-        if total_available < amount {
-            return Err(WalletError::InsufficientFunds {
-                need: amount,
-                have: total_available,
-            });
+        // Step 2: Select outputs covering amount + a conservative fee estimate.
+        let sender_amounts: Vec<u64> = sender_outputs
+            .iter()
+            .map(|o| o.commitment().amount)
+            .collect();
+        let selected_indices = Self::select_lock_output_indices(&sender_amounts, amount)?;
+        let mut selected_total = 0u64;
+        let mut selected_outputs = Vec::with_capacity(selected_indices.len());
+        for selected_idx in selected_indices {
+            let output = sender_outputs.get(selected_idx).cloned().ok_or_else(|| {
+                WalletError::TxBuildFailed("selected sender output out of range".into())
+            })?;
+            selected_total = selected_total.saturating_add(output.commitment().amount);
+            selected_outputs.push(output);
         }
+        let estimated_fee = Self::estimate_lock_fee(selected_outputs.len());
+        tracing::info!(
+            target: "xmr_wallet",
+            available_unspent = sender_amounts.len(),
+            selected_inputs = selected_outputs.len(),
+            selected_total = selected_total,
+            estimated_fee = estimated_fee,
+            amount = amount,
+            "selected sender outputs for XMR lock"
+        );
 
         // Step 3: Build the recipient address as monero-oxide MoneroAddress
         let oxide_spend = monero_oxide::ed25519::Point::from(*spend_point);
@@ -714,7 +791,7 @@ impl CryptoNoteWallet for XmrWallet {
         let fee_rate = daemon
             .fee_rate(
                 monero_interface::FeePriority::Normal,
-                100_000, // max per_weight sanity bound
+                XMR_FEE_RATE_SANITY_BOUND,
             )
             .await
             .map_err(|e| WalletError::TxBuildFailed(format!("fee rate: {}", e)))?;
@@ -730,8 +807,8 @@ impl CryptoNoteWallet for XmrWallet {
         let mut rng = rand_core::OsRng;
         let ring_len: u8 = 16; // XMR ring size
 
-        let mut inputs_with_decoys = Vec::with_capacity(sender_outputs.len());
-        for output in sender_outputs {
+        let mut inputs_with_decoys = Vec::with_capacity(selected_outputs.len());
+        for output in selected_outputs {
             let owd = monero_wallet::OutputWithDecoys::new(
                 &mut rng,
                 &daemon,
@@ -860,7 +937,10 @@ impl CryptoNoteWallet for XmrWallet {
             .map_err(|e| WalletError::TxBuildFailed(format!("daemon connection: {}", e)))?;
 
         let fee_rate = daemon
-            .fee_rate(monero_interface::FeePriority::Normal, 100_000)
+            .fee_rate(
+                monero_interface::FeePriority::Normal,
+                XMR_FEE_RATE_SANITY_BOUND,
+            )
             .await
             .map_err(|e| WalletError::TxBuildFailed(format!("fee rate: {}", e)))?;
 
@@ -1160,7 +1240,10 @@ impl CryptoNoteWallet for XmrWallet {
             .map_err(|e| WalletError::TxBuildFailed(format!("daemon connection: {}", e)))?;
 
         let fee_rate = daemon
-            .fee_rate(monero_interface::FeePriority::Normal, 100_000)
+            .fee_rate(
+                monero_interface::FeePriority::Normal,
+                XMR_FEE_RATE_SANITY_BOUND,
+            )
             .await
             .map_err(|e| WalletError::TxBuildFailed(format!("fee rate: {}", e)))?;
 
@@ -1432,5 +1515,29 @@ mod tests {
             addr_a, addr_b,
             "different spend points must produce different addresses"
         );
+    }
+
+    #[test]
+    fn test_xmr_fee_rate_sanity_bound() {
+        assert!(
+            XMR_FEE_RATE_SANITY_BOUND >= 1_000_000,
+            "XMR fee sanity bound must stay well above the old 100k ceiling"
+        );
+    }
+
+    #[test]
+    fn test_xmr_lock_selection_prefers_smallest_sufficient_single_output() {
+        let amounts = vec![1_900_000_000_000, 1_200_000_000_000, 1_600_000_000_000];
+        let selected = XmrWallet::select_lock_output_indices(&amounts, 1_000_000_000_000).unwrap();
+        assert_eq!(selected, vec![1]);
+    }
+
+    #[test]
+    fn test_xmr_lock_selection_prefers_minimal_input_count() {
+        let amounts = vec![520_000_000_000, 510_000_000_000, 90_000_000_000];
+        let selected = XmrWallet::select_lock_output_indices(&amounts, 1_000_000_000_000).unwrap();
+        assert_eq!(selected.len(), 2);
+        let total: u64 = selected.iter().map(|idx| amounts[*idx]).sum();
+        assert!(total >= 1_000_000_000_000 + XmrWallet::estimate_lock_fee(selected.len()));
     }
 }

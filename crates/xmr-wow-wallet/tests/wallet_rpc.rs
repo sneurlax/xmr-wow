@@ -104,6 +104,448 @@ async fn spawn_mock_daemon(state: MockDaemonState) -> TestServer {
     }
 }
 
+#[derive(Clone)]
+struct ChunkedScanDaemonState {
+    block_count: u64,
+    block_blob_hex: String,
+    full_tx_entries: Vec<Value>,
+    pruned_tx_entries: Vec<Value>,
+    fallback_response_body: String,
+    o_indexes: Vec<u64>,
+    force_o_indexes_fallback: bool,
+    fail_o_indexes_fallback_requests: bool,
+    fail_unpruned_scan_requests: bool,
+    capture: RequestHeaderCapture,
+}
+
+struct WowScanFixture {
+    block_count: u64,
+    block_height: u64,
+    block_blob_hex: String,
+    full_tx_entries: Vec<Value>,
+    pruned_tx_entries: Vec<Value>,
+    fallback_response_body: String,
+    o_indexes: Vec<u64>,
+    joint_spend_point: EdwardsPoint,
+    joint_view_scalar: Scalar,
+    lock_tx_hash: TxHash,
+}
+
+async fn build_wow_chunked_scan_fixture() -> WowScanFixture {
+    let testbed = SimnetTestbed::new().await.unwrap();
+    let sender = WowSimnetWallet::generate();
+    let (_joint_spend_secret, joint_spend_point, joint_view_scalar) = sample_joint_keys();
+    let lock_amount = 500_000_000_000u64;
+
+    {
+        let mut node = testbed.wow_node().lock().await;
+        node.mine_to(&sender.spend_pub, &sender.view_scalar, 2)
+            .await
+            .unwrap();
+        node.mine_blocks(100).await.unwrap();
+    }
+
+    let wow_wallet = WowWallet::with_sender_keys(
+        testbed.wow_rpc_url(),
+        *sender.spend_scalar,
+        *sender.view_scalar,
+    );
+    let lock_tx_hash = wow_wallet
+        .lock(&joint_spend_point, &joint_view_scalar, lock_amount)
+        .await
+        .unwrap();
+    testbed.mine_wow(1).await.unwrap();
+
+    let mut node = testbed.wow_node().lock().await;
+    let node_height = node.height().await.unwrap();
+    let mut block_height = None;
+    let mut block_blob_hex = None;
+    for height in (0..node_height).rev() {
+        let blob = node.block_blob_at(height as usize).await.unwrap();
+        let block = wownero_oxide::block::Block::read(&mut blob.as_slice()).unwrap();
+        if block.transactions.contains(&lock_tx_hash) {
+            block_height = Some(height);
+            block_blob_hex = Some(hex::encode(blob));
+            break;
+        }
+    }
+    let block_height = block_height.expect("mined WOW lock tx must appear in a mined block");
+    let block_blob_hex = block_blob_hex.expect("lock block blob must be captured");
+    let block =
+        wownero_oxide::block::Block::read(&mut hex::decode(&block_blob_hex).unwrap().as_slice())
+            .unwrap();
+    let scannable = node
+        .scannable_block_at(block_height as usize)
+        .await
+        .unwrap();
+    let mut ordered_records = Vec::with_capacity(block.transactions.len());
+    for hash in &block.transactions {
+        ordered_records.push(
+            node.transactions(vec![*hash])
+                .await
+                .unwrap()
+                .into_iter()
+                .next()
+                .expect("block transaction must be queryable"),
+        );
+    }
+    let first_ringct_record = ordered_records
+        .iter()
+        .find(|record| {
+            let tx = wownero_oxide::transaction::Transaction::<
+                wownero_oxide::transaction::NotPruned,
+            >::read(&mut record.tx_blob.as_slice())
+            .expect("block tx blob must parse");
+            matches!(tx, wownero_oxide::transaction::Transaction::V2 { .. })
+                && !tx.prefix().outputs.is_empty()
+        })
+        .expect("block must contain a RingCT non-miner transaction");
+    let first_ringct_output_index = scannable
+        .output_index_for_first_ringct_output
+        .expect("scannable WOW block must expose the first RingCT output index");
+    let first_ringct_tx_hash = if matches!(
+        scannable.block.miner_transaction(),
+        wownero_oxide::transaction::Transaction::V2 { .. }
+    ) && !scannable
+        .block
+        .miner_transaction()
+        .prefix()
+        .outputs
+        .is_empty()
+    {
+        scannable.block.miner_transaction().hash()
+    } else {
+        first_ringct_record.tx_hash
+    };
+    let o_indexes = if first_ringct_tx_hash == scannable.block.miner_transaction().hash() {
+        vec![first_ringct_output_index]
+    } else {
+        first_ringct_record.output_indices.clone()
+    };
+
+    let full_tx_entries = ordered_records
+        .iter()
+        .map(|record| {
+            json!({
+                "tx_hash": hex::encode(record.tx_hash),
+                "as_hex": hex::encode(&record.tx_blob),
+                "as_json": "",
+                "block_height": block_height,
+                "block_timestamp": record.block_timestamp,
+                "confirmations": record.confirmations,
+                "double_spend_seen": false,
+                "in_pool": false,
+                "output_indices": record.output_indices,
+                "prunable_as_hex": hex::encode(&record.prunable_blob),
+                "prunable_hash": hex::encode(record.prunable_hash),
+                "pruned_as_hex": hex::encode(&record.pruned_blob),
+            })
+        })
+        .collect::<Vec<_>>();
+    let pruned_tx_entries = ordered_records
+        .iter()
+        .map(|record| {
+            json!({
+                "tx_hash": hex::encode(record.tx_hash),
+                "as_hex": "",
+                "as_json": "",
+                "block_height": block_height,
+                "block_timestamp": record.block_timestamp,
+                "confirmations": record.confirmations,
+                "double_spend_seen": false,
+                "in_pool": false,
+                "prunable_hash": hex::encode(record.prunable_hash),
+                "pruned_as_hex": hex::encode(&record.pruned_blob),
+            })
+        })
+        .collect::<Vec<_>>();
+    let fallback_response_body = json!({
+        "status": "OK",
+        "missed_tx": [],
+        "txs": [{
+            "tx_hash": hex::encode(first_ringct_tx_hash),
+            "as_json": "",
+            "block_height": block_height,
+            "block_timestamp": first_ringct_record.block_timestamp,
+            "confirmations": first_ringct_record.confirmations,
+            "double_spend_seen": false,
+            "in_pool": false,
+            "output_indices": o_indexes,
+        }],
+    })
+    .to_string();
+
+    WowScanFixture {
+        block_count: block_height + 1,
+        block_height,
+        block_blob_hex,
+        full_tx_entries,
+        pruned_tx_entries,
+        fallback_response_body,
+        o_indexes,
+        joint_spend_point,
+        joint_view_scalar,
+        lock_tx_hash,
+    }
+}
+
+async fn spawn_chunked_scan_daemon(state: ChunkedScanDaemonState) -> TestServer {
+    let shared = Arc::new(state);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let handle = tokio::spawn(async move {
+        fn header_value(request_headers: &str, name: &str) -> Option<String> {
+            request_headers.lines().find_map(|line| {
+                let (header_name, value) = line.split_once(':')?;
+                if header_name.trim().eq_ignore_ascii_case(name) {
+                    Some(value.trim().to_string())
+                } else {
+                    None
+                }
+            })
+        }
+
+        loop {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                break;
+            };
+            let state = shared.clone();
+
+            tokio::spawn(async move {
+                let mut request = Vec::new();
+                let mut buf = [0u8; 4096];
+                let mut headers_end = None;
+                let mut content_length = 0usize;
+
+                loop {
+                    let read = socket.read(&mut buf).await.unwrap_or(0);
+                    if read == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&buf[..read]);
+
+                    if headers_end.is_none() {
+                        if let Some(pos) =
+                            request.windows(4).position(|window| window == b"\r\n\r\n")
+                        {
+                            headers_end = Some(pos + 4);
+                            let request_headers = String::from_utf8_lossy(&request[..pos]);
+                            content_length = header_value(&request_headers, "content-length")
+                                .and_then(|value| value.parse().ok())
+                                .unwrap_or(0);
+                        }
+                    }
+
+                    if let Some(end) = headers_end {
+                        if request.len() >= end + content_length {
+                            break;
+                        }
+                    }
+                }
+
+                let Some(headers_end) = headers_end else {
+                    let _ = socket.shutdown().await;
+                    return;
+                };
+
+                let request_headers = String::from_utf8_lossy(&request[..headers_end - 4]);
+                let body_bytes =
+                    &request[headers_end..request.len().min(headers_end + content_length)];
+                let request_body: Value =
+                    serde_json::from_slice(body_bytes).unwrap_or_else(|_| json!({}));
+                let request_line = request_headers.lines().next().unwrap_or_default();
+
+                let (status_line, response_body, chunked, force_truncated_body) = if request_line
+                    .starts_with("POST /json_rpc ")
+                {
+                    let id = request_body.get("id").cloned().unwrap_or_else(|| json!(1));
+                    let method = request_body
+                        .get("method")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default();
+                    let result = match method {
+                        "get_block_count" => json!({ "count": state.block_count }),
+                        "get_block" => json!({ "blob": state.block_blob_hex }),
+                        _ => json!({}),
+                    };
+                    (
+                        "HTTP/1.1 200 OK",
+                        json!({
+                            "jsonrpc": "2.0",
+                            "id": id,
+                            "result": result,
+                        })
+                        .to_string(),
+                        false,
+                        false,
+                    )
+                } else if request_line.starts_with("POST /get_o_indexes.bin ") {
+                    if state.force_o_indexes_fallback {
+                        (
+                            "HTTP/1.1 404 Not Found",
+                            json!({ "status": "Failed", "reason": "forced fallback" }).to_string(),
+                            false,
+                            false,
+                        )
+                    } else {
+                        (
+                            "HTTP/1.1 200 OK",
+                            json!({
+                                "status": "OK",
+                                "o_indexes": state.o_indexes,
+                            })
+                            .to_string(),
+                            false,
+                            false,
+                        )
+                    }
+                } else if request_line.starts_with("POST /get_transactions ") {
+                    let connection = header_value(&request_headers, "connection");
+                    let accept_encoding = header_value(&request_headers, "accept-encoding");
+                    let parsed_body = serde_json::from_slice(body_bytes).ok();
+                    *state.capture.connection.lock().unwrap() = connection;
+                    *state.capture.accept_encoding.lock().unwrap() = accept_encoding.clone();
+                    state
+                        .capture
+                        .accept_encodings
+                        .lock()
+                        .unwrap()
+                        .push(accept_encoding);
+                    *state.capture.request_body.lock().unwrap() = parsed_body.clone();
+                    if let Some(body) = parsed_body {
+                        state.capture.request_bodies.lock().unwrap().push(body);
+                    }
+
+                    let is_o_indexes_fallback =
+                        request_body.get("decode_as_json").and_then(Value::as_bool) == Some(true);
+
+                    let response_body = if is_o_indexes_fallback {
+                        state.fallback_response_body.clone()
+                    } else {
+                        let prune = request_body
+                            .get("prune")
+                            .and_then(Value::as_bool)
+                            .unwrap_or(false);
+                        let requested_hashes = request_body["txs_hashes"]
+                            .as_array()
+                            .cloned()
+                            .unwrap_or_default();
+                        let entries = if prune {
+                            &state.pruned_tx_entries
+                        } else {
+                            &state.full_tx_entries
+                        };
+                        let txs = requested_hashes
+                            .iter()
+                            .filter_map(|hash| {
+                                let hash = hash.as_str()?;
+                                entries
+                                    .iter()
+                                    .find(|entry| {
+                                        entry.get("tx_hash").and_then(Value::as_str) == Some(hash)
+                                    })
+                                    .cloned()
+                            })
+                            .collect::<Vec<_>>();
+                        json!({
+                            "status": "OK",
+                            "missed_tx": [],
+                            "txs": txs,
+                        })
+                        .to_string()
+                    };
+                    (
+                        "HTTP/1.1 200 OK",
+                        response_body,
+                        true,
+                        if is_o_indexes_fallback {
+                            state.fail_o_indexes_fallback_requests
+                        } else {
+                            state.fail_unpruned_scan_requests
+                                && request_body.get("decode_as_json").and_then(Value::as_bool)
+                                    != Some(true)
+                                && request_body.get("prune").and_then(Value::as_bool) != Some(true)
+                        },
+                    )
+                } else {
+                    (
+                        "HTTP/1.1 404 Not Found",
+                        "{\"status\":\"Failed\"}".to_string(),
+                        false,
+                        false,
+                    )
+                };
+
+                if force_truncated_body {
+                    let full_len = response_body.len();
+                    let truncated_len = full_len.saturating_sub(1).max(1);
+                    let header = format!(
+                        concat!(
+                            "{}\r\n",
+                            "Content-Type: application/json\r\n",
+                            "Content-Length: {}\r\n",
+                            "Connection: close\r\n",
+                            "\r\n"
+                        ),
+                        status_line, full_len,
+                    );
+                    let _ = socket.write_all(header.as_bytes()).await;
+                    let _ = socket
+                        .write_all(&response_body.as_bytes()[..truncated_len])
+                        .await;
+                    let _ = socket.shutdown().await;
+                    return;
+                }
+
+                let response = if chunked {
+                    let split_at = response_body.len().max(2) / 2;
+                    let first = &response_body[..split_at];
+                    let second = &response_body[split_at..];
+                    format!(
+                        concat!(
+                            "{}\r\n",
+                            "Content-Type: application/json\r\n",
+                            "Transfer-Encoding: chunked\r\n",
+                            "Connection: close\r\n",
+                            "\r\n",
+                            "{:X}\r\n{}\r\n",
+                            "{:X}\r\n{}\r\n",
+                            "0\r\n\r\n"
+                        ),
+                        status_line,
+                        first.len(),
+                        first,
+                        second.len(),
+                        second,
+                    )
+                } else {
+                    format!(
+                        concat!(
+                            "{}\r\n",
+                            "Content-Type: application/json\r\n",
+                            "Content-Length: {}\r\n",
+                            "Connection: close\r\n",
+                            "\r\n",
+                            "{}"
+                        ),
+                        status_line,
+                        response_body.len(),
+                        response_body,
+                    )
+                };
+
+                let _ = socket.write_all(response.as_bytes()).await;
+                let _ = socket.shutdown().await;
+            });
+        }
+    });
+
+    TestServer {
+        url: format!("http://{}", addr),
+        handle,
+    }
+}
+
 fn sample_keys() -> (EdwardsPoint, Scalar, Scalar, Scalar) {
     let spend_secret = Scalar::random(&mut OsRng);
     let spend_point = spend_secret * G;
@@ -764,6 +1206,8 @@ struct RequestHeaderCapture {
     connection: Arc<Mutex<Option<String>>>,
     accept_encoding: Arc<Mutex<Option<String>>>,
     request_body: Arc<Mutex<Option<Value>>>,
+    accept_encodings: Arc<Mutex<Vec<Option<String>>>>,
+    request_bodies: Arc<Mutex<Vec<Value>>>,
 }
 
 #[derive(Clone)]
@@ -798,15 +1242,27 @@ async fn spawn_mock_daemon_header_capture(state: HeaderCaptureDaemonState) -> Te
         headers: HeaderMap,
         body: Bytes,
     ) -> Json<Value> {
-        *state.capture.connection.lock().unwrap() = headers
+        let connection = headers
             .get(header::CONNECTION)
             .and_then(|value| value.to_str().ok())
             .map(|value| value.to_string());
-        *state.capture.accept_encoding.lock().unwrap() = headers
+        *state.capture.connection.lock().unwrap() = connection;
+        let accept_encoding = headers
             .get(header::ACCEPT_ENCODING)
             .and_then(|value| value.to_str().ok())
             .map(|value| value.to_string());
-        *state.capture.request_body.lock().unwrap() = serde_json::from_slice(&body).ok();
+        *state.capture.accept_encoding.lock().unwrap() = accept_encoding.clone();
+        state
+            .capture
+            .accept_encodings
+            .lock()
+            .unwrap()
+            .push(accept_encoding);
+        let parsed_body = serde_json::from_slice(&body).ok();
+        *state.capture.request_body.lock().unwrap() = parsed_body.clone();
+        if let Some(body) = parsed_body {
+            state.capture.request_bodies.lock().unwrap().push(body);
+        }
 
         Json(json!({
             "status": "OK",
@@ -1064,6 +1520,220 @@ async fn poll_confirmation_handles_chunked_get_transactions_response() {
     assert!(status.confirmed, "chunked response should still confirm");
     assert_eq!(status.confirmations, 5);
     assert_eq!(status.block_height, Some(100));
+}
+
+#[tokio::test]
+async fn wow_scan_uses_raw_helper_headers_for_chunked_get_transactions() {
+    let fixture = build_wow_chunked_scan_fixture().await;
+    let capture = RequestHeaderCapture::default();
+    let server = spawn_chunked_scan_daemon(ChunkedScanDaemonState {
+        block_count: fixture.block_count,
+        block_blob_hex: fixture.block_blob_hex.clone(),
+        full_tx_entries: fixture.full_tx_entries.clone(),
+        pruned_tx_entries: fixture.pruned_tx_entries.clone(),
+        fallback_response_body: fixture.fallback_response_body.clone(),
+        o_indexes: fixture.o_indexes.clone(),
+        force_o_indexes_fallback: false,
+        fail_o_indexes_fallback_requests: false,
+        fail_unpruned_scan_requests: false,
+        capture: capture.clone(),
+    })
+    .await;
+
+    let wallet = WowWallet::new(&server.url).with_scan_from(fixture.block_height);
+    wallet
+        .scan(
+            &fixture.joint_spend_point,
+            &fixture.joint_view_scalar,
+            fixture.block_height,
+        )
+        .await
+        .unwrap();
+
+    let accept_encodings = capture.accept_encodings.lock().unwrap().clone();
+    assert!(
+        !accept_encodings.is_empty(),
+        "scan-path get_transactions requests should be captured"
+    );
+    assert_eq!(
+        accept_encodings
+            .iter()
+            .all(|value| value.as_deref() == Some("identity")),
+        true,
+        "scan-path get_transactions must request identity encoding"
+    );
+    let bodies = capture.request_bodies.lock().unwrap().clone();
+    let body = bodies
+        .iter()
+        .find(|body| body.get("decode_as_json").and_then(Value::as_bool) == Some(false))
+        .cloned()
+        .expect("scan-path raw get_transactions request should be captured");
+    assert_eq!(
+        body.get("decode_as_json").and_then(Value::as_bool),
+        Some(false),
+        "fetch_scannable_block should still request raw tx blobs"
+    );
+    assert_eq!(
+        body.get("prune").and_then(Value::as_bool),
+        Some(true),
+        "fetch_scannable_block must request pruned tx blobs for scanner parsing"
+    );
+    assert_eq!(
+        body["txs_hashes"]
+            .as_array()
+            .map(|hashes| { hashes.contains(&json!(hex::encode(fixture.lock_tx_hash))) }),
+        Some(true),
+        "fetch_scannable_block must request the mined WOW lock tx among the block tx hashes"
+    );
+}
+
+#[tokio::test]
+async fn wow_scan_handles_missing_o_indexes_bin_with_pruned_raw_helper_requests() {
+    let fixture = build_wow_chunked_scan_fixture().await;
+    let capture = RequestHeaderCapture::default();
+    let server = spawn_chunked_scan_daemon(ChunkedScanDaemonState {
+        block_count: fixture.block_count,
+        block_blob_hex: fixture.block_blob_hex,
+        full_tx_entries: fixture.full_tx_entries,
+        pruned_tx_entries: fixture.pruned_tx_entries,
+        fallback_response_body: fixture.fallback_response_body,
+        o_indexes: fixture.o_indexes,
+        force_o_indexes_fallback: true,
+        fail_o_indexes_fallback_requests: false,
+        fail_unpruned_scan_requests: false,
+        capture: capture.clone(),
+    })
+    .await;
+
+    let wallet = WowWallet::new(&server.url).with_scan_from(fixture.block_height);
+    wallet
+        .scan(
+            &fixture.joint_spend_point,
+            &fixture.joint_view_scalar,
+            fixture.block_height,
+        )
+        .await
+        .unwrap();
+    let accept_encodings = capture.accept_encodings.lock().unwrap().clone();
+    assert!(
+        !accept_encodings.is_empty(),
+        "o_indexes fallback get_transactions requests should be captured"
+    );
+    assert_eq!(
+        accept_encodings
+            .iter()
+            .all(|value| value.as_deref() == Some("identity")),
+        true,
+        "scan-path get_transactions must request identity encoding when /get_o_indexes.bin is unavailable"
+    );
+    let bodies = capture.request_bodies.lock().unwrap().clone();
+    let body = bodies
+        .iter()
+        .find(|body| body.get("decode_as_json").and_then(Value::as_bool) == Some(false))
+        .cloned()
+        .expect("scan-path get_transactions request should be captured");
+    assert_eq!(
+        body.get("prune").and_then(Value::as_bool),
+        Some(true),
+        "scan-path get_transactions must stay pruned when /get_o_indexes.bin is unavailable"
+    );
+    assert_eq!(
+        body["txs_hashes"]
+            .as_array()
+            .map(|hashes| hashes.contains(&json!(hex::encode(fixture.lock_tx_hash)))),
+        Some(true),
+        "scan-path get_transactions must still request the mined WOW lock tx when /get_o_indexes.bin is unavailable"
+    );
+}
+
+#[tokio::test]
+async fn wow_scan_uses_pruned_get_transactions_to_avoid_truncated_full_tx_bodies() {
+    let fixture = build_wow_chunked_scan_fixture().await;
+    let capture = RequestHeaderCapture::default();
+    let server = spawn_chunked_scan_daemon(ChunkedScanDaemonState {
+        block_count: fixture.block_count,
+        block_blob_hex: fixture.block_blob_hex,
+        full_tx_entries: fixture.full_tx_entries,
+        pruned_tx_entries: fixture.pruned_tx_entries,
+        fallback_response_body: fixture.fallback_response_body,
+        o_indexes: fixture.o_indexes,
+        force_o_indexes_fallback: false,
+        fail_o_indexes_fallback_requests: false,
+        fail_unpruned_scan_requests: true,
+        capture: capture.clone(),
+    })
+    .await;
+
+    let wallet = WowWallet::new(&server.url).with_scan_from(fixture.block_height);
+    wallet
+        .scan(
+            &fixture.joint_spend_point,
+            &fixture.joint_view_scalar,
+            fixture.block_height,
+        )
+        .await
+        .unwrap();
+
+    let bodies = capture.request_bodies.lock().unwrap().clone();
+    let scan_bodies = bodies
+        .into_iter()
+        .filter(|body| body.get("decode_as_json").and_then(Value::as_bool) == Some(false))
+        .collect::<Vec<_>>();
+    assert!(
+        !scan_bodies.is_empty(),
+        "scan-path get_transactions requests should be captured"
+    );
+    assert!(
+        scan_bodies
+            .iter()
+            .all(|body| body.get("prune").and_then(Value::as_bool) == Some(true)),
+        "scan-path get_transactions must use pruned responses to avoid oversized full-tx bodies"
+    );
+}
+
+#[tokio::test]
+async fn wow_scan_survives_broken_o_indexes_fallback_transport() {
+    let fixture = build_wow_chunked_scan_fixture().await;
+    let capture = RequestHeaderCapture::default();
+    let server = spawn_chunked_scan_daemon(ChunkedScanDaemonState {
+        block_count: fixture.block_count,
+        block_blob_hex: fixture.block_blob_hex,
+        full_tx_entries: fixture.full_tx_entries,
+        pruned_tx_entries: fixture.pruned_tx_entries,
+        fallback_response_body: fixture.fallback_response_body,
+        o_indexes: fixture.o_indexes,
+        force_o_indexes_fallback: true,
+        fail_o_indexes_fallback_requests: true,
+        fail_unpruned_scan_requests: false,
+        capture: capture.clone(),
+    })
+    .await;
+
+    let wallet = WowWallet::new(&server.url).with_scan_from(fixture.block_height);
+    wallet
+        .scan(
+            &fixture.joint_spend_point,
+            &fixture.joint_view_scalar,
+            fixture.block_height,
+        )
+        .await
+        .unwrap();
+
+    let bodies = capture.request_bodies.lock().unwrap().clone();
+    let scan_bodies = bodies
+        .into_iter()
+        .filter(|body| body.get("decode_as_json").and_then(Value::as_bool) == Some(false))
+        .collect::<Vec<_>>();
+    assert!(
+        !scan_bodies.is_empty(),
+        "scan request should still be captured when the o_indexes fallback transport is broken"
+    );
+    assert!(
+        scan_bodies
+            .iter()
+            .all(|body| body.get("prune").and_then(Value::as_bool) == Some(true)),
+        "scan request should stay on the pruned path even when the o_indexes fallback transport breaks"
+    );
 }
 
 #[tokio::test]

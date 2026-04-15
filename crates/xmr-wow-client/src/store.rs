@@ -19,7 +19,7 @@
 ///     value BLOB NOT NULL
 /// );
 /// ```
-use rusqlite::{Connection, params};
+use rusqlite::{params, Connection};
 
 pub struct SwapStore {
     conn: Connection,
@@ -28,7 +28,8 @@ pub struct SwapStore {
 impl SwapStore {
     pub fn open(path: impl AsRef<std::path::Path>) -> anyhow::Result<Self> {
         let conn = Connection::open(path)?;
-        conn.execute_batch("
+        conn.execute_batch(
+            "
             CREATE TABLE IF NOT EXISTS swaps (
                 swap_id BLOB PRIMARY KEY,
                 state   TEXT NOT NULL,
@@ -38,14 +39,12 @@ impl SwapStore {
                 key   TEXT PRIMARY KEY,
                 value BLOB NOT NULL
             );
-        ")?;
+        ",
+        )?;
 
         // Migration: add encrypted_secret column if not present.
         // Ignoring "duplicate column name" error for idempotency.
-        match conn.execute(
-            "ALTER TABLE swaps ADD COLUMN encrypted_secret BLOB",
-            [],
-        ) {
+        match conn.execute("ALTER TABLE swaps ADD COLUMN encrypted_secret BLOB", []) {
             Ok(_) => {}
             Err(e) => {
                 let msg = e.to_string();
@@ -121,12 +120,7 @@ impl SwapStore {
              VALUES (?1, ?2, ?3, ?4)
              ON CONFLICT(swap_id) DO UPDATE
              SET state = ?2, updated = ?3, encrypted_secret = ?4",
-            params![
-                swap_id.as_ref(),
-                state_json,
-                now,
-                encrypted_secret,
-            ],
+            params![swap_id.as_ref(), state_json, now, encrypted_secret,],
         )?;
         Ok(())
     }
@@ -161,11 +155,11 @@ impl SwapStore {
     /// this database. This ensures the same password always derives
     /// the same key for a given database file.
     pub fn get_or_create_salt(&self) -> anyhow::Result<[u8; 16]> {
-        let result = self.conn.query_row(
-            "SELECT value FROM config WHERE key = 'salt'",
-            [],
-            |row| row.get::<_, Vec<u8>>(0),
-        );
+        let result =
+            self.conn
+                .query_row("SELECT value FROM config WHERE key = 'salt'", [], |row| {
+                    row.get::<_, Vec<u8>>(0)
+                });
 
         match result {
             Ok(blob) if blob.len() == 16 => {
@@ -187,9 +181,9 @@ impl SwapStore {
     }
 
     pub fn list_all(&self) -> anyhow::Result<Vec<([u8; 32], String)>> {
-        let mut stmt = self.conn.prepare(
-            "SELECT swap_id, state FROM swaps ORDER BY updated DESC"
-        )?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT swap_id, state FROM swaps ORDER BY updated DESC")?;
         let rows = stmt.query_map([], |row| {
             let id_blob: Vec<u8> = row.get(0)?;
             let state: String = row.get(1)?;
@@ -218,8 +212,9 @@ impl SwapStore {
         );
         match result {
             Ok(blob) => {
-                let arr: [u8; 8] = blob.try_into()
-                    .map_err(|_| rusqlite::Error::InvalidColumnType(0, key.clone(), rusqlite::types::Type::Blob))?;
+                let arr: [u8; 8] = blob.try_into().map_err(|_| {
+                    rusqlite::Error::InvalidColumnType(0, key.clone(), rusqlite::types::Type::Blob)
+                })?;
                 Ok(u64::from_le_bytes(arr) as usize)
             }
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(0),
@@ -255,7 +250,9 @@ mod tests {
     fn save_and_load() {
         let store = SwapStore::open_in_memory().unwrap();
         let id = [1u8; 32];
-        store.save(&id, r#"{"role":"alice","state":"key_generated"}"#).unwrap();
+        store
+            .save(&id, r#"{"role":"alice","state":"key_generated"}"#)
+            .unwrap();
         let loaded = store.load(&id).unwrap().unwrap();
         assert_eq!(loaded, r#"{"role":"alice","state":"key_generated"}"#);
     }
@@ -305,7 +302,9 @@ mod tests {
         let store = SwapStore::open_in_memory().unwrap();
         let id = [0xAA; 32];
         let secret_blob = vec![0x42u8; 60];
-        store.save_with_secret(&id, r#"{"state":"locked"}"#, Some(&secret_blob)).unwrap();
+        store
+            .save_with_secret(&id, r#"{"state":"locked"}"#, Some(&secret_blob))
+            .unwrap();
 
         let (state, secret) = store.load_with_secret(&id).unwrap().unwrap();
         assert_eq!(state, r#"{"state":"locked"}"#);
@@ -316,11 +315,16 @@ mod tests {
     fn save_with_secret_none_stores_null() {
         let store = SwapStore::open_in_memory().unwrap();
         let id = [0xBB; 32];
-        store.save_with_secret(&id, r#"{"state":"init"}"#, None).unwrap();
+        store
+            .save_with_secret(&id, r#"{"state":"init"}"#, None)
+            .unwrap();
 
         let (state, secret) = store.load_with_secret(&id).unwrap().unwrap();
         assert_eq!(state, r#"{"state":"init"}"#);
-        assert!(secret.is_none(), "secret should be None when stored as NULL");
+        assert!(
+            secret.is_none(),
+            "secret should be None when stored as NULL"
+        );
     }
 
     #[test]
@@ -362,25 +366,32 @@ mod tests {
         store.set_cursor(&id, 1).unwrap();
         store.set_cursor(&id, 5).unwrap();
         let cursor = store.get_cursor(&id).unwrap();
-        assert_eq!(cursor, 5, "set_cursor must overwrite previous value for same coord_id");
+        assert_eq!(
+            cursor, 5,
+            "set_cursor must overwrite previous value for same coord_id"
+        );
     }
 
     #[test]
     fn migration_from_old_schema_succeeds() {
         // Simulate old schema without encrypted_secret column
         let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch("
+        conn.execute_batch(
+            "
             CREATE TABLE swaps (
                 swap_id BLOB PRIMARY KEY,
                 state   TEXT NOT NULL,
                 updated INTEGER NOT NULL
             );
-        ").unwrap();
+        ",
+        )
+        .unwrap();
         // Insert a row with old schema
         conn.execute(
             "INSERT INTO swaps (swap_id, state, updated) VALUES (?1, ?2, ?3)",
             params![[1u8; 32].as_ref(), r#"{"old":"data"}"#, 12345i64],
-        ).unwrap();
+        )
+        .unwrap();
         drop(conn);
 
         // Now open via SwapStore (which runs migration)
@@ -392,17 +403,21 @@ mod tests {
         // Create old schema in a temp file
         {
             let conn = Connection::open(path_str).unwrap();
-            conn.execute_batch("
+            conn.execute_batch(
+                "
                 CREATE TABLE swaps (
                     swap_id BLOB PRIMARY KEY,
                     state   TEXT NOT NULL,
                     updated INTEGER NOT NULL
                 );
-            ").unwrap();
+            ",
+            )
+            .unwrap();
             conn.execute(
                 "INSERT INTO swaps (swap_id, state, updated) VALUES (?1, ?2, ?3)",
                 params![[1u8; 32].as_ref(), r#"{"old":"data"}"#, 12345i64],
-            ).unwrap();
+            )
+            .unwrap();
         }
 
         // Open via SwapStore to trigger migration
@@ -411,7 +426,9 @@ mod tests {
         assert_eq!(loaded, r#"{"old":"data"}"#);
 
         // Verify encrypted_secret column works after migration
-        store.save_with_secret(&[1u8; 32], r#"{"new":"data"}"#, Some(&[0x42; 60])).unwrap();
+        store
+            .save_with_secret(&[1u8; 32], r#"{"new":"data"}"#, Some(&[0x42; 60]))
+            .unwrap();
         let (state, secret) = store.load_with_secret(&[1u8; 32]).unwrap().unwrap();
         assert_eq!(state, r#"{"new":"data"}"#);
         assert_eq!(secret.unwrap().len(), 60);

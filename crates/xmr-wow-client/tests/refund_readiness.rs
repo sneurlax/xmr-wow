@@ -99,7 +99,12 @@ fn phase15_locked_states_persist_before_xmr_lock_checkpoint_and_refund_evidence_
     match refunded {
         SwapState::Refunded {
             refund_tx_hash,
-            refund_evidence: Some(RefundEvidence { chain, refund_tx_hash: evidence_hash, confirmed_height }),
+            refund_evidence:
+                Some(RefundEvidence {
+                    chain,
+                    refund_tx_hash: evidence_hash,
+                    confirmed_height,
+                }),
             ..
         } => {
             assert_eq!(refund_tx_hash, [0xCC; 32]);
@@ -134,7 +139,10 @@ fn phase15_lock_commands_fail_before_network_work_when_checkpoint_not_ready() {
 fn phase15_show_and_resume_surface_checkpoint_specific_safe_next_actions() {
     let joint_bob = make_joint_address(SwapRole::Bob);
     let bob_action = joint_bob.next_safe_action();
-    assert!(bob_action.contains("Do not run lock-wow"), "action: {bob_action}");
+    assert!(
+        bob_action.contains("Do not run lock-wow"),
+        "action: {bob_action}"
+    );
     assert!(
         bob_action.contains("before WOW lock is unsupported-for-guarantee"),
         "action: {bob_action}"
@@ -142,11 +150,17 @@ fn phase15_show_and_resume_surface_checkpoint_specific_safe_next_actions() {
 
     let joint_alice = make_joint_address(SwapRole::Alice);
     let alice_action = joint_alice.next_safe_action();
-    assert!(alice_action.contains("Wait. Bob's before WOW lock checkpoint"), "action: {alice_action}");
+    assert!(
+        alice_action.contains("Wait. Bob's before WOW lock checkpoint"),
+        "action: {alice_action}"
+    );
 
     let wow_locked_alice = joint_alice.record_wow_lock([0xAA; 32]).unwrap();
     let xmr_action = wow_locked_alice.next_safe_action();
-    assert!(xmr_action.contains("Do not run lock-xmr"), "action: {xmr_action}");
+    assert!(
+        xmr_action.contains("Do not run lock-xmr"),
+        "action: {xmr_action}"
+    );
     assert!(
         xmr_action.contains("before XMR lock is blocked"),
         "action: {xmr_action}"
@@ -163,7 +177,9 @@ fn phase15_checkpoint_status_survives_restart_style_state_reload() {
     let restored = restored.refresh_refund_readiness().unwrap();
 
     assert_eq!(
-        restored.before_wow_lock_checkpoint().expect("restored checkpoint"),
+        restored
+            .before_wow_lock_checkpoint()
+            .expect("restored checkpoint"),
         &checkpoint
     );
 }

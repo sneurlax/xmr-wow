@@ -2,9 +2,7 @@ use std::sync::Arc;
 
 use tokio::{net::TcpListener, task::JoinHandle};
 use xmr_wow_client::node_client::NodeClient;
-use xmr_wow_sharechain::{
-    merge_mining_router, Difficulty, EscrowCommitment, EscrowOp, SwapChain,
-};
+use xmr_wow_sharechain::{merge_mining_router, Difficulty, EscrowCommitment, EscrowOp, SwapChain};
 
 struct TestServer {
     url: String,
@@ -51,13 +49,22 @@ async fn node_client_coord_message_round_trip() {
     let client = NodeClient::new(&server.url);
     let swap_id = [0x22u8; 32];
 
-    let idx0 = client.publish_coord_message(&swap_id, vec![1]).await.unwrap();
+    let idx0 = client
+        .publish_coord_message(&swap_id, vec![1])
+        .await
+        .unwrap();
     assert_eq!(idx0, 0, "first message index must be 0");
 
-    let idx1 = client.publish_coord_message(&swap_id, vec![2]).await.unwrap();
+    let idx1 = client
+        .publish_coord_message(&swap_id, vec![2])
+        .await
+        .unwrap();
     assert_eq!(idx1, 1, "second message index must be 1");
 
-    let idx2 = client.publish_coord_message(&swap_id, vec![3]).await.unwrap();
+    let idx2 = client
+        .publish_coord_message(&swap_id, vec![3])
+        .await
+        .unwrap();
     assert_eq!(idx2, 2, "third message index must be 2");
 
     let (msgs, next) = client.poll_coord_messages(&swap_id, 0).await.unwrap();
@@ -90,10 +97,17 @@ async fn node_client_round_trips_against_sharechain_rpc() {
     let height = client.get_chain_height().await.unwrap();
     assert_eq!(height, 0);
 
-    let missing = client.get_swap_status(&swap_id).await.unwrap_err().to_string();
+    let missing = client
+        .get_swap_status(&swap_id)
+        .await
+        .unwrap_err()
+        .to_string();
     assert!(missing.contains("swap not found"));
 
-    client.submit_escrow_op(&sample_open_op(swap_id)).await.unwrap();
+    client
+        .submit_escrow_op(&sample_open_op(swap_id))
+        .await
+        .unwrap();
 
     let status = client.get_swap_status(&swap_id).await.unwrap();
     assert_eq!(status.state, "Open");

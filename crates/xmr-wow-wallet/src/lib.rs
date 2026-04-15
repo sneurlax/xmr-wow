@@ -13,8 +13,8 @@ pub mod error;
 pub mod rpc_transport;
 pub mod trait_def;
 pub mod view_key;
-pub mod xmr;
 pub mod wow;
+pub mod xmr;
 
 pub use error::WalletError;
 pub use rpc_transport::ReqwestTransport;
@@ -23,5 +23,5 @@ pub use trait_def::{
     ScanResult, TxHash,
 };
 pub use view_key::verify_lock;
-pub use xmr::XmrWallet;
 pub use wow::WowWallet;
+pub use xmr::XmrWallet;

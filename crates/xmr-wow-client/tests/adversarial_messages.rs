@@ -1,7 +1,7 @@
 use rand::rngs::OsRng;
 use xmr_wow_client::{
-    build_observed_refund_timing, decode_message, CoordMessage, ProtocolMessage, SwapError,
-    SwapParams, SwapRole, SwapState, unwrap_protocol_message, wrap_protocol_message,
+    build_observed_refund_timing, decode_message, unwrap_protocol_message, wrap_protocol_message,
+    CoordMessage, ProtocolMessage, SwapError, SwapParams, SwapRole, SwapState,
 };
 use xmr_wow_crypto::{AdaptorSignature, CompletedSignature, DleqProof, KeyContribution};
 
@@ -185,9 +185,7 @@ fn test_out_of_order_receive_key_from_dleq_exchange() {
     let (alice, bob) = make_alice_bob(params);
 
     let (bob_pub, bob_proof) = extract_pubkey_and_proof(&bob);
-    let alice_dleq = alice
-        .receive_counterparty_key(bob_pub, &bob_proof)
-        .unwrap();
+    let alice_dleq = alice.receive_counterparty_key(bob_pub, &bob_proof).unwrap();
 
     let err = alice_dleq
         .receive_counterparty_key(bob_pub, &bob_proof)
@@ -204,10 +202,7 @@ fn test_out_of_order_record_xmr_lock_from_keygen() {
     let params = sample_params();
     let (alice, _) = SwapState::generate(SwapRole::Alice, params, &mut OsRng);
 
-    let err = alice
-        .record_xmr_lock([0xAA; 32])
-        .unwrap_err()
-        .to_string();
+    let err = alice.record_xmr_lock([0xAA; 32]).unwrap_err().to_string();
     assert!(
         err.contains("invalid state transition"),
         "expected InvalidTransition from KeyGeneration, got: {err}"
@@ -221,9 +216,7 @@ fn test_replayed_message_second_key_exchange_fails() {
 
     let (bob_pub, bob_proof) = extract_pubkey_and_proof(&bob);
 
-    let alice_dleq = alice
-        .receive_counterparty_key(bob_pub, &bob_proof)
-        .unwrap();
+    let alice_dleq = alice.receive_counterparty_key(bob_pub, &bob_proof).unwrap();
 
     let err = alice_dleq
         .receive_counterparty_key(bob_pub, &bob_proof)
@@ -314,12 +307,18 @@ fn test_wrong_topic_structural_prevention() {
     // Unknown variants are rejected at deserialization; the closed enum is the enforcement.
     let wrong_topic_json = r#"{"UnknownTopic":{"data":"test"}}"#;
     let bad_result: Result<ProtocolMessage, _> = decode_message(wrong_topic_json);
-    assert!(bad_result.is_err(), "unknown topic rejected at deserialization layer");
+    assert!(
+        bad_result.is_err(),
+        "unknown topic rejected at deserialization layer"
+    );
 
     // A misspelled valid variant also fails
     let misspelled_json = r#"{"AdaptorPresig":{"pre_sig":[0;32]}}"#;
     let bad_result2: Result<ProtocolMessage, _> = decode_message(misspelled_json);
-    assert!(bad_result2.is_err(), "misspelled topic rejected at deserialization layer");
+    assert!(
+        bad_result2.is_err(),
+        "misspelled topic rejected at deserialization layer"
+    );
 }
 
 // CoordMessage envelope tests document which layer is responsible for each defense:
@@ -469,10 +468,10 @@ fn coord_envelope_replayed_all_variants() {
             result_replayed.err()
         );
 
-        let orig_json = serde_json::to_string(&result_original.unwrap())
-            .expect("serialization must not fail");
-        let replay_json = serde_json::to_string(&result_replayed.unwrap())
-            .expect("serialization must not fail");
+        let orig_json =
+            serde_json::to_string(&result_original.unwrap()).expect("serialization must not fail");
+        let replay_json =
+            serde_json::to_string(&result_replayed.unwrap()).expect("serialization must not fail");
         assert_eq!(
             orig_json, replay_json,
             "[{variant_name}] original and replayed envelopes must decode identically"
@@ -513,9 +512,9 @@ fn coord_envelope_replayed_init_state_machine_rejects_second_application() {
     };
 
     let err = match msg_second {
-        ProtocolMessage::Init { pubkey, proof, .. } => {
-            alice_dleq.receive_counterparty_key(pubkey, &proof).unwrap_err()
-        }
+        ProtocolMessage::Init { pubkey, proof, .. } => alice_dleq
+            .receive_counterparty_key(pubkey, &proof)
+            .unwrap_err(),
         _ => panic!("expected Init variant"),
     };
     assert!(

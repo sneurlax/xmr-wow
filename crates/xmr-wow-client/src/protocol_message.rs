@@ -104,8 +104,8 @@ pub fn decode_message<T: DeserializeOwned>(encoded: &str) -> Result<T, SwapError
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rand::rngs::OsRng;
     use crate::swap_state::RefundTimingSource;
+    use rand::rngs::OsRng;
     use xmr_wow_crypto::{DleqProof, KeyContribution};
 
     fn make_test_init() -> ProtocolMessage {
@@ -261,12 +261,8 @@ mod tests {
         let decoded_response: ProtocolMessage = decode_message(&encoded_response).unwrap();
         match decoded_response {
             ProtocolMessage::Response {
-                bob_refund_address,
-                ..
-            } => assert_eq!(
-                bob_refund_address.as_deref(),
-                Some("bob-refund-address")
-            ),
+                bob_refund_address, ..
+            } => assert_eq!(bob_refund_address.as_deref(), Some("bob-refund-address")),
             _ => panic!("wrong response variant"),
         }
     }

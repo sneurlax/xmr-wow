@@ -1,15 +1,13 @@
 use std::sync::{Arc, Mutex};
 
+use rand::rngs::OsRng;
 use tokio::{net::TcpListener, task::JoinHandle};
 use xmr_wow_client::{
-    build_observed_refund_timing,
-    wrap_protocol_message, unwrap_protocol_message,
-    SharechainMessenger, SwapMessenger, SwapStore,
-    ProtocolMessage, SwapParams, SwapRole, SwapState,
+    build_observed_refund_timing, unwrap_protocol_message, wrap_protocol_message, ProtocolMessage,
+    SharechainMessenger, SwapMessenger, SwapParams, SwapRole, SwapState, SwapStore,
 };
 use xmr_wow_crypto::keccak256;
 use xmr_wow_sharechain::{merge_mining_router, Difficulty, SwapChain};
-use rand::rngs::OsRng;
 
 struct TestServer {
     url: String,
@@ -50,17 +48,13 @@ fn sample_params() -> SwapParams {
 }
 
 /// Receive exactly the next pending message. Panics if no message is available.
-async fn receive_next(
-    messenger: &SharechainMessenger,
-    coord_id: &[u8; 32],
-) -> ProtocolMessage {
+async fn receive_next(messenger: &SharechainMessenger, coord_id: &[u8; 32]) -> ProtocolMessage {
     let coord = messenger
         .receive(coord_id)
         .await
         .expect("receive must not error")
         .expect("a message must be available");
-    unwrap_protocol_message(&coord)
-        .expect("unwrap_protocol_message must succeed")
+    unwrap_protocol_message(&coord).expect("unwrap_protocol_message must succeed")
 }
 
 /// Full sharechain swap integration test: both Alice and Bob reach SwapState::Complete
@@ -97,11 +91,19 @@ async fn sharechain_transport_full_swap_init_through_claim() {
 
     // Extract pubkeys and proofs before consuming states.
     let (alice_pub, alice_proof) = match &alice {
-        SwapState::KeyGeneration { my_pubkey, my_proof, .. } => (*my_pubkey, my_proof.clone()),
+        SwapState::KeyGeneration {
+            my_pubkey,
+            my_proof,
+            ..
+        } => (*my_pubkey, my_proof.clone()),
         _ => panic!("expected Alice in KeyGeneration"),
     };
     let (bob_pub, bob_proof) = match &bob {
-        SwapState::KeyGeneration { my_pubkey, my_proof, .. } => (*my_pubkey, my_proof.clone()),
+        SwapState::KeyGeneration {
+            my_pubkey,
+            my_proof,
+            ..
+        } => (*my_pubkey, my_proof.clone()),
         _ => panic!("expected Bob in KeyGeneration"),
     };
 
@@ -122,10 +124,22 @@ async fn sharechain_transport_full_swap_init_through_claim() {
     let bob_sender_store = Arc::new(Mutex::new(SwapStore::open_in_memory().unwrap()));
     let alice_reader_store = Arc::new(Mutex::new(SwapStore::open_in_memory().unwrap()));
 
-    let alice_sender = SharechainMessenger { node_url: server.url.clone(), store: alice_sender_store };
-    let bob_reader = SharechainMessenger { node_url: server.url.clone(), store: bob_reader_store };
-    let bob_sender = SharechainMessenger { node_url: server.url.clone(), store: bob_sender_store };
-    let alice_reader = SharechainMessenger { node_url: server.url.clone(), store: alice_reader_store };
+    let alice_sender = SharechainMessenger {
+        node_url: server.url.clone(),
+        store: alice_sender_store,
+    };
+    let bob_reader = SharechainMessenger {
+        node_url: server.url.clone(),
+        store: bob_reader_store,
+    };
+    let bob_sender = SharechainMessenger {
+        node_url: server.url.clone(),
+        store: bob_sender_store,
+    };
+    let alice_reader = SharechainMessenger {
+        node_url: server.url.clone(),
+        store: alice_reader_store,
+    };
 
     // 5. Alice sends Init; Bob receives.
     let init_msg = ProtocolMessage::Init {
@@ -139,14 +153,23 @@ async fn sharechain_transport_full_swap_init_through_claim() {
         alice_refund_address: params_for_init.alice_refund_address.clone(),
     };
     let init_coord = wrap_protocol_message(alice_channel, &init_msg).unwrap();
-    alice_sender.send(init_coord).await.expect("Alice sends Init");
+    alice_sender
+        .send(init_coord)
+        .await
+        .expect("Alice sends Init");
 
     let bob_init = receive_next(&bob_reader, &alice_channel).await;
     let (received_alice_pub, received_alice_proof) = match bob_init {
         ProtocolMessage::Init { pubkey, proof, .. } => (pubkey, proof),
-        other => panic!("Bob expected Init, got {:?}", std::mem::discriminant(&other)),
+        other => panic!(
+            "Bob expected Init, got {:?}",
+            std::mem::discriminant(&other)
+        ),
     };
-    assert_eq!(received_alice_pub, alice_pub, "Bob must receive Alice's pubkey via sharechain");
+    assert_eq!(
+        received_alice_pub, alice_pub,
+        "Bob must receive Alice's pubkey via sharechain"
+    );
 
     // 6. Bob sends Response; Alice receives.
     let response_msg = ProtocolMessage::Response {
@@ -155,14 +178,23 @@ async fn sharechain_transport_full_swap_init_through_claim() {
         bob_refund_address: None,
     };
     let response_coord = wrap_protocol_message(bob_channel, &response_msg).unwrap();
-    bob_sender.send(response_coord).await.expect("Bob sends Response");
+    bob_sender
+        .send(response_coord)
+        .await
+        .expect("Bob sends Response");
 
     let alice_response = receive_next(&alice_reader, &bob_channel).await;
     let received_bob_pub = match alice_response {
         ProtocolMessage::Response { pubkey, .. } => pubkey,
-        other => panic!("Alice expected Response, got {:?}", std::mem::discriminant(&other)),
+        other => panic!(
+            "Alice expected Response, got {:?}",
+            std::mem::discriminant(&other)
+        ),
     };
-    assert_eq!(received_bob_pub, bob_pub, "Alice must receive Bob's pubkey via sharechain");
+    assert_eq!(
+        received_bob_pub, bob_pub,
+        "Alice must receive Bob's pubkey via sharechain"
+    );
 
     // 7. Both advance to JointAddress 
     let bob_joint = bob
@@ -186,7 +218,10 @@ async fn sharechain_transport_full_swap_init_through_claim() {
         SwapState::JointAddress { addresses, .. } => addresses.swap_id,
         _ => panic!("expected Bob in JointAddress"),
     };
-    assert_eq!(alice_swap_id, bob_swap_id, "Alice and Bob must agree on swap_id");
+    assert_eq!(
+        alice_swap_id, bob_swap_id,
+        "Alice and Bob must agree on swap_id"
+    );
 
     // 9. Lock funds 
     // Bob locks WOW first (WOW-first lock order).
@@ -196,34 +231,54 @@ async fn sharechain_transport_full_swap_init_through_claim() {
 
     // Extract adaptor pre-sigs from locked states.
     let alice_pre_sig = match &alice_xmr_locked {
-        SwapState::XmrLocked { my_adaptor_pre_sig, .. } => my_adaptor_pre_sig.clone(),
+        SwapState::XmrLocked {
+            my_adaptor_pre_sig, ..
+        } => my_adaptor_pre_sig.clone(),
         _ => panic!("expected Alice in XmrLocked"),
     };
     let bob_pre_sig = match &bob_wow_locked {
-        SwapState::WowLocked { my_adaptor_pre_sig, .. } => my_adaptor_pre_sig.clone(),
+        SwapState::WowLocked {
+            my_adaptor_pre_sig, ..
+        } => my_adaptor_pre_sig.clone(),
         _ => panic!("expected Bob in WowLocked"),
     };
 
     // 10. Alice sends her AdaptorPreSig; Bob receives.
-    let alice_presig_msg = ProtocolMessage::AdaptorPreSig { pre_sig: alice_pre_sig };
+    let alice_presig_msg = ProtocolMessage::AdaptorPreSig {
+        pre_sig: alice_pre_sig,
+    };
     let alice_presig_coord = wrap_protocol_message(alice_channel, &alice_presig_msg).unwrap();
-    alice_sender.send(alice_presig_coord).await.expect("Alice sends AdaptorPreSig");
+    alice_sender
+        .send(alice_presig_coord)
+        .await
+        .expect("Alice sends AdaptorPreSig");
 
     let bob_got_alice_presig = receive_next(&bob_reader, &alice_channel).await;
     let alice_pre_sig_for_bob = match bob_got_alice_presig {
         ProtocolMessage::AdaptorPreSig { pre_sig } => pre_sig,
-        other => panic!("Bob expected AdaptorPreSig, got {:?}", std::mem::discriminant(&other)),
+        other => panic!(
+            "Bob expected AdaptorPreSig, got {:?}",
+            std::mem::discriminant(&other)
+        ),
     };
 
     // 11. Bob sends his AdaptorPreSig; Alice receives.
-    let bob_presig_msg = ProtocolMessage::AdaptorPreSig { pre_sig: bob_pre_sig };
+    let bob_presig_msg = ProtocolMessage::AdaptorPreSig {
+        pre_sig: bob_pre_sig,
+    };
     let bob_presig_coord = wrap_protocol_message(bob_channel, &bob_presig_msg).unwrap();
-    bob_sender.send(bob_presig_coord).await.expect("Bob sends AdaptorPreSig");
+    bob_sender
+        .send(bob_presig_coord)
+        .await
+        .expect("Bob sends AdaptorPreSig");
 
     let alice_got_bob_presig = receive_next(&alice_reader, &bob_channel).await;
     let bob_pre_sig_for_alice = match alice_got_bob_presig {
         ProtocolMessage::AdaptorPreSig { pre_sig } => pre_sig,
-        other => panic!("Alice expected AdaptorPreSig, got {:?}", std::mem::discriminant(&other)),
+        other => panic!(
+            "Alice expected AdaptorPreSig, got {:?}",
+            std::mem::discriminant(&other)
+        ),
     };
 
     // 12. Apply counterparty pre-sigs 
@@ -241,20 +296,29 @@ async fn sharechain_transport_full_swap_init_through_claim() {
         .expect("Bob's secret must be a valid scalar");
 
     let bob_own_pre_sig = match &bob_with_presig {
-        SwapState::WowLocked { my_adaptor_pre_sig, .. } => my_adaptor_pre_sig.clone(),
+        SwapState::WowLocked {
+            my_adaptor_pre_sig, ..
+        } => my_adaptor_pre_sig.clone(),
         _ => panic!("expected Bob in WowLocked"),
     };
     let bob_completed_sig = bob_own_pre_sig
         .complete(&bob_secret_scalar)
         .expect("Bob must complete his pre-sig");
 
-    let bob_claim_msg = ProtocolMessage::ClaimProof { completed_sig: bob_completed_sig };
+    let bob_claim_msg = ProtocolMessage::ClaimProof {
+        completed_sig: bob_completed_sig,
+    };
     let bob_claim_coord = wrap_protocol_message(bob_channel, &bob_claim_msg).unwrap();
-    bob_sender.send(bob_claim_coord).await.expect("Bob sends ClaimProof");
+    bob_sender
+        .send(bob_claim_coord)
+        .await
+        .expect("Bob sends ClaimProof");
 
     // Extract Alice's data before consuming alice_with_presig.
     let alice_own_pre_sig = match &alice_with_presig {
-        SwapState::XmrLocked { my_adaptor_pre_sig, .. } => my_adaptor_pre_sig.clone(),
+        SwapState::XmrLocked {
+            my_adaptor_pre_sig, ..
+        } => my_adaptor_pre_sig.clone(),
         _ => panic!("expected Alice in XmrLocked"),
     };
     let alice_secret_scalar = {
@@ -270,7 +334,10 @@ async fn sharechain_transport_full_swap_init_through_claim() {
     let alice_got_claim = receive_next(&alice_reader, &bob_channel).await;
     let bob_completed_sig_for_alice = match alice_got_claim {
         ProtocolMessage::ClaimProof { completed_sig } => completed_sig,
-        other => panic!("Alice expected ClaimProof, got {:?}", std::mem::discriminant(&other)),
+        other => panic!(
+            "Alice expected ClaimProof, got {:?}",
+            std::mem::discriminant(&other)
+        ),
     };
 
     // Alice extracts Bob's secret and reaches Complete.
@@ -288,19 +355,30 @@ async fn sharechain_transport_full_swap_init_through_claim() {
         .complete(&alice_secret_scalar)
         .expect("Alice must complete her pre-sig");
 
-    let alice_claim_msg = ProtocolMessage::ClaimProof { completed_sig: alice_completed_sig };
+    let alice_claim_msg = ProtocolMessage::ClaimProof {
+        completed_sig: alice_completed_sig,
+    };
     let alice_claim_coord = wrap_protocol_message(alice_channel, &alice_claim_msg).unwrap();
-    alice_sender.send(alice_claim_coord).await.expect("Alice sends ClaimProof");
+    alice_sender
+        .send(alice_claim_coord)
+        .await
+        .expect("Alice sends ClaimProof");
 
     let bob_got_alice_claim = receive_next(&bob_reader, &alice_channel).await;
     let alice_completed_sig_for_bob = match bob_got_alice_claim {
         ProtocolMessage::ClaimProof { completed_sig } => completed_sig,
-        other => panic!("Bob expected ClaimProof, got {:?}", std::mem::discriminant(&other)),
+        other => panic!(
+            "Bob expected ClaimProof, got {:?}",
+            std::mem::discriminant(&other)
+        ),
     };
 
     // Bob extracts Alice's secret and reaches Complete.
     let alice_pre_sig_in_bob = match &bob_with_presig {
-        SwapState::WowLocked { counterparty_pre_sig: Some(pre_sig), .. } => pre_sig.clone(),
+        SwapState::WowLocked {
+            counterparty_pre_sig: Some(pre_sig),
+            ..
+        } => pre_sig.clone(),
         _ => panic!("expected WowLocked with counterparty_pre_sig set"),
     };
     let alice_secret_extracted = alice_pre_sig_in_bob
@@ -331,11 +409,23 @@ async fn sharechain_transport_full_swap_init_through_claim() {
     );
 
     assert!(
-        matches!(alice_complete, SwapState::Complete { role: SwapRole::Alice, .. }),
+        matches!(
+            alice_complete,
+            SwapState::Complete {
+                role: SwapRole::Alice,
+                ..
+            }
+        ),
         "Alice's Complete state must have Alice role"
     );
     assert!(
-        matches!(bob_complete, SwapState::Complete { role: SwapRole::Bob, .. }),
+        matches!(
+            bob_complete,
+            SwapState::Complete {
+                role: SwapRole::Bob,
+                ..
+            }
+        ),
         "Bob's Complete state must have Bob role"
     );
 

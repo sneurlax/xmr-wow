@@ -139,15 +139,13 @@ fn oob_transport_full_swap_init_through_claim() {
     // -----------------------------------------------------------------------
     let bob_pre_sig = match &bob {
         SwapState::WowLocked {
-            my_adaptor_pre_sig,
-            ..
+            my_adaptor_pre_sig, ..
         } => my_adaptor_pre_sig.clone(),
         _ => panic!("expected WowLocked after record_wow_lock"),
     };
     let alice_pre_sig = match &alice {
         SwapState::XmrLocked {
-            my_adaptor_pre_sig,
-            ..
+            my_adaptor_pre_sig, ..
         } => my_adaptor_pre_sig.clone(),
         _ => panic!("expected XmrLocked after record_xmr_lock"),
     };
@@ -184,7 +182,13 @@ fn oob_transport_full_swap_init_through_claim() {
         .expect("Alice must complete with Bob's completed sig");
 
     assert!(
-        matches!(&alice_complete, SwapState::Complete { role: SwapRole::Alice, .. }),
+        matches!(
+            &alice_complete,
+            SwapState::Complete {
+                role: SwapRole::Alice,
+                ..
+            }
+        ),
         "Alice must reach Complete state with Alice role"
     );
     assert_eq!(
@@ -214,7 +218,9 @@ fn oob_transport_full_swap_init_through_claim() {
         } => cp_pre_sig
             .extract_secret(&alice_completed_sig)
             .expect("Bob must extract Alice's secret from her completed sig"),
-        _ => panic!("expected WowLocked with counterparty_pre_sig after receive_counterparty_pre_sig"),
+        _ => panic!(
+            "expected WowLocked with counterparty_pre_sig after receive_counterparty_pre_sig"
+        ),
     };
 
     assert_eq!(
@@ -229,7 +235,13 @@ fn oob_transport_full_swap_init_through_claim() {
         .expect("Bob must complete with Alice's revealed secret");
 
     assert!(
-        matches!(&bob_complete, SwapState::Complete { role: SwapRole::Bob, .. }),
+        matches!(
+            &bob_complete,
+            SwapState::Complete {
+                role: SwapRole::Bob,
+                ..
+            }
+        ),
         "Bob must reach Complete state with Bob role"
     );
 
@@ -264,5 +276,4 @@ fn oob_transport_full_swap_init_through_claim() {
         0,
         "OobMessenger must be a ZST; no sharechain fields"
     );
-
 }

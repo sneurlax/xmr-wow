@@ -28,7 +28,9 @@ pub async fn verify_lock<W: CryptoNoteWallet>(
     expected_amount: u64,
     from_height: u64,
 ) -> Result<ScanResult, WalletError> {
-    let results = wallet.scan(joint_spend_point, view_scalar, from_height).await?;
+    let results = wallet
+        .scan(joint_spend_point, view_scalar, from_height)
+        .await?;
 
     if results.is_empty() {
         return Err(WalletError::NoOutputsFound);
