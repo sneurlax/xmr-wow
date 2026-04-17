@@ -69,7 +69,7 @@ fn test_polyseed_to_scalar_known_answer() {
     // guaranteed by construction: we assert it explicitly for documentation.
     let canonical = Scalar::from_canonical_bytes(bytes);
     assert!(
-        canonical.into_option().is_some() || true, // mod_order always canonical
+        canonical.into_option().is_some(),
         "polyseed spend scalar should be canonical (< group order)"
     );
 }

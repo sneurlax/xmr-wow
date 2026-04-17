@@ -63,3 +63,4 @@ path = "tests/oob_isolation.rs"
 
 [dev-dependencies]
 axum = { workspace = true }
+xmr-wow-test-utils = { path = "../xmr-wow-test-utils" }

@@ -4,6 +4,7 @@ use xmr_wow_client::{
     CoordMessage, ProtocolMessage, SwapError, SwapParams, SwapRole, SwapState,
 };
 use xmr_wow_crypto::{AdaptorSignature, CompletedSignature, DleqProof, KeyContribution};
+use xmr_wow_test_utils::assert_hostile_rejection;
 
 fn sample_params() -> SwapParams {
     let (refund_timing, xmr_refund_delay_seconds, wow_refund_delay_seconds) =
@@ -72,20 +73,22 @@ fn advance_to_xmr_locked() -> (SwapState, SwapState) {
 #[test]
 fn test_malformed_message_rejected() {
     let result: Result<ProtocolMessage, SwapError> = decode_message("garbage_bytes_not_valid");
-    let err = result.unwrap_err().to_string();
-    assert!(
-        err.contains("missing protocol prefix"),
-        "expected prefix error, got: {err}"
+    assert_hostile_rejection!(
+        result,
+        stage = "message_decode",
+        reason = "missing protocol prefix",
+        strategy = "unknown"
     );
 }
 
 #[test]
 fn test_truncated_base64_rejected() {
     let result: Result<ProtocolMessage, SwapError> = decode_message("xmrwow1:!!!not-base64!!!");
-    let err = result.unwrap_err().to_string();
-    assert!(
-        err.contains("base64 decode failed"),
-        "expected base64 error, got: {err}"
+    assert_hostile_rejection!(
+        result,
+        stage = "message_decode",
+        reason = "base64 decode failed",
+        strategy = "unknown"
     );
 }
 
@@ -113,13 +116,12 @@ fn test_wrong_type_at_wrong_step_pre_sig_on_keygen() {
         s_prime: [0xBB; 32],
     };
 
-    let err = alice
-        .receive_counterparty_pre_sig(dummy_pre_sig)
-        .unwrap_err()
-        .to_string();
-    assert!(
-        err.contains("invalid state transition"),
-        "expected InvalidTransition, got: {err}"
+    let result = alice.receive_counterparty_pre_sig(dummy_pre_sig);
+    assert_hostile_rejection!(
+        result,
+        stage = "state_transition",
+        reason = "invalid state transition",
+        strategy = "unknown"
     );
 }
 

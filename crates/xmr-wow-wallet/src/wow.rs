@@ -880,8 +880,7 @@ impl WowWallet {
         Ok(unspent)
     }
 
-    /// Scan sender outputs in ascending block order and stop once enough mature,
-    /// unspent funds exist to satisfy a lock attempt.
+    #[allow(clippy::too_many_arguments)]
     async fn scan_lock_ready_outputs(
         client: &reqwest::Client,
         daemon_url: &str,
@@ -1025,8 +1024,7 @@ impl WowWallet {
         Self::filter_unspent(client, daemon_url, sender_spend, mature_outputs).await
     }
 
-    /// Scan joint-address outputs in ascending block order and stop once enough
-    /// mature, unspent funds exist to satisfy a sweep of the known swap amount.
+    #[allow(clippy::too_many_arguments)]
     async fn scan_sweep_ready_outputs(
         client: &reqwest::Client,
         daemon_url: &str,
@@ -1654,8 +1652,8 @@ impl CryptoNoteWallet for WowWallet {
         }))
         .map_err(|e| WalletError::RpcRequest(format!("serialize get_transactions: {}", e)))?;
 
-        // Phase 38.1 iteration 10: bypass reqwest/hyper entirely for this
-        // endpoint so Shadow cannot fail inside reqwest's body decoder.
+        // Bypass reqwest/hyper entirely for this endpoint so Shadow cannot
+        // fail inside reqwest's body decoder.
         let body_bytes = crate::rpc_transport::post_json_http1_identity_raw(
             &self.daemon_url,
             "get_transactions",

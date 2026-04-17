@@ -193,7 +193,7 @@ mod tests {
     }
 
     #[test]
-    fn phase13_init_message_round_trips_refund_timing_observation() {
+    fn init_message_round_trips_refund_timing_observation() {
         let msg = make_test_init();
         let encoded = encode_message(&msg);
         let decoded: ProtocolMessage = decode_message(&encoded).unwrap();
@@ -206,7 +206,7 @@ mod tests {
                 ..
             } => {
                 let refund_timing =
-                    refund_timing.expect("Phase 13 init should carry refund timing");
+                    refund_timing.expect("init message should carry refund timing");
                 assert_eq!(
                     refund_timing.xmr_refund_delay_seconds,
                     xmr_refund_delay_seconds
@@ -249,7 +249,7 @@ mod tests {
     }
 
     #[test]
-    fn phase15_init_and_response_messages_round_trip_refund_destinations() {
+    fn init_and_response_messages_round_trip_refund_destinations() {
         let init = make_test_init();
         let encoded_init = encode_message(&init);
         let decoded_init: ProtocolMessage = decode_message(&encoded_init).unwrap();
@@ -300,6 +300,36 @@ mod tests {
             ProtocolMessage::AdaptorPreSig { pre_sig: d } => {
                 assert_eq!(d.r_plus_t, [0xAA; 32]);
                 assert_eq!(d.s_prime, [0xBB; 32]);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn vts_refund_artifact_round_trips() {
+        use xmr_wow_wallet::{RefundArtifact, RefundChain};
+        let secret = curve25519_dalek::scalar::Scalar::from(7u64).to_bytes();
+        let artifact: PersistedRefundArtifact = RefundArtifact::new_with_bits(
+            RefundChain::Wow,
+            [0x42; 32],
+            "bob-refund-address",
+            1,
+            &secret,
+            10,
+            512,
+        )
+        .expect("test VTS artifact should build")
+        .into();
+        let msg = ProtocolMessage::RefundArtifact {
+            artifact: artifact.clone(),
+        };
+        let encoded = encode_message(&msg);
+        let decoded: ProtocolMessage = decode_message(&encoded).unwrap();
+        match decoded {
+            ProtocolMessage::RefundArtifact {
+                artifact: decoded_artifact,
+            } => {
+                assert_eq!(decoded_artifact, artifact);
             }
             _ => panic!("wrong variant"),
         }

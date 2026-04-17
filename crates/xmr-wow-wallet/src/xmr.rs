@@ -702,8 +702,7 @@ impl XmrWallet {
         Ok(unspent)
     }
 
-    /// Scan sender outputs in ascending block order and stop once enough mature,
-    /// unspent funds exist to satisfy a lock attempt.
+    #[allow(clippy::too_many_arguments)]
     async fn scan_lock_ready_outputs(
         client: &reqwest::Client,
         daemon_url: &str,
@@ -1258,8 +1257,8 @@ impl CryptoNoteWallet for XmrWallet {
         }))
         .map_err(|e| WalletError::RpcRequest(format!("serialize get_transactions: {}", e)))?;
 
-        // Phase 38.1 iteration 10: bypass reqwest/hyper entirely for this
-        // endpoint so Shadow cannot fail inside reqwest's body decoder.
+        // Bypass reqwest/hyper entirely for this endpoint so Shadow cannot
+        // fail inside reqwest's body decoder.
         let body_bytes = crate::rpc_transport::post_json_http1_identity_raw(
             &self.daemon_url,
             "get_transactions",
@@ -1532,8 +1531,9 @@ mod tests {
 
     #[test]
     fn test_xmr_fee_rate_sanity_bound() {
+        let bound = XMR_FEE_RATE_SANITY_BOUND;
         assert!(
-            XMR_FEE_RATE_SANITY_BOUND >= 1_000_000,
+            bound >= 1_000_000,
             "XMR fee sanity bound must stay well above the old 100k ceiling"
         );
     }

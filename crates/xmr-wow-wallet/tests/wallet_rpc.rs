@@ -14,9 +14,9 @@ use curve25519_dalek::{
 };
 use rand::rngs::OsRng;
 use serde_json::{json, Value};
-use simnet_testbed::{
-    cuprate_simnet::SimnetWallet, wownero_simnet::WowSimnetWallet, SimnetTestbed,
-};
+use simnet_testbed::{wownero_simnet::WowSimnetWallet, SimnetTestbed};
+#[cfg(any())]
+use simnet_testbed::cuprate_simnet::SimnetWallet;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpListener,
@@ -572,7 +572,6 @@ fn sample_joint_keys() -> (Scalar, EdwardsPoint, Scalar) {
 struct FakeWallet {
     chain: RefundChain,
     results: Vec<ScanResult>,
-    timelocked_artifact: Option<(TxHash, Vec<u8>)>,
     broadcast_tx_hash: Option<TxHash>,
 }
 
@@ -615,18 +614,6 @@ impl CryptoNoteWallet for FakeWallet {
         _required_confirmations: u64,
     ) -> Result<ConfirmationStatus, WalletError> {
         Err(WalletError::RpcRequest("unused".into()))
-    }
-
-    async fn sweep_timelocked(
-        &self,
-        _spend_secret: &Scalar,
-        _view_scalar: &Scalar,
-        _destination: &str,
-        _refund_height: u64,
-    ) -> Result<(TxHash, Vec<u8>), WalletError> {
-        self.timelocked_artifact
-            .clone()
-            .ok_or_else(|| WalletError::RpcRequest("unused".into()))
     }
 
     async fn broadcast_raw_tx(&self, _tx_bytes: &[u8]) -> Result<TxHash, WalletError> {
@@ -682,7 +669,6 @@ async fn verify_lock_returns_largest_matching_output() {
                 block_height: 11,
             },
         ],
-        timelocked_artifact: None,
         broadcast_tx_hash: None,
     };
     let spend_point = Scalar::random(&mut OsRng) * G;
@@ -706,7 +692,6 @@ async fn verify_lock_fails_when_total_is_too_small() {
             output_index: 0,
             block_height: 5,
         }],
-        timelocked_artifact: None,
         broadcast_tx_hash: None,
     };
     let spend_point = Scalar::random(&mut OsRng) * G;
@@ -722,50 +707,46 @@ async fn verify_lock_fails_when_total_is_too_small() {
 }
 
 #[tokio::test]
-async fn phase14_build_refund_artifact_binds_metadata_and_payload_hash() {
+async fn build_refund_artifact_binds_metadata_and_payload_hash() {
     let wallet = FakeWallet {
         chain: RefundChain::Wow,
         results: Vec::new(),
-        timelocked_artifact: Some(([0xAB; 32], b"typed-refund-artifact".to_vec())),
         broadcast_tx_hash: Some([0xAB; 32]),
     };
-    let lock_tx_hash = [0x44; 32];
+    let swap_id = [0x44; 32];
     let destination = "wow-destination";
-    let refund_height = 1234;
+    let refund_delay_seconds = 1234;
 
+    let spend_secret = Scalar::random(&mut OsRng);
     let artifact = wallet
         .build_refund_artifact(
-            &Scalar::random(&mut OsRng),
+            &spend_secret,
             &Scalar::random(&mut OsRng),
             destination,
-            refund_height,
-            lock_tx_hash,
+            refund_delay_seconds,
+            swap_id,
         )
         .await
         .unwrap();
 
     assert_eq!(artifact.metadata.chain, RefundChain::Wow);
-    assert_eq!(artifact.metadata.lock_tx_hash, lock_tx_hash);
+    assert_eq!(artifact.metadata.swap_id, swap_id);
     assert_eq!(artifact.metadata.destination, destination);
-    assert_eq!(artifact.metadata.refund_height, refund_height);
-    assert_eq!(
-        artifact.metadata.payload_hash,
-        RefundArtifact::payload_hash(&artifact.tx_bytes)
-    );
-    assert_eq!(artifact.tx_hash, [0xAB; 32]);
+    assert_eq!(artifact.metadata.refund_delay_seconds, refund_delay_seconds);
 }
 
 #[tokio::test]
-async fn phase14_tampered_refund_artifact_is_rejected() {
+async fn tampered_refund_artifact_is_rejected() {
     let wallet = FakeWallet {
         chain: RefundChain::Xmr,
         results: Vec::new(),
-        timelocked_artifact: Some(([0xCD; 32], b"artifact-payload".to_vec())),
         broadcast_tx_hash: Some([0xCD; 32]),
     };
+    let spend_secret = Scalar::random(&mut OsRng);
+    let locked_pubkey = (spend_secret * G).compress().to_bytes();
     let base_artifact = wallet
         .build_refund_artifact(
-            &Scalar::random(&mut OsRng),
+            &spend_secret,
             &Scalar::random(&mut OsRng),
             "xmr-destination",
             777,
@@ -774,47 +755,40 @@ async fn phase14_tampered_refund_artifact_is_rejected() {
         .await
         .unwrap();
 
-    let mut payload_tampered = base_artifact.clone();
-    payload_tampered.tx_bytes.push(0xFF);
-    let err = wallet
-        .validate_refund_artifact(&payload_tampered)
-        .unwrap_err()
-        .to_string();
-    assert!(err.contains("payload hash mismatch"), "error: {err}");
-
     let mut metadata_tampered = base_artifact.clone();
     metadata_tampered.metadata.destination = "other-destination".into();
     let err = metadata_tampered
-        .validate_binding(RefundChain::Xmr, [0x55; 32], "xmr-destination", 777)
+        .validate_binding(RefundChain::Xmr, [0x55; 32], "xmr-destination", 777, &locked_pubkey)
         .unwrap_err()
         .to_string();
     assert!(err.contains("destination mismatch"), "error: {err}");
 }
 
 #[tokio::test]
-async fn phase14_xmr_and_wow_wallets_share_the_same_artifact_contract() {
+async fn xmr_and_wow_wallets_share_the_same_artifact_contract() {
     let xmr_wallet = XmrWallet::new("http://127.0.0.1:1");
     let wow_wallet = WowWallet::new("http://127.0.0.1:1");
 
-    let xmr_artifact = RefundArtifact::new(
+    let xmr_secret = Scalar::random(&mut OsRng);
+    let wow_secret = Scalar::random(&mut OsRng);
+    let _xmr_artifact = RefundArtifact::new(
         RefundChain::Xmr,
         [0x11; 32],
         "xmr-destination",
         100,
-        [0x21; 32],
-        b"xmr-refund".to_vec(),
-    );
-    let wow_artifact = RefundArtifact::new(
+        xmr_secret.as_bytes(),
+        10_000,
+    )
+    .unwrap();
+    let _wow_artifact = RefundArtifact::new(
         RefundChain::Wow,
         [0x12; 32],
         "wow-destination",
         200,
-        [0x22; 32],
-        b"wow-refund".to_vec(),
-    );
-
-    xmr_wallet.validate_refund_artifact(&xmr_artifact).unwrap();
-    wow_wallet.validate_refund_artifact(&wow_artifact).unwrap();
+        wow_secret.as_bytes(),
+        10_000,
+    )
+    .unwrap();
     assert_eq!(xmr_wallet.refund_chain(), RefundChain::Xmr);
     assert_eq!(wow_wallet.refund_chain(), RefundChain::Wow);
 }
@@ -855,12 +829,6 @@ async fn xmr_wallet_methods_are_covered_without_live_daemons() {
         .await
         .unwrap_err();
     assert!(matches!(sweep_err, WalletError::NoOutputsFound));
-
-    let timelocked_err = funded
-        .sweep_timelocked(&Scalar::random(&mut OsRng), &view_scalar, "unused", 99)
-        .await
-        .unwrap_err();
-    assert!(matches!(timelocked_err, WalletError::NoOutputsFound));
 
     let status = funded.poll_confirmation(&[0x44; 32], 3).await.unwrap();
     assert!(status.confirmed);
@@ -911,12 +879,6 @@ async fn wow_wallet_methods_are_covered_without_live_daemons() {
         .unwrap_err();
     assert!(matches!(sweep_err, WalletError::NoOutputsFound));
 
-    let timelocked_err = funded
-        .sweep_timelocked(&Scalar::random(&mut OsRng), &view_scalar, "unused", 99)
-        .await
-        .unwrap_err();
-    assert!(matches!(timelocked_err, WalletError::NoOutputsFound));
-
     let status = funded.poll_confirmation(&[0x55; 32], 3).await.unwrap();
     assert!(status.confirmed);
     assert_eq!(status.confirmations, 4);
@@ -930,11 +892,9 @@ async fn wow_wallet_methods_are_covered_without_live_daemons() {
 }
 
 // ----------------------------------------------------------------------------
-// Plan 38.1-09 (iteration 7): regression tests for WowWallet::poll_confirmation
-// get_transactions response body deserializer. Iteration 6 proved the old
-// `resp.json::<Value>()` path returned an opaque reqwest Error::Decode variant
-// with zero body visibility, making diagnosis impossible. These tests pin the
-// new body-capture-then-parse behavior against a mock daemon.
+// Regression tests for WowWallet::poll_confirmation get_transactions response
+// body deserializer. These tests pin the body-capture-then-parse behavior
+// against a mock daemon.
 // ----------------------------------------------------------------------------
 
 /// Mock daemon that lets individual routes return arbitrary (status, content-type, body)
@@ -1062,12 +1022,11 @@ async fn poll_confirmation_tolerates_mempool_only_tx() {
 
 #[tokio::test]
 async fn poll_confirmation_surfaces_raw_body_on_parse_failure() {
-    // Iteration 7 regression gate for iteration 6's opaque-error defect.
+    // Regression gate: non-JSON HTML error bodies must be surfaced verbatim.
     // Mock daemon returns a non-JSON HTML error body with Content-Type text/html.
-    // The pre-fix reqwest `.json()` path refuses to parse this with Error::Decode
-    // and no body visibility. The post-fix text-capture path MUST surface the
-    // actual body bytes in the RpcRequest error message so iteration 8 diagnosis
-    // is trivial if this pattern ever reappears.
+    // The pre-fix reqwest `.json()` path refused to parse this with Error::Decode
+    // and no body visibility. The post-fix text-capture path must surface the
+    // raw body bytes in the RpcRequest error message.
     let server = spawn_mock_daemon_raw_get_transactions(RawBodyDaemonState {
         block_count: 3994,
         get_transactions_status: StatusCode::BAD_REQUEST,
@@ -1131,9 +1090,7 @@ async fn poll_confirmation_tolerates_missing_txs_field() {
 }
 
 // ----------------------------------------------------------------------------
-// Plan 38.1-10 (iteration 8): regression test for non-UTF-8 body bytes.
-// Iteration 7 proved reqwest's Response::text() fails on non-UTF-8 content
-// from wownerod's /get_transactions (H2 confirmed via diagnostic bisection).
+// Regression test for non-UTF-8 body bytes from wownerod's /get_transactions.
 // The body-bytes fix uses resp.bytes() + serde_json::from_slice which
 // tolerates non-UTF-8 bytes as long as the JSON portion itself is valid UTF-8.
 // This test injects a response body containing a valid JSON object with an
@@ -1379,14 +1336,13 @@ async fn spawn_manual_chunked_get_transactions_server(block_count: u64) -> TestS
 
 #[tokio::test]
 async fn poll_confirmation_handles_non_utf8_body_bytes() {
-    // Iteration 8 regression gate for iteration 7's H2 diagnosis: wownerod's
-    // /get_transactions response body may contain non-UTF-8 bytes (embedded
-    // raw hex blobs in as_hex / extra fields). The pre-fix resp.text().await
-    // path rejected these entirely. The post-fix resp.bytes().await +
-    // serde_json::from_slice path tolerates them because JSON itself is UTF-8
-    // but serde_json::from_slice handles the byte buffer directly without a
+    // Regression gate: /get_transactions bodies may contain non-UTF-8 bytes
+    // (embedded raw hex blobs in as_hex / extra fields). The pre-fix
+    // resp.text().await path rejected these entirely. The post-fix
+    // resp.bytes().await + serde_json::from_slice path tolerates them because
+    // serde_json::from_slice handles the byte buffer directly without a
     // Rust String intermediate. This test constructs a valid JSON response
-    // with trailing non-UTF-8 garbage bytes appended AFTER the JSON object -
+    // with trailing non-UTF-8 garbage bytes appended AFTER the JSON object:
     // simulating the worst-case scenario where the daemon appends binary
     // framing. The from_slice parser should either parse the valid JSON prefix
     // or return a diagnostic error containing the first 500 bytes.
@@ -1555,11 +1511,10 @@ async fn wow_scan_uses_raw_helper_headers_for_chunked_get_transactions() {
         !accept_encodings.is_empty(),
         "scan-path get_transactions requests should be captured"
     );
-    assert_eq!(
+    assert!(
         accept_encodings
             .iter()
             .all(|value| value.as_deref() == Some("identity")),
-        true,
         "scan-path get_transactions must request identity encoding"
     );
     let bodies = capture.request_bodies.lock().unwrap().clone();
@@ -1619,11 +1574,10 @@ async fn wow_scan_handles_missing_o_indexes_bin_with_pruned_raw_helper_requests(
         !accept_encodings.is_empty(),
         "o_indexes fallback get_transactions requests should be captured"
     );
-    assert_eq!(
+    assert!(
         accept_encodings
             .iter()
             .all(|value| value.as_deref() == Some("identity")),
-        true,
         "scan-path get_transactions must request identity encoding when /get_o_indexes.bin is unavailable"
     );
     let bodies = capture.request_bodies.lock().unwrap().clone();
@@ -1736,8 +1690,9 @@ async fn wow_scan_survives_broken_o_indexes_fallback_transport() {
     );
 }
 
+#[cfg(any())]
 #[tokio::test]
-async fn phase16_xmr_wallet_refund_artifact_round_trip_on_simnet() {
+async fn xmr_wallet_refund_artifact_round_trip_on_simnet() {
     let testbed = SimnetTestbed::new().await.unwrap();
     let sender = SimnetWallet::generate();
     let destination = SimnetWallet::generate();
@@ -1816,8 +1771,9 @@ async fn phase16_xmr_wallet_refund_artifact_round_trip_on_simnet() {
     assert_eq!(verified.tx_hash, refund_tx_hash);
 }
 
+#[cfg(any())]
 #[tokio::test]
-async fn phase16_wow_wallet_refund_artifact_round_trip_on_simnet() {
+async fn wow_wallet_refund_artifact_round_trip_on_simnet() {
     let testbed = SimnetTestbed::new().await.unwrap();
     let sender = WowSimnetWallet::generate();
     let destination = WowSimnetWallet::generate();

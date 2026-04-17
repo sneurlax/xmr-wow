@@ -586,7 +586,7 @@ fn build_outgoing_refund_artifact(state: &SwapState) -> anyhow::Result<Persisted
         Err(err) => anyhow::bail!("failed to read XMR_WOW_VTS_MODULUS_BITS: {err}"),
     };
 
-    Ok(match modulus_bits {
+    match modulus_bits {
         Some(bits) => RefundArtifact::new_with_bits(
             chain,
             addresses.swap_id,
@@ -606,7 +606,7 @@ fn build_outgoing_refund_artifact(state: &SwapState) -> anyhow::Result<Persisted
         ),
     }
     .map(PersistedRefundArtifact::from)
-    .map_err(|e| anyhow::anyhow!("failed to build refund artifact: {}", e))?)
+    .map_err(|e| anyhow::anyhow!("failed to build refund artifact: {}", e))
 }
 
 /// Poll for confirmation with exponential backoff, doubling the interval each attempt up to 120 s.
@@ -1308,7 +1308,7 @@ async fn main() -> anyhow::Result<()> {
                 _ => unreachable!(),
             };
 
-            let encrypted = encrypt_secret(&enc_key, &*secret_bytes);
+            let encrypted = encrypt_secret(&enc_key, &secret_bytes);
             let state_json = serde_json::to_string(&state)?;
             {
                 let store = store_shared.lock().unwrap();
@@ -1496,19 +1496,11 @@ async fn main() -> anyhow::Result<()> {
                 anyhow::bail!("lock-xmr is for Alice only (you are Bob)");
             }
 
-            // ===== Plan 38.1-08 Track 1 fix =====
             // Scan Bob's WOW lock BEFORE the BeforeXmrLock checkpoint guard so we
             // can transition Alice's persisted state from JointAddress -> WowLocked.
-            // Previous body ran verify_lock AFTER require_checkpoint_ready(BeforeXmrLock),
-            // which failed because JointAddress has no before_xmr_lock_checkpoint field
-            // (refresh_refund_readiness only populates it on WowLocked/XmrLocked).
-            // The fix reorders: verify Bob's WOW lock first, then call
-            // state.record_wow_lock(scan_result.tx_hash) to transition to WowLocked,
+            // verify_lock runs first, then record_wow_lock transitions to WowLocked,
             // which internally runs refresh_refund_readiness and populates
-            // before_xmr_lock_checkpoint. The existing test at
-            // crates/xmr-wow-client/src/swap_state.rs:2447-2459 proves Alice's call
-            // to record_wow_lock is semantically correct. See iteration 5 diagnosis:
-            // .planning/phases/38.1-multi-client-swap-orchestration/38.1-07-RUN-REPORT.md
+            // before_xmr_lock_checkpoint, unblocking the checkpoint guard below.
             let (joint_spend, view_scalar) =
                 SwapState::compute_joint_keys(&my_pubkey, &counterparty_pubkey, role)?;
 
@@ -1561,7 +1553,6 @@ async fn main() -> anyhow::Result<()> {
                 "lock-xmr",
                 cli.proof_harness,
             )?;
-            // ===== end Track 1 fix =====
 
             println!(
                 "Locking {} XMR atomic units to joint address...",
@@ -1576,9 +1567,8 @@ async fn main() -> anyhow::Result<()> {
             {
                 Ok(tx_hash) => tx_hash,
                 // `lock-xmr --scan-from` is used to accelerate Bob's WOW-lock verification.
-                // In Phase 47 Shadow OOB, that hint can be far ahead of Alice's own XMR
-                // funding history, which makes the sender-wallet scan miss real spendable
-                // inputs even after Bob's WOW lock verified successfully. Retry from 0
+                // That hint can be far ahead of Alice's own XMR funding history, causing
+                // the sender-wallet scan to miss real spendable inputs. Retry from 0
                 // before failing so the counterparty-chain hint does not break Alice's
                 // sender-wallet scan.
                 Err(xmr_wow_wallet::WalletError::NoOutputsFound) if scan_from > 0 => {
@@ -1627,7 +1617,7 @@ async fn main() -> anyhow::Result<()> {
             let swap_id_bytes = state.swap_id().ok_or_else(|| {
                 anyhow::anyhow!("swap state has no swap_id (still in KeyGeneration phase?)")
             })?;
-            let encrypted = encrypt_secret(&enc_key, &*secret_bytes);
+            let encrypted = encrypt_secret(&enc_key, &secret_bytes);
             let state_json = serde_json::to_string(&state)?;
             store_shared.lock().unwrap().save_with_secret(
                 &swap_id_bytes,
@@ -1713,7 +1703,7 @@ async fn main() -> anyhow::Result<()> {
                         // with no local refund artifact while the sharechain cursor has
                         // already moved past Alice's message, making lock-wow retries
                         // impossible.
-                        let encrypted = encrypt_secret(&enc_key, &*secret_bytes);
+                        let encrypted = encrypt_secret(&enc_key, &secret_bytes);
                         let state_json = serde_json::to_string(&updated_state)?;
                         store_shared.lock().unwrap().save_with_secret(
                             &id,
@@ -1858,7 +1848,7 @@ async fn main() -> anyhow::Result<()> {
             let swap_id_bytes = state.swap_id().ok_or_else(|| {
                 anyhow::anyhow!("swap state has no swap_id (still in KeyGeneration phase?)")
             })?;
-            let encrypted = encrypt_secret(&enc_key, &*secret_bytes);
+            let encrypted = encrypt_secret(&enc_key, &secret_bytes);
             let state_json = serde_json::to_string(&state)?;
             store_shared.lock().unwrap().save_with_secret(
                 &swap_id_bytes,
@@ -1908,7 +1898,7 @@ async fn main() -> anyhow::Result<()> {
             let swap_id_bytes = state.swap_id().ok_or_else(|| {
                 anyhow::anyhow!("swap state has no swap_id (still in KeyGeneration phase?)")
             })?;
-            let encrypted = encrypt_secret(&enc_key, &*secret_bytes);
+            let encrypted = encrypt_secret(&enc_key, &secret_bytes);
             let state_json = serde_json::to_string(&state)?;
             store_shared.lock().unwrap().save_with_secret(
                 &swap_id_bytes,

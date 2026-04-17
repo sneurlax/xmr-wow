@@ -253,13 +253,7 @@ impl SwapChain {
                                         crate::share::EscrowOp::Open(_) => None,
                                         crate::share::EscrowOp::Claim { swap_id, .. }
                                         | crate::share::EscrowOp::Refund { swap_id, .. } => {
-                                            open_map.get(swap_id).or_else(|| {
-                                                // The Open op may have been in an earlier
-                                                // share on the same orphaned fork; the map
-                                                // already covers all orphaned shares so this
-                                                // is the full available set.
-                                                None
-                                            })
+                                            open_map.get(swap_id)
                                         }
                                     };
                                     idx.revert(op, commitment.map(|c| c as &_));

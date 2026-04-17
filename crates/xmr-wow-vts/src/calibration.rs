@@ -27,7 +27,7 @@ const CALIBRATION_SQUARINGS: u64 = 10_000;
 ///
 /// # Arguments
 ///
-/// * `bit_length`; RSA modulus bit length (should match production use, e.g. 2048).
+/// * `bit_length`: RSA modulus bit length (should match production use, e.g. 2048).
 ///
 /// # Errors
 ///
@@ -61,14 +61,14 @@ pub fn calibrate_squarings_per_second(bit_length: u32) -> Result<u64, VtsError> 
     let elapsed_secs = elapsed.as_secs_f64();
     if elapsed_secs <= 0.0 {
         return Err(VtsError::CalibrationError(
-            "benchmark completed in zero time; results unreliable".to_string(),
+            "benchmark completed in zero time: results unreliable".to_string(),
         ));
     }
 
     let rate = (CALIBRATION_SQUARINGS as f64 / elapsed_secs) as u64;
     if rate == 0 {
         return Err(VtsError::CalibrationError(
-            "computed rate is 0; hardware too slow or benchmark too short".to_string(),
+            "computed rate is 0: hardware too slow or benchmark too short".to_string(),
         ));
     }
 
@@ -132,8 +132,8 @@ mod tests {
 
     #[test]
     fn test_default_squarings_per_second_is_reasonable() {
-        // Should be in a plausible range
-        assert!(DEFAULT_SQUARINGS_PER_SECOND >= 10_000);
-        assert!(DEFAULT_SQUARINGS_PER_SECOND <= 10_000_000);
+        let val = DEFAULT_SQUARINGS_PER_SECOND;
+        assert!(val >= 10_000);
+        assert!(val <= 10_000_000);
     }
 }

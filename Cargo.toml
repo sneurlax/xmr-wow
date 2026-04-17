@@ -10,6 +10,7 @@ members = [
     "crates/wownero-rust",
     "crates/xmr-wow-wallet",
     "crates/xmr-wow-vts",
+    "crates/xmr-wow-test-utils",
 ]
 exclude = [
     "deps/cuprate-simnet",
@@ -37,6 +38,7 @@ xmr-wow-sharechain  = { path = "crates/xmr-wow-sharechain" }
 xmr-wow-client      = { path = "crates/xmr-wow-client" }
 xmr-wow-wallet      = { path = "crates/xmr-wow-wallet" }
 xmr-wow-vts         = { path = "crates/xmr-wow-vts" }
+xmr-wow-test-utils  = { path = "crates/xmr-wow-test-utils" }
 
 # Local path deps (modified or vendored)
 # cuprate-simnet and wownero-simnet remain standalone manifests for test isolation,
