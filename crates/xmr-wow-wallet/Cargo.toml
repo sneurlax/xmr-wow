@@ -13,6 +13,7 @@ serde = { workspace = true }
 tokio = { workspace = true }
 monero-rust = { workspace = true }
 xmr-wow-crypto = { workspace = true }
+xmr-wow-vts = { workspace = true }
 reqwest = { workspace = true }
 hex = { workspace = true }
 serde_json = { workspace = true }
