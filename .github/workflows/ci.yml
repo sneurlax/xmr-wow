@@ -1,30 +1,19 @@
 # CI configuration for xmr-wow atomic swap project.
 #
+# 1. xmr-wow-script needs a separate test step with --features stub-crypto.
+#    Without it, the script VM tests are silently skipped by
+#    `cargo test --workspace`.
 #
-# 1. xmr-wow-script requires a SEPARATE test step with --features stub-crypto.
-#    Without it, all 50 script VM tests are silently skipped by
-#    `cargo test --workspace`; cargo omits targets with unsatisfied
-#    required-features without any warning or error. The CI must
-#    explicitly invoke the feature-flagged run to avoid a false success.
+# 2. Integration tests run with --test-threads=1. xmr-wow-wallet and
+#    xmr-wow-integration use the in-process cuprate-simnet and
+#    wownero-simnet emulators, which are not safe to run in parallel.
 #
-# 2. Integration tests run with --test-threads=1 (serial execution).
-#    The xmr-wow-wallet and xmr-wow-integration crates use cuprate-simnet
-#    and wownero-simnet (in-process daemon emulators). These consume
-#    significant CPU and can timeout or deadlock under default parallel
-#    test scheduling on loaded CI runners. Serial mode adds ~40s but
-#    eliminates simnet flakiness.
+# 3. Live-daemon tests are opt-in. Tests requiring real XMR/WOW daemons
+#    are gated behind --features privileged-live-tests and need funded
+#    wallets plus synced daemons.
 #
-# 3. Live-daemon tests are opt-in ONLY.
-#    Tests requiring real XMR/WOW daemons (07_live_network_harness.rs,
-#    wallet_live_privileged.rs) are gated behind --features privileged-live-tests
-#    and require funded wallets and synced daemons. They are never run in the
-#    default CI lane. See crates/xmr-wow-integration/tests_privileged/ for
-#    the manual execution procedure.
-#
-# 4. Bulletproofs tests are excluded from the default CI lane.
-#    wownero-bulletproofs tests take 300-600s each (ZK proof generation).
-#    They are vendored cryptographic primitives and are stable/deterministic.
-#    Run them manually: `cargo test -p wownero-bulletproofs`
+# 4. wownero-bulletproofs tests are excluded from the default lane; they
+#    are vendored primitives that take several minutes each.
 
 name: CI
 
@@ -76,6 +65,32 @@ jobs:
         run: >
           cargo test -p xmr-wow-wallet -p xmr-wow-integration
           -- --test-threads=1
+
+      # --- Coverage (informational, no hard floor) ---
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+
+      - name: Coverage report (workspace)
+        # Informational coverage: no minimum threshold enforced.
+        run: cargo llvm-cov --workspace --html
+
+      - name: Upload workspace coverage
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: target/llvm-cov/html/
+
+      - name: Coverage report (xmr-wow-script stub-crypto)
+        run: cargo llvm-cov --html -p xmr-wow-script --features stub-crypto
+
+      - name: Upload script coverage
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report-script
+          path: target/llvm-cov/html/
 
       # --- Code quality ---
 
