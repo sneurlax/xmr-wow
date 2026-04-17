@@ -1,18 +1,19 @@
 use rand::rngs::OsRng;
 use xmr_wow_client::{
-    build_observed_refund_timing, decode_message, CoordMessage, ProtocolMessage, SwapError,
-    SwapParams, SwapRole, SwapState, unwrap_protocol_message, wrap_protocol_message,
+    build_observed_refund_timing, decode_message, unwrap_protocol_message, wrap_protocol_message,
+    CoordMessage, ProtocolMessage, SwapError, SwapParams, SwapRole, SwapState,
 };
 use xmr_wow_crypto::{AdaptorSignature, CompletedSignature, DleqProof, KeyContribution};
+use xmr_wow_test_utils::assert_hostile_rejection;
 
 fn sample_params() -> SwapParams {
-    let (refund_timing, xmr_refund_height, wow_refund_height) =
+    let (refund_timing, xmr_refund_delay_seconds, wow_refund_delay_seconds) =
         build_observed_refund_timing(100, 200, 500, 800).unwrap();
     SwapParams {
         amount_xmr: 1_000_000_000_000,
         amount_wow: 500_000_000_000_000,
-        xmr_refund_height,
-        wow_refund_height,
+        xmr_refund_delay_seconds,
+        wow_refund_delay_seconds,
         refund_timing: Some(refund_timing),
         alice_refund_address: Some("alice-refund-addr".into()),
         bob_refund_address: Some("bob-refund-addr".into()),
@@ -72,20 +73,22 @@ fn advance_to_xmr_locked() -> (SwapState, SwapState) {
 #[test]
 fn test_malformed_message_rejected() {
     let result: Result<ProtocolMessage, SwapError> = decode_message("garbage_bytes_not_valid");
-    let err = result.unwrap_err().to_string();
-    assert!(
-        err.contains("missing protocol prefix"),
-        "expected prefix error, got: {err}"
+    assert_hostile_rejection!(
+        result,
+        stage = "message_decode",
+        reason = "missing protocol prefix",
+        strategy = "unknown"
     );
 }
 
 #[test]
 fn test_truncated_base64_rejected() {
     let result: Result<ProtocolMessage, SwapError> = decode_message("xmrwow1:!!!not-base64!!!");
-    let err = result.unwrap_err().to_string();
-    assert!(
-        err.contains("base64 decode failed"),
-        "expected base64 error, got: {err}"
+    assert_hostile_rejection!(
+        result,
+        stage = "message_decode",
+        reason = "base64 decode failed",
+        strategy = "unknown"
     );
 }
 
@@ -113,13 +116,12 @@ fn test_wrong_type_at_wrong_step_pre_sig_on_keygen() {
         s_prime: [0xBB; 32],
     };
 
-    let err = alice
-        .receive_counterparty_pre_sig(dummy_pre_sig)
-        .unwrap_err()
-        .to_string();
-    assert!(
-        err.contains("invalid state transition"),
-        "expected InvalidTransition, got: {err}"
+    let result = alice.receive_counterparty_pre_sig(dummy_pre_sig);
+    assert_hostile_rejection!(
+        result,
+        stage = "state_transition",
+        reason = "invalid state transition",
+        strategy = "unknown"
     );
 }
 
@@ -185,9 +187,7 @@ fn test_out_of_order_receive_key_from_dleq_exchange() {
     let (alice, bob) = make_alice_bob(params);
 
     let (bob_pub, bob_proof) = extract_pubkey_and_proof(&bob);
-    let alice_dleq = alice
-        .receive_counterparty_key(bob_pub, &bob_proof)
-        .unwrap();
+    let alice_dleq = alice.receive_counterparty_key(bob_pub, &bob_proof).unwrap();
 
     let err = alice_dleq
         .receive_counterparty_key(bob_pub, &bob_proof)
@@ -204,10 +204,7 @@ fn test_out_of_order_record_xmr_lock_from_keygen() {
     let params = sample_params();
     let (alice, _) = SwapState::generate(SwapRole::Alice, params, &mut OsRng);
 
-    let err = alice
-        .record_xmr_lock([0xAA; 32])
-        .unwrap_err()
-        .to_string();
+    let err = alice.record_xmr_lock([0xAA; 32]).unwrap_err().to_string();
     assert!(
         err.contains("invalid state transition"),
         "expected InvalidTransition from KeyGeneration, got: {err}"
@@ -221,9 +218,7 @@ fn test_replayed_message_second_key_exchange_fails() {
 
     let (bob_pub, bob_proof) = extract_pubkey_and_proof(&bob);
 
-    let alice_dleq = alice
-        .receive_counterparty_key(bob_pub, &bob_proof)
-        .unwrap();
+    let alice_dleq = alice.receive_counterparty_key(bob_pub, &bob_proof).unwrap();
 
     let err = alice_dleq
         .receive_counterparty_key(bob_pub, &bob_proof)
@@ -314,12 +309,18 @@ fn test_wrong_topic_structural_prevention() {
     // Unknown variants are rejected at deserialization; the closed enum is the enforcement.
     let wrong_topic_json = r#"{"UnknownTopic":{"data":"test"}}"#;
     let bad_result: Result<ProtocolMessage, _> = decode_message(wrong_topic_json);
-    assert!(bad_result.is_err(), "unknown topic rejected at deserialization layer");
+    assert!(
+        bad_result.is_err(),
+        "unknown topic rejected at deserialization layer"
+    );
 
     // A misspelled valid variant also fails
     let misspelled_json = r#"{"AdaptorPresig":{"pre_sig":[0;32]}}"#;
     let bad_result2: Result<ProtocolMessage, _> = decode_message(misspelled_json);
-    assert!(bad_result2.is_err(), "misspelled topic rejected at deserialization layer");
+    assert!(
+        bad_result2.is_err(),
+        "misspelled topic rejected at deserialization layer"
+    );
 }
 
 // CoordMessage envelope tests document which layer is responsible for each defense:
@@ -341,8 +342,8 @@ fn make_all_four_variants() -> Vec<(&'static str, ProtocolMessage)> {
         proof: proof_init,
         amount_xmr: 1_000_000_000_000,
         amount_wow: 500_000_000_000_000,
-        xmr_refund_height: 2000,
-        wow_refund_height: 1000,
+        xmr_refund_delay_seconds: 2000,
+        wow_refund_delay_seconds: 1000,
         refund_timing: None,
         alice_refund_address: Some("alice-refund-addr".into()),
     };
@@ -358,6 +359,7 @@ fn make_all_four_variants() -> Vec<(&'static str, ProtocolMessage)> {
         pubkey: contrib_resp.public_bytes(),
         proof: proof_resp,
         bob_refund_address: Some("bob-refund-addr".into()),
+        refund_artifact: None,
     };
 
     let adaptor_pre_sig = ProtocolMessage::AdaptorPreSig {
@@ -469,10 +471,10 @@ fn coord_envelope_replayed_all_variants() {
             result_replayed.err()
         );
 
-        let orig_json = serde_json::to_string(&result_original.unwrap())
-            .expect("serialization must not fail");
-        let replay_json = serde_json::to_string(&result_replayed.unwrap())
-            .expect("serialization must not fail");
+        let orig_json =
+            serde_json::to_string(&result_original.unwrap()).expect("serialization must not fail");
+        let replay_json =
+            serde_json::to_string(&result_replayed.unwrap()).expect("serialization must not fail");
         assert_eq!(
             orig_json, replay_json,
             "[{variant_name}] original and replayed envelopes must decode identically"
@@ -494,8 +496,8 @@ fn coord_envelope_replayed_init_state_machine_rejects_second_application() {
         proof: bob_proof.clone(),
         amount_xmr: 1_000_000_000_000,
         amount_wow: 500_000_000_000_000,
-        xmr_refund_height: 2000,
-        wow_refund_height: 1000,
+        xmr_refund_delay_seconds: 2000,
+        wow_refund_delay_seconds: 1000,
         refund_timing: None,
         alice_refund_address: None,
     };
@@ -513,9 +515,9 @@ fn coord_envelope_replayed_init_state_machine_rejects_second_application() {
     };
 
     let err = match msg_second {
-        ProtocolMessage::Init { pubkey, proof, .. } => {
-            alice_dleq.receive_counterparty_key(pubkey, &proof).unwrap_err()
-        }
+        ProtocolMessage::Init { pubkey, proof, .. } => alice_dleq
+            .receive_counterparty_key(pubkey, &proof)
+            .unwrap_err(),
         _ => panic!("expected Init variant"),
     };
     assert!(

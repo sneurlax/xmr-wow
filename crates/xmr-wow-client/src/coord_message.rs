@@ -63,8 +63,7 @@ pub fn wrap_protocol_message(
     swap_id: [u8; 32],
     msg: &ProtocolMessage,
 ) -> Result<CoordMessage, CoordError> {
-    let payload = serde_json::to_vec(msg)
-        .map_err(|e| CoordError::Serialization(e.to_string()))?;
+    let payload = serde_json::to_vec(msg).map_err(|e| CoordError::Serialization(e.to_string()))?;
     Ok(CoordMessage {
         swap_id,
         payload,
@@ -74,15 +73,14 @@ pub fn wrap_protocol_message(
 
 /// JSON-deserializes the payload of a `CoordMessage` into a `ProtocolMessage`.
 pub fn unwrap_protocol_message(coord: &CoordMessage) -> Result<ProtocolMessage, CoordError> {
-    serde_json::from_slice(&coord.payload)
-        .map_err(|e| CoordError::Serialization(e.to_string()))
+    serde_json::from_slice(&coord.payload).map_err(|e| CoordError::Serialization(e.to_string()))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use xmr_wow_crypto::{AdaptorSignature, CompletedSignature, DleqProof, KeyContribution};
     use rand::rngs::OsRng;
+    use xmr_wow_crypto::{AdaptorSignature, CompletedSignature, DleqProof, KeyContribution};
 
     fn make_dleq_proof() -> (DleqProof, [u8; 32]) {
         let contrib = KeyContribution::generate(&mut OsRng);
@@ -102,8 +100,8 @@ mod tests {
             proof,
             amount_xmr: 1_000_000_000_000,
             amount_wow: 500_000_000_000_000,
-            xmr_refund_height: 2000,
-            wow_refund_height: 1000,
+            xmr_refund_delay_seconds: 2000,
+            wow_refund_delay_seconds: 1000,
             refund_timing: None,
             alice_refund_address: None,
         }
@@ -115,6 +113,7 @@ mod tests {
             pubkey,
             proof,
             bob_refund_address: None,
+            refund_artifact: None,
         }
     }
 
@@ -147,7 +146,10 @@ mod tests {
 
         assert!(json.get("swap_id").is_some(), "must have swap_id field");
         assert!(json.get("payload").is_some(), "must have payload field");
-        assert!(json.get("encryption_hint").is_some(), "must have encryption_hint field");
+        assert!(
+            json.get("encryption_hint").is_some(),
+            "must have encryption_hint field"
+        );
 
         // Verify types
         assert!(json["swap_id"].is_string(), "swap_id must be a string");
@@ -162,7 +164,10 @@ mod tests {
         let coord = wrap_protocol_message(swap_id, &msg).unwrap();
         let json: serde_json::Value = serde_json::to_value(&coord).unwrap();
 
-        assert!(json["encryption_hint"].is_null(), "encryption_hint must serialize as null when None");
+        assert!(
+            json["encryption_hint"].is_null(),
+            "encryption_hint must serialize as null when None"
+        );
     }
 
     /// A JSON blob missing the `encryption_hint` field deserializes successfully
@@ -170,7 +175,8 @@ mod tests {
     #[test]
     fn missing_encryption_hint_deserializes_ok() {
         let json = r#"{"swap_id":"aabbccddaabbccddaabbccddaabbccddaabbccddaabbccddaabbccddaabbccdd","payload":[1,2,3]}"#;
-        let coord: CoordMessage = serde_json::from_str(json).expect("should deserialize without encryption_hint");
+        let coord: CoordMessage =
+            serde_json::from_str(json).expect("should deserialize without encryption_hint");
         assert!(coord.encryption_hint.is_none());
     }
 
@@ -197,7 +203,10 @@ mod tests {
         let coord = wrap_protocol_message(swap_id, &msg).unwrap();
         let json: serde_json::Value = serde_json::to_value(&coord).unwrap();
 
-        assert!(json.get("type").is_none(), "variant 'type' field must not appear in CoordMessage JSON");
+        assert!(
+            json.get("type").is_none(),
+            "variant 'type' field must not appear in CoordMessage JSON"
+        );
     }
 
     fn round_trip(msg: ProtocolMessage) {
@@ -209,8 +218,11 @@ mod tests {
 
         // We verify variant identity; field equality via re-serialization.
         let orig_json = serde_json::to_string(&msg).unwrap();
-        let rec_json  = serde_json::to_string(&recovered).unwrap();
-        assert_eq!(orig_json, rec_json, "round-trip must produce identical JSON");
+        let rec_json = serde_json::to_string(&recovered).unwrap();
+        assert_eq!(
+            orig_json, rec_json,
+            "round-trip must produce identical JSON"
+        );
     }
 
     #[test]
@@ -244,6 +256,9 @@ mod tests {
     fn maybe_decrypt_passthrough() {
         let payload = vec![7u8, 8, 9, 100];
         let out = maybe_decrypt(payload.clone(), None).unwrap();
-        assert_eq!(out, payload, "maybe_decrypt must return Ok(payload) unchanged");
+        assert_eq!(
+            out, payload,
+            "maybe_decrypt must return Ok(payload) unchanged"
+        );
     }
 }

@@ -1,0 +1,136 @@
+# Shadow / monerosim scenario that drives the xmr-wow CLI with --transport sharechain.
+#
+# Uses the direct init-alice/init-bob flow (no offer publication), per-agent
+# inline xmr-wow-node (no standalone sharechain-node host).
+#
+# Alice and Bob each spawn their own xmr-wow-node process via node_binary attributes.
+# Alice's node listens on RPC 18091, Bob's on 18092; they peer with each other via
+# node_peers. No separate sharechain-node host is needed (monerosim does not support
+# standalone process hosts).
+
+metadata:
+  scenario: shadow_xmr_wow_sharechain_swap
+  generator: manual
+  version: '1.0'
+  purpose: 'Sharechain-mediated atomic swap: no manual message exchange, per-agent inline xmr-wow-node'
+
+general:
+  stop_time: 24h
+  parallelism: 0
+  simulation_seed: 211
+  enable_dns_server: true
+  shadow_log_level: warning
+  bootstrap_end_time: 14400s
+  progress: true
+  runahead: 100ms
+  process_threads: 2
+  daemon_defaults:
+    log-level: 1
+    max-log-file-size: 0
+    db-sync-mode: fastest
+    no-zmq: true
+    non-interactive: true
+    disable-rpc-ban: true
+    allow-local-ip: true
+  wallet_defaults:
+    log-level: 1
+
+network:
+  type: 1_gbit_switch
+  latency: 100ms
+  peer_mode: Dynamic
+
+agents:
+  xmr-miner:
+    daemon: monerod
+    wallet: 'monero-wallet-rpc'
+    script: agents.autonomous_miner
+    start_time: 0s
+    hashrate: 100
+    can_receive_distributions: true
+
+  wow-miner:
+    daemon: monerod
+    wallet: 'monero-wallet-rpc'
+    script: agents.autonomous_miner
+    start_time: 0s
+    hashrate: 100
+    can_receive_distributions: true
+
+  alice:
+    daemon: monerod
+    wallet: 'monero-wallet-rpc'
+    script: agents.xmr_wow_sharechain_agent
+    start_time: 15000s
+    can_receive_distributions: true
+    attributes:
+      role: alice
+      counterparty: bob
+      binary: target/release/xmr-wow
+      node_binary: target/release/xmr-wow-node
+      db: /tmp/alice-shadow-sharechain.db
+      password: shadow-test
+      amount_xmr: '1000000000000'
+      amount_wow: '500000000000'
+      xmr_refund_delay: '120'
+      wow_refund_delay: '320'
+      vts_squarings_per_second: '10'
+      vts_modulus_bits: '512'
+      destination: 'SHADOW_ALICE_DESTINATION'
+      alice_refund_address: 'SHADOW_ALICE_REFUND_DESTINATION'
+      node_rpc_port: '18091'
+      node_p2p_port: '37891'
+      node_peers: '["bob:37892"]'
+      wow_daemon_host: bob
+      wow_daemon_port: '34568'
+      cli_timeout: '14400'
+
+  bob:
+    daemon: monerod
+    wallet: 'monero-wallet-rpc'
+    script: agents.xmr_wow_sharechain_agent
+    start_time: 12600s
+    can_receive_distributions: true
+    attributes:
+      role: bob
+      counterparty: alice
+      binary: target/release/xmr-wow
+      node_binary: target/release/xmr-wow-node
+      db: /tmp/bob-shadow-sharechain.db
+      password: shadow-test
+      vts_squarings_per_second: '10'
+      vts_modulus_bits: '512'
+      destination: 'SHADOW_BOB_DESTINATION'
+      bob_refund_address: 'SHADOW_BOB_REFUND_DESTINATION'
+      node_rpc_port: '18092'
+      node_p2p_port: '37892'
+      node_peers: '["alice:37891"]'
+      # Point Bob's CLI at Alice's xmr-wow-node so both agents share the same
+      # in-memory coord_store. xmr-wow-node has no P2P gossip, so two
+      # independent per-agent nodes would have disjoint msg_stores. Bob's own
+      # xmr-wow-node still spawns (harmless; just unused).
+      node_url_override: 'http://alice:18091'
+      wow_local_daemon: 'true'
+      wow_daemon_binary: wownerod
+      wow_network: testnet
+      wow_keep_fakechain: 'true'
+      wow_offline: 'true'
+      wow_bootstrap_fixed_difficulty: '1'
+      wow_fixed_difficulty: '1'
+      wow_daemon_port: '34568'
+      wow_wallet_binary: wownero-wallet-rpc
+      wow_wallet_rpc_port: '34569'
+      wow_wallet_name: bob_wow_wallet
+      wow_generate_blocks: '1000'
+      cli_timeout: '14400'
+
+  miner-distributor:
+    script: agents.miner_distributor
+    wait_time: 9000
+    initial_wait_time: 0
+    max_transaction_amount: '5.0'
+    min_transaction_amount: '2.0'
+    transaction_frequency: 30
+    md_n_recipients: 2
+    md_out_per_tx: 2
+    md_output_amount: 10.0

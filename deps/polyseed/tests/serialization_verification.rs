@@ -1,5 +1,12 @@
-// Vendored upstream test code — lint suppressed
-#![allow(clippy::needless_borrows_for_generic_args, clippy::manual_div_ceil, clippy::identity_op, clippy::erasing_op, dead_code, unused_variables)]
+// Vendored upstream test code; lint suppressed
+#![allow(
+    clippy::needless_borrows_for_generic_args,
+    clippy::manual_div_ceil,
+    clippy::identity_op,
+    clippy::erasing_op,
+    dead_code,
+    unused_variables
+)]
 //! Serialization verification tests.
 
 use polyseed::{Coin, Language, Polyseed, PolyseedError};
@@ -67,12 +74,23 @@ fn test_store_binary_layout() {
     let v1 = u16::from_le_bytes([storage[8], storage[9]]);
     let parsed_birthday = v1 & DATE_MASK;
     let parsed_features = v1 >> DATE_BITS;
-    assert_eq!(parsed_features, u16::from(seed.features()), "Features mismatch in stored v1");
+    assert_eq!(
+        parsed_features,
+        u16::from(seed.features()),
+        "Features mismatch in stored v1"
+    );
     // Birthday should encode time ~1638446400 => encoded birthday = 1
-    assert_eq!(parsed_birthday, 1, "Birthday encoded value should be 1 for SEED_TIME1");
+    assert_eq!(
+        parsed_birthday, 1,
+        "Birthday encoded value should be 1 for SEED_TIME1"
+    );
 
     // Byte [10..29]: 19 bytes of entropy
-    assert_eq!(&storage[10..29], &seed.entropy()[..SECRET_SIZE], "Secret mismatch");
+    assert_eq!(
+        &storage[10..29],
+        &seed.entropy()[..SECRET_SIZE],
+        "Secret mismatch"
+    );
 
     // Byte [29]: Extra byte = 0xFF
     assert_eq!(storage[29], 0xFF, "Extra byte must be 0xFF");
@@ -107,7 +125,11 @@ fn test_dart_serialization_vector() {
     ];
 
     // Verify header
-    assert_eq!(&dart_storage[..8], b"POLYSEED", "Dart vector header mismatch");
+    assert_eq!(
+        &dart_storage[..8],
+        b"POLYSEED",
+        "Dart vector header mismatch"
+    );
 
     // Verify extra byte
     assert_eq!(dart_storage[29], 0xFF, "Dart vector extra byte mismatch");
@@ -120,33 +142,52 @@ fn test_dart_serialization_vector() {
     // Parse birthday
     let v1 = u16::from_le_bytes([dart_storage[8], dart_storage[9]]);
     let encoded_birthday = v1 & DATE_MASK;
-    assert_eq!(encoded_birthday, 22, "Dart vector encoded birthday should be 22");
+    assert_eq!(
+        encoded_birthday, 22,
+        "Dart vector encoded birthday should be 22"
+    );
     let decoded_birthday = birthday_decode(encoded_birthday);
-    assert_eq!(decoded_birthday, 1693622412, "Dart vector decoded birthday should be 1693622412");
+    assert_eq!(
+        decoded_birthday, 1693622412,
+        "Dart vector decoded birthday should be 1693622412"
+    );
 
     // Load in Rust -- this exercises the full load() path
     let loaded = Polyseed::load(&dart_storage, Language::English, 0).unwrap();
 
     // Verify birthday matches Dart expectation
-    assert_eq!(loaded.birthday(), 1693622412, "Loaded birthday must match Dart expected value");
+    assert_eq!(
+        loaded.birthday(),
+        1693622412,
+        "Loaded birthday must match Dart expected value"
+    );
 
     // Verify features = 0
     assert_eq!(loaded.features(), 0, "Loaded features should be 0");
 
     // Verify not encrypted
-    assert!(!loaded.is_encrypted(), "Loaded seed should not be encrypted");
+    assert!(
+        !loaded.is_encrypted(),
+        "Loaded seed should not be encrypted"
+    );
 
     // Verify entropy matches what's in the binary
     let expected_secret: [u8; 19] = [
-        0xfe, 0xd0, 0x4c, 0x53, 0x30, 0xc9, 0x66, 0x79,
-        0xe6, 0x12, 0x15, 0x24, 0xe6, 0xbb, 0x6a, 0x5b,
-        0x93, 0xc7, 0x33,
+        0xfe, 0xd0, 0x4c, 0x53, 0x30, 0xc9, 0x66, 0x79, 0xe6, 0x12, 0x15, 0x24, 0xe6, 0xbb, 0x6a,
+        0x5b, 0x93, 0xc7, 0x33,
     ];
-    assert_eq!(&loaded.entropy()[..19], &expected_secret, "Loaded entropy mismatch");
+    assert_eq!(
+        &loaded.entropy()[..19],
+        &expected_secret,
+        "Loaded entropy mismatch"
+    );
 
     // Verify store() round-trips back to the exact same bytes
     let re_stored = loaded.store();
-    assert_eq!(*re_stored, dart_storage, "store(load(dart_bytes)) must reproduce exact bytes");
+    assert_eq!(
+        *re_stored, dart_storage,
+        "store(load(dart_bytes)) must reproduce exact bytes"
+    );
 }
 
 // Verify the Dart phrase produces the same stored bytes
@@ -166,12 +207,8 @@ fn test_dart_phrase_to_store_matches_vector() {
 
     // The stored bytes should match the Dart base64 vector
     let dart_storage: [u8; 32] = [
-        0x50, 0x4f, 0x4c, 0x59, 0x53, 0x45, 0x45, 0x44,
-        0x16, 0x00,
-        0xfe, 0xd0, 0x4c, 0x53, 0x30, 0xc9, 0x66, 0x79,
-        0xe6, 0x12, 0x15, 0x24, 0xe6, 0xbb, 0x6a, 0x5b,
-        0x93, 0xc7, 0x33,
-        0xff,
+        0x50, 0x4f, 0x4c, 0x59, 0x53, 0x45, 0x45, 0x44, 0x16, 0x00, 0xfe, 0xd0, 0x4c, 0x53, 0x30,
+        0xc9, 0x66, 0x79, 0xe6, 0x12, 0x15, 0x24, 0xe6, 0xbb, 0x6a, 0x5b, 0x93, 0xc7, 0x33, 0xff,
         0x63, 0x77,
     ];
 
@@ -256,7 +293,10 @@ fn test_encrypted_store_load_roundtrip() {
     // Encrypt
     let mut encrypted = original.clone();
     encrypted.crypt("test_password");
-    assert!(encrypted.is_encrypted(), "Seed must be encrypted after crypt()");
+    assert!(
+        encrypted.is_encrypted(),
+        "Seed must be encrypted after crypt()"
+    );
 
     // Store encrypted seed
     let storage = encrypted.store();
@@ -267,17 +307,27 @@ fn test_encrypted_store_load_roundtrip() {
     // Parse features: should have encrypted bit set
     let v1 = u16::from_le_bytes([storage[8], storage[9]]);
     let stored_features = (v1 >> DATE_BITS) as u8;
-    assert_ne!(stored_features & 0x10, 0, "Encrypted bit must be set in stored features");
+    assert_ne!(
+        stored_features & 0x10,
+        0,
+        "Encrypted bit must be set in stored features"
+    );
 
     // Load encrypted seed
     let loaded = Polyseed::load(&storage, Language::English, 0).unwrap();
     assert!(loaded.is_encrypted(), "Loaded seed must be encrypted");
-    assert_eq!(encrypted, loaded, "Encrypted round-trip must preserve all fields");
+    assert_eq!(
+        encrypted, loaded,
+        "Encrypted round-trip must preserve all fields"
+    );
 
     // Decrypt loaded seed
     let mut decrypted = loaded;
     decrypted.crypt("test_password");
-    assert!(!decrypted.is_encrypted(), "Decrypted seed must not be encrypted");
+    assert!(
+        !decrypted.is_encrypted(),
+        "Decrypted seed must not be encrypted"
+    );
     assert_eq!(original, decrypted, "Decrypted seed must match original");
 }
 
@@ -392,7 +442,10 @@ fn test_load_flip_every_bit() {
     let storage = *seed.store();
 
     // Verify the original loads successfully
-    assert!(Polyseed::load(&storage, Language::English, 0).is_ok(), "Original should load");
+    assert!(
+        Polyseed::load(&storage, Language::English, 0).is_ok(),
+        "Original should load"
+    );
 
     for byte_idx in 0..32 {
         for bit_idx in 0..8 {
@@ -535,9 +588,8 @@ fn test_c_seed1_store_format() {
     let entropy_bytes: [u8; 32] = {
         let mut e = [0u8; 32];
         e[..19].copy_from_slice(&[
-            0xdd, 0x76, 0xe7, 0x35, 0x9a, 0x0d, 0xed, 0x37,
-            0xcd, 0x0f, 0xf0, 0xf3, 0xc8, 0x29, 0xa5, 0xae,
-            0x01, 0x67, 0x33,
+            0xdd, 0x76, 0xe7, 0x35, 0x9a, 0x0d, 0xed, 0x37, 0xcd, 0x0f, 0xf0, 0xf3, 0xc8, 0x29,
+            0xa5, 0xae, 0x01, 0x67, 0x33,
         ]);
         e
     };
@@ -578,9 +630,8 @@ fn test_c_seed2_store_format() {
     let entropy_bytes: [u8; 32] = {
         let mut e = [0u8; 32];
         e[..19].copy_from_slice(&[
-            0x5a, 0x2b, 0x02, 0xdf, 0x7d, 0xb2, 0x1f, 0xcb,
-            0xe6, 0xec, 0x6d, 0xf1, 0x37, 0xd5, 0x4c, 0x7b,
-            0x20, 0xfd, 0x2b,
+            0x5a, 0x2b, 0x02, 0xdf, 0x7d, 0xb2, 0x1f, 0xcb, 0xe6, 0xec, 0x6d, 0xf1, 0x37, 0xd5,
+            0x4c, 0x7b, 0x20, 0xfd, 0x2b,
         ]);
         e
     };
@@ -632,9 +683,8 @@ fn test_c_seed3_with_features() {
     // because Rust doesn't have polyseed_enable_features() -- this matches
     // C behavior when user features are not enabled.
     let entropy: [u8; 19] = [
-        0x67, 0xb9, 0x36, 0xdf, 0xa4, 0xda, 0x6a, 0xe8,
-        0xd3, 0xb3, 0xcd, 0xb3, 0xb9, 0x37, 0xf4, 0x02,
-        0x7b, 0x0e, 0x3b,
+        0x67, 0xb9, 0x36, 0xdf, 0xa4, 0xda, 0x6a, 0xe8, 0xd3, 0xb3, 0xcd, 0xb3, 0xb9, 0x37, 0xf4,
+        0x02, 0x7b, 0x0e, 0x3b,
     ];
     // We construct a valid-looking binary to test that load() rejects
     // unsupported features. We use a dummy checksum; the features check
@@ -660,10 +710,18 @@ fn test_c_seed3_with_features() {
 #[test]
 fn test_footer_checksum_bit_packing() {
     // Verify no overlap between footer and checksum bits
-    assert_eq!(STORAGE_FOOTER & GF_MASK, 0, "Footer and GF_MASK must not overlap");
+    assert_eq!(
+        STORAGE_FOOTER & GF_MASK,
+        0,
+        "Footer and GF_MASK must not overlap"
+    );
 
     // Verify footer fits in the non-GF bits
-    assert_eq!(STORAGE_FOOTER & !GF_MASK, STORAGE_FOOTER, "Footer must fit in upper bits");
+    assert_eq!(
+        STORAGE_FOOTER & !GF_MASK,
+        STORAGE_FOOTER,
+        "Footer must fit in upper bits"
+    );
 
     // Try various checksums
     for checksum in [0u16, 1, 0x3FF, 0x400, 0x7FF] {
@@ -748,7 +806,11 @@ fn test_encrypted_features_in_binary() {
     let mut encrypted = seed.clone();
     encrypted.crypt("password123");
     assert!(encrypted.is_encrypted());
-    assert_eq!(encrypted.features() & 0x10, 0x10, "Encrypted flag must be set");
+    assert_eq!(
+        encrypted.features() & 0x10,
+        0x10,
+        "Encrypted flag must be set"
+    );
 
     let storage = encrypted.store();
 
@@ -756,10 +818,15 @@ fn test_encrypted_features_in_binary() {
     let v1 = u16::from_le_bytes([storage[8], storage[9]]);
     let stored_features = (v1 >> DATE_BITS) as u8;
     assert_eq!(
-        stored_features, encrypted.features(),
+        stored_features,
+        encrypted.features(),
         "Stored features must match seed features"
     );
-    assert_ne!(stored_features & 0x10, 0, "Encrypted bit must be set in binary");
+    assert_ne!(
+        stored_features & 0x10,
+        0,
+        "Encrypted bit must be set in binary"
+    );
 }
 
 // Verify v1 encoding/decoding symmetry
@@ -771,8 +838,15 @@ fn test_v1_encoding_symmetry() {
             let v1 = (u16::from(features) << DATE_BITS) | birthday;
             let decoded_birthday = v1 & DATE_MASK;
             let decoded_features = v1 >> DATE_BITS;
-            assert_eq!(decoded_birthday, birthday, "Birthday decode failed for f={features}, b={birthday}");
-            assert_eq!(decoded_features, u16::from(features), "Features decode failed for f={features}, b={birthday}");
+            assert_eq!(
+                decoded_birthday, birthday,
+                "Birthday decode failed for f={features}, b={birthday}"
+            );
+            assert_eq!(
+                decoded_features,
+                u16::from(features),
+                "Features decode failed for f={features}, b={birthday}"
+            );
         }
     }
 }

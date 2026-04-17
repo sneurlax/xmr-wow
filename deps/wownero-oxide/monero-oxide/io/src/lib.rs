@@ -2,7 +2,7 @@
 #![doc = include_str!("../README.md")]
 #![deny(missing_docs)]
 #![cfg_attr(not(feature = "std"), no_std)]
-// Vendored upstream code — MSRV lint suppressed
+// Vendored upstream code; MSRV lint suppressed
 #![allow(clippy::incompatible_msrv)]
 
 use core::fmt::Debug;
@@ -76,7 +76,7 @@ pub fn read_raw_vec<R: Read, T, F: FnMut(&mut R) -> io::Result<T>>(
   r: &mut R,
 ) -> io::Result<Vec<T>> {
   let mut res = vec![];
-  for _ in 0 .. len {
+  for _ in 0..len {
     res.push(f(r)?);
   }
   Ok(res)

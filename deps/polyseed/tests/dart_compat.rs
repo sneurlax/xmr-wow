@@ -130,8 +130,7 @@ fn encryption_unaware_yard_cakewallet() {
     let password = "CakeWallet";
 
     // Reference values from Dart test output
-    let expected_encrypted_phrase =
-        "arm dutch crystal reduce elephant mix squeeze garlic \
+    let expected_encrypted_phrase = "arm dutch crystal reduce elephant mix squeeze garlic \
          slam brand tent seed rubber fame summer sample";
     let expected_encrypted_entropy = "444d5b411f8e34e5ff2c1b37dc2ef352764b3c";
 
@@ -147,10 +146,13 @@ fn encryption_unaware_yard_cakewallet() {
     // Encrypt
     let mut encrypted = seed.clone();
     encrypted.crypt(password);
-    assert!(encrypted.is_encrypted(), "Seed should be encrypted after crypt()");
+    assert!(
+        encrypted.is_encrypted(),
+        "Seed should be encrypted after crypt()"
+    );
 
     // Verify encrypted entropy matches Dart
-    let encrypted_entropy_hex = hex::encode(&encrypted.entropy()[.. 19]);
+    let encrypted_entropy_hex = hex::encode(&encrypted.entropy()[..19]);
 
     assert_eq!(
         encrypted_entropy_hex, expected_encrypted_entropy,
@@ -167,7 +169,10 @@ fn encryption_unaware_yard_cakewallet() {
 
     // Decrypt and verify round-trip
     encrypted.crypt(password);
-    assert!(!encrypted.is_encrypted(), "Seed should be decrypted after second crypt()");
+    assert!(
+        !encrypted.is_encrypted(),
+        "Seed should be decrypted after second crypt()"
+    );
 
     let decrypted_key_hex = hex::encode(encrypted.key(Coin::Monero).as_ref());
 
@@ -203,7 +208,7 @@ fn serialization_unaware_yard_matches_dart() {
     );
 
     // Verify individual fields
-    assert_eq!(&storage[.. 8], b"POLYSEED", "Header must be POLYSEED");
+    assert_eq!(&storage[..8], b"POLYSEED", "Header must be POLYSEED");
     assert_eq!(storage[29], 0xFF, "Extra byte must be 0xFF");
 
     // Parse the Dart base64 and compare
@@ -218,7 +223,9 @@ fn serialization_unaware_yard_matches_dart() {
 #[test]
 fn deserialization_from_dart_base64() {
     let dart_bytes = base64_decode("UE9MWVNFRUQWAP7QTFMwyWZ55hIVJOa7aluTxzP/Y3c=");
-    let storage: [u8; 32] = dart_bytes.try_into().expect("base64 should decode to 32 bytes");
+    let storage: [u8; 32] = dart_bytes
+        .try_into()
+        .expect("base64 should decode to 32 bytes");
 
     let loaded = Polyseed::load(&storage, Language::English, 0).unwrap();
 
@@ -250,10 +257,16 @@ fn base64_decode(input: &str) -> Vec<u8> {
         if c == b'=' {
             return 0;
         }
-        ALPHABET.iter().position(|&x| x == c).expect("invalid base64 char") as u8
+        ALPHABET
+            .iter()
+            .position(|&x| x == c)
+            .expect("invalid base64 char") as u8
     }
 
-    let bytes: Vec<u8> = input.bytes().filter(|&b| b != b'\n' && b != b'\r').collect();
+    let bytes: Vec<u8> = input
+        .bytes()
+        .filter(|&b| b != b'\n' && b != b'\r')
+        .collect();
     let mut result = Vec::new();
 
     for chunk in bytes.chunks(4) {

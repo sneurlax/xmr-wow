@@ -19,7 +19,7 @@ impl CoordMessageStore {
     /// Returns the 0-based insertion index of the appended message.
     pub fn publish(&self, swap_id: [u8; 32], raw: Vec<u8>) -> usize {
         let mut guard = self.messages.write();
-        let bucket = guard.entry(swap_id).or_insert_with(Vec::new);
+        let bucket = guard.entry(swap_id).or_default();
         let idx = bucket.len();
         bucket.push(raw);
         idx

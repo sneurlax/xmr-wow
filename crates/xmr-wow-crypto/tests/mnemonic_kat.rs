@@ -3,8 +3,8 @@
 //! Asserts stable output from `polyseed_to_scalar` and `derive_view_key` so
 //! code changes don't silently alter key derivation for existing wallets.
 
-use xmr_wow_crypto::{mnemonic_to_scalar, derive_view_key, SeedCoin};
 use curve25519_dalek::scalar::Scalar;
+use xmr_wow_crypto::{derive_view_key, mnemonic_to_scalar, SeedCoin};
 
 // ---------------------------------------------------------------------------
 // Test 1: polyseed_to_scalar stability KAT
@@ -48,8 +48,8 @@ fn test_polyseed_to_scalar_known_answer() {
     // Hardcoded KAT vector recorded  using polyseed crate (pinned in Cargo.lock).
     // If updating the polyseed crate version, recompute and update this vector.
     let expected: [u8; 32] = [
-        183, 39, 242, 44, 243, 172, 144, 86, 243, 78, 92, 248, 213, 211, 163, 110,
-        219, 191, 85, 4, 98, 84, 77, 214, 42, 41, 255, 181, 0, 140, 153, 10,
+        183, 39, 242, 44, 243, 172, 144, 86, 243, 78, 92, 248, 213, 211, 163, 110, 219, 191, 85, 4,
+        98, 84, 77, 214, 42, 41, 255, 181, 0, 140, 153, 10,
     ];
 
     assert_eq!(
@@ -60,8 +60,7 @@ fn test_polyseed_to_scalar_known_answer() {
     // Additional structural assertions:
     // The scalar must not be zero (a degenerate spend key would be catastrophic).
     assert_ne!(
-        bytes,
-        [0u8; 32],
+        bytes, [0u8; 32],
         "polyseed spend scalar must not be the zero scalar"
     );
 
@@ -70,7 +69,7 @@ fn test_polyseed_to_scalar_known_answer() {
     // guaranteed by construction: we assert it explicitly for documentation.
     let canonical = Scalar::from_canonical_bytes(bytes);
     assert!(
-        canonical.into_option().is_some() || true, // mod_order always canonical
+        canonical.into_option().is_some(),
         "polyseed spend scalar should be canonical (< group order)"
     );
 }
@@ -137,10 +136,8 @@ fn test_polyseed_coin_specificity() {
 /// Spend key bytes from monero-rs docs (also used in address.rs inline test).
 /// Hex: 77916d0cd56ed1920aef6ca56d8a41bac915b68e4c46a589e0956e27a7b77404
 const SPEND_KEY_BYTES: [u8; 32] = [
-    0x77, 0x91, 0x6d, 0x0c, 0xd5, 0x6e, 0xd1, 0x92,
-    0x0a, 0xef, 0x6c, 0xa5, 0x6d, 0x8a, 0x41, 0xba,
-    0xc9, 0x15, 0xb6, 0x8e, 0x4c, 0x46, 0xa5, 0x89,
-    0xe0, 0x95, 0x6e, 0x27, 0xa7, 0xb7, 0x74, 0x04,
+    0x77, 0x91, 0x6d, 0x0c, 0xd5, 0x6e, 0xd1, 0x92, 0x0a, 0xef, 0x6c, 0xa5, 0x6d, 0x8a, 0x41, 0xba,
+    0xc9, 0x15, 0xb6, 0x8e, 0x4c, 0x46, 0xa5, 0x89, 0xe0, 0x95, 0x6e, 0x27, 0xa7, 0xb7, 0x74, 0x04,
 ];
 
 /// Expected view key: Keccak256(SPEND_KEY_BYTES) mod l.
@@ -148,10 +145,8 @@ const SPEND_KEY_BYTES: [u8; 32] = [
 ///
 /// Verified against the address.rs inline test `test_derive_view_key_deterministic`.
 const EXPECTED_VIEW_KEY_BYTES: [u8; 32] = [
-    0x24, 0xe1, 0x2a, 0xe3, 0xca, 0x29, 0xf8, 0x9e,
-    0xc8, 0xcb, 0x9e, 0x81, 0xb4, 0xa2, 0xfe, 0x5c,
-    0x00, 0xf1, 0xeb, 0xa2, 0xbd, 0xba, 0x1c, 0xe5,
-    0x82, 0x89, 0x7a, 0x27, 0x2c, 0x94, 0x3b, 0x03,
+    0x24, 0xe1, 0x2a, 0xe3, 0xca, 0x29, 0xf8, 0x9e, 0xc8, 0xcb, 0x9e, 0x81, 0xb4, 0xa2, 0xfe, 0x5c,
+    0x00, 0xf1, 0xeb, 0xa2, 0xbd, 0xba, 0x1c, 0xe5, 0x82, 0x89, 0x7a, 0x27, 0x2c, 0x94, 0x3b, 0x03,
 ];
 
 #[test]

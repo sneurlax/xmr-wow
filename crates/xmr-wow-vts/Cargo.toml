@@ -1,0 +1,25 @@
+[package]
+name        = "xmr-wow-vts"
+description = "Verifiable Timed Signatures: RSA time-lock puzzles for refund guarantee timelocks"
+version.workspace   = true
+edition.workspace   = true
+license.workspace   = true
+publish.workspace   = true
+
+[features]
+default = []
+
+[dependencies]
+num-bigint  = { version = "0.4", features = ["rand"] }
+num-traits  = "0.2"
+num-integer = "0.1"
+rand        = { workspace = true }
+rand_core   = { workspace = true }
+sha2        = { workspace = true }
+serde       = { workspace = true }
+thiserror   = { workspace = true }
+zeroize     = { workspace = true }
+
+[dev-dependencies]
+proptest    = { workspace = true }
+serde_json  = { workspace = true }

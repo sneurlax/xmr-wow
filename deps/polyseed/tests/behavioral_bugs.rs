@@ -42,8 +42,7 @@ fn bug1_too_many_words_returns_invalid_word_count() {
 fn bug2_nfc_vs_nfd_accent_stripping_fixed() {
     use unicode_normalization::UnicodeNormalization;
 
-    let strip_accents =
-        |word: &str| -> String { word.nfkd().filter(|c| c.is_ascii()).collect() };
+    let strip_accents = |word: &str| -> String { word.nfkd().filter(|c| c.is_ascii()).collect() };
 
     // NFC form: "é" is a single precomposed character U+00E9
     let celebre_nfc = "c\u{00E9}lebre";
@@ -54,8 +53,14 @@ fn bug2_nfc_vs_nfd_accent_stripping_fixed() {
     let stripped_nfd = strip_accents(celebre_nfd);
 
     // Both NFC and NFD forms now produce "celebre" after NFKD + ASCII filter
-    assert_eq!(stripped_nfc, "celebre", "NFC after NFKD strip should give celebre");
-    assert_eq!(stripped_nfd, "celebre", "NFD after NFKD strip should give celebre");
+    assert_eq!(
+        stripped_nfc, "celebre",
+        "NFC after NFKD strip should give celebre"
+    );
+    assert_eq!(
+        stripped_nfd, "celebre",
+        "NFD after NFKD strip should give celebre"
+    );
     assert_eq!(
         stripped_nfc, stripped_nfd,
         "NFC and NFD forms should produce identical results after NFKD accent stripping"
@@ -73,10 +78,18 @@ fn bug2_nfc_nfd_full_seed_spanish_fixed() {
     let seed_nfd = "eje fin parte ce\u{0301}lebre tabu\u{0301} pestan\u{0303}a lienzo puma \
         prisio\u{0301}n hora regalo lengua existir la\u{0301}piz lote sonoro";
 
-    let result_nfc =
-        Polyseed::from_string(Language::Spanish, Zeroizing::new(seed_nfc.to_string()), Coin::Monero, 0);
-    let result_nfd =
-        Polyseed::from_string(Language::Spanish, Zeroizing::new(seed_nfd.to_string()), Coin::Monero, 0);
+    let result_nfc = Polyseed::from_string(
+        Language::Spanish,
+        Zeroizing::new(seed_nfc.to_string()),
+        Coin::Monero,
+        0,
+    );
+    let result_nfd = Polyseed::from_string(
+        Language::Spanish,
+        Zeroizing::new(seed_nfd.to_string()),
+        Coin::Monero,
+        0,
+    );
 
     // Both NFC and NFD forms should now parse successfully
     assert!(result_nfc.is_ok(), "NFC form should now parse successfully");
@@ -85,7 +98,10 @@ fn bug2_nfc_nfd_full_seed_spanish_fixed() {
     // Both should produce the same seed
     let seed_nfc = result_nfc.unwrap();
     let seed_nfd = result_nfd.unwrap();
-    assert_eq!(seed_nfc, seed_nfd, "NFC and NFD forms should produce identical seeds");
+    assert_eq!(
+        seed_nfc, seed_nfd,
+        "NFC and NFD forms should produce identical seeds"
+    );
 }
 
 // Encrypted seed acceptance
@@ -101,8 +117,14 @@ fn bug3_encrypted_mask_accepted_with_crypt_support() {
     // The feature check passes 0x10 (it only checks reserved bits 0-3).
     let features_supported = |features: u8| -> bool { (features & RESERVED_FEATURES_MASK) == 0 };
     assert!(features_supported(0x00), "No features should be supported");
-    assert!(features_supported(ENCRYPTED_MASK), "Encrypted flag passes feature check");
-    assert!(!features_supported(0x01), "Reserved feature bits should be rejected");
+    assert!(
+        features_supported(ENCRYPTED_MASK),
+        "Encrypted flag passes feature check"
+    );
+    assert!(
+        !features_supported(0x01),
+        "Reserved feature bits should be rejected"
+    );
 
     // With crypt() now available, encrypted seeds can be properly handled.
 }

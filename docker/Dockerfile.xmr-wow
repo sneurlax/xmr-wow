@@ -1,0 +1,23 @@
+FROM rust:1.82-slim-bookworm AS builder
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    pkg-config libssl-dev build-essential && \
+    rm -rf /var/lib/apt/lists/*
+WORKDIR /build
+COPY . .
+RUN cargo build --release --bin xmr-wow-node --bin xmr-wow 2>&1 | tail -5
+
+FROM debian:bookworm-slim AS runtime
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libssl3 ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
+RUN useradd -m -u 1000 xmrwow
+COPY --from=builder /build/target/release/xmr-wow-node /usr/local/bin/xmr-wow-node
+COPY --from=builder /build/target/release/xmr-wow /usr/local/bin/xmr-wow
+COPY docker/sharechain-node-entrypoint.sh /usr/local/bin/sharechain-node-entrypoint.sh
+COPY docker/alice-entrypoint.sh /usr/local/bin/alice-entrypoint.sh
+COPY docker/bob-entrypoint.sh /usr/local/bin/bob-entrypoint.sh
+RUN chmod +x /usr/local/bin/sharechain-node-entrypoint.sh \
+    /usr/local/bin/alice-entrypoint.sh \
+    /usr/local/bin/bob-entrypoint.sh
+USER xmrwow
+WORKDIR /home/xmrwow

@@ -20,10 +20,7 @@
 //! - Derived scalars are not guaranteed to be canonical; we use
 //!   `from_bytes_mod_order` which reduces mod l.
 
-use curve25519_dalek::{
-    constants::ED25519_BASEPOINT_POINT as G,
-    scalar::Scalar,
-};
+use curve25519_dalek::{constants::ED25519_BASEPOINT_POINT as G, scalar::Scalar};
 use hmac::{Hmac, Mac};
 use sha2::Sha512;
 use zeroize::Zeroize;
@@ -43,7 +40,7 @@ impl SwapRole {
     fn as_bytes(self) -> &'static [u8] {
         match self {
             SwapRole::Alice => b"alice",
-            SwapRole::Bob   => b"bob",
+            SwapRole::Bob => b"bob",
         }
     }
 }
@@ -64,8 +61,8 @@ pub fn derive_swap_key(
     swap_id: &[u8; 32],
     role: SwapRole,
 ) -> KeyContribution {
-    let mut mac = HmacSha512::new_from_slice(master_seed)
-        .expect("HMAC-SHA512 accepts any key length");
+    let mut mac =
+        HmacSha512::new_from_slice(master_seed).expect("HMAC-SHA512 accepts any key length");
 
     // Domain: "xmr-swap-v1:" || role || ":" || chain || ":" || swap_id
     mac.update(b"xmr-swap-v1:");
@@ -126,7 +123,7 @@ mod tests {
         let k_xmr = derive_swap_key(&seed, "XMR", &swap_id, SwapRole::Alice);
         let k_wow = derive_swap_key(&seed, "WOW", &swap_id, SwapRole::Alice);
         let k_sal = derive_swap_key(&seed, "SAL", &swap_id, SwapRole::Alice);
-        let k_sc  = derive_swap_key(&seed, "SC",  &swap_id, SwapRole::Alice);
+        let k_sc = derive_swap_key(&seed, "SC", &swap_id, SwapRole::Alice);
 
         assert_ne!(k_xmr.secret.to_bytes(), k_wow.secret.to_bytes());
         assert_ne!(k_xmr.secret.to_bytes(), k_sal.secret.to_bytes());
@@ -152,7 +149,7 @@ mod tests {
         let swap_id = random_swap_id();
 
         let k_alice = derive_swap_key(&seed, "XMR", &swap_id, SwapRole::Alice);
-        let k_bob   = derive_swap_key(&seed, "XMR", &swap_id, SwapRole::Bob);
+        let k_bob = derive_swap_key(&seed, "XMR", &swap_id, SwapRole::Bob);
 
         assert_ne!(k_alice.secret.to_bytes(), k_bob.secret.to_bytes());
     }

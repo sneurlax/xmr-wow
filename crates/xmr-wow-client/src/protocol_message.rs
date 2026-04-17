@@ -22,7 +22,7 @@ use base64::Engine;
 
 use xmr_wow_crypto::{AdaptorSignature, CompletedSignature, DleqProof};
 
-use crate::swap_state::{RefundTimingObservation, SwapError};
+use crate::swap_state::{PersistedRefundArtifact, RefundTimingObservation, SwapError};
 
 /// Protocol message prefix for all XMR-WOW swap messages.
 const PROTOCOL_PREFIX: &str = "xmrwow1:";
@@ -40,8 +40,8 @@ pub enum ProtocolMessage {
         proof: DleqProof,
         amount_xmr: u64,
         amount_wow: u64,
-        xmr_refund_height: u64,
-        wow_refund_height: u64,
+        xmr_refund_delay_seconds: u64,
+        wow_refund_delay_seconds: u64,
         #[serde(default)]
         refund_timing: Option<RefundTimingObservation>,
         #[serde(default)]
@@ -53,7 +53,11 @@ pub enum ProtocolMessage {
         proof: DleqProof,
         #[serde(default)]
         bob_refund_address: Option<String>,
+        #[serde(default)]
+        refund_artifact: Option<PersistedRefundArtifact>,
     },
+    /// Counterparty refund artifact exchanged before the risk-lock step.
+    RefundArtifact { artifact: PersistedRefundArtifact },
     /// Adaptor pre-signature exchange (both parties send after locking).
     AdaptorPreSig { pre_sig: AdaptorSignature },
     /// Claim proof via completed adaptor signature.
@@ -104,8 +108,8 @@ pub fn decode_message<T: DeserializeOwned>(encoded: &str) -> Result<T, SwapError
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rand::rngs::OsRng;
     use crate::swap_state::RefundTimingSource;
+    use rand::rngs::OsRng;
     use xmr_wow_crypto::{DleqProof, KeyContribution};
 
     fn make_test_init() -> ProtocolMessage {
@@ -121,13 +125,13 @@ mod tests {
             proof,
             amount_xmr: 1_000_000_000_000,
             amount_wow: 500_000_000_000_000,
-            xmr_refund_height: 2000,
-            wow_refund_height: 1000,
+            xmr_refund_delay_seconds: 2000,
+            wow_refund_delay_seconds: 1000,
             refund_timing: Some(RefundTimingObservation {
                 xmr_base_height: 1950,
                 wow_base_height: 700,
-                xmr_lock_blocks: 50,
-                wow_lock_blocks: 300,
+                xmr_refund_delay_seconds: 2000,
+                wow_refund_delay_seconds: 1000,
                 source: RefundTimingSource::DaemonHeightQuery,
             }),
             alice_refund_address: Some("alice-refund-address".into()),
@@ -146,6 +150,7 @@ mod tests {
             pubkey: contrib.public_bytes(),
             proof,
             bob_refund_address: Some("bob-refund-address".into()),
+            refund_artifact: None,
         }
     }
 
@@ -188,7 +193,7 @@ mod tests {
     }
 
     #[test]
-    fn phase13_init_message_round_trips_refund_timing_observation() {
+    fn init_message_round_trips_refund_timing_observation() {
         let msg = make_test_init();
         let encoded = encode_message(&msg);
         let decoded: ProtocolMessage = decode_message(&encoded).unwrap();
@@ -196,19 +201,19 @@ mod tests {
         match decoded {
             ProtocolMessage::Init {
                 refund_timing,
-                xmr_refund_height,
-                wow_refund_height,
+                xmr_refund_delay_seconds,
+                wow_refund_delay_seconds,
                 ..
             } => {
                 let refund_timing =
-                    refund_timing.expect("Phase 13 init should carry refund timing");
+                    refund_timing.expect("init message should carry refund timing");
                 assert_eq!(
-                    refund_timing.xmr_base_height + refund_timing.xmr_lock_blocks,
-                    xmr_refund_height
+                    refund_timing.xmr_refund_delay_seconds,
+                    xmr_refund_delay_seconds
                 );
                 assert_eq!(
-                    refund_timing.wow_base_height + refund_timing.wow_lock_blocks,
-                    wow_refund_height
+                    refund_timing.wow_refund_delay_seconds,
+                    wow_refund_delay_seconds
                 );
             }
             _ => panic!("wrong variant"),
@@ -225,23 +230,26 @@ mod tests {
                 ProtocolMessage::Response {
                     pubkey: a,
                     bob_refund_address: ar,
+                    refund_artifact: aa,
                     ..
                 },
                 ProtocolMessage::Response {
                     pubkey: b,
                     bob_refund_address: br,
+                    refund_artifact: ba,
                     ..
                 },
             ) => {
                 assert_eq!(a, b);
                 assert_eq!(ar, br);
+                assert_eq!(aa, ba);
             }
             _ => panic!("wrong variant"),
         }
     }
 
     #[test]
-    fn phase15_init_and_response_messages_round_trip_refund_destinations() {
+    fn init_and_response_messages_round_trip_refund_destinations() {
         let init = make_test_init();
         let encoded_init = encode_message(&init);
         let decoded_init: ProtocolMessage = decode_message(&encoded_init).unwrap();
@@ -261,12 +269,8 @@ mod tests {
         let decoded_response: ProtocolMessage = decode_message(&encoded_response).unwrap();
         match decoded_response {
             ProtocolMessage::Response {
-                bob_refund_address,
-                ..
-            } => assert_eq!(
-                bob_refund_address.as_deref(),
-                Some("bob-refund-address")
-            ),
+                bob_refund_address, ..
+            } => assert_eq!(bob_refund_address.as_deref(), Some("bob-refund-address")),
             _ => panic!("wrong response variant"),
         }
     }
@@ -296,6 +300,36 @@ mod tests {
             ProtocolMessage::AdaptorPreSig { pre_sig: d } => {
                 assert_eq!(d.r_plus_t, [0xAA; 32]);
                 assert_eq!(d.s_prime, [0xBB; 32]);
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    #[test]
+    fn vts_refund_artifact_round_trips() {
+        use xmr_wow_wallet::{RefundArtifact, RefundChain};
+        let secret = curve25519_dalek::scalar::Scalar::from(7u64).to_bytes();
+        let artifact: PersistedRefundArtifact = RefundArtifact::new_with_bits(
+            RefundChain::Wow,
+            [0x42; 32],
+            "bob-refund-address",
+            1,
+            &secret,
+            10,
+            512,
+        )
+        .expect("test VTS artifact should build")
+        .into();
+        let msg = ProtocolMessage::RefundArtifact {
+            artifact: artifact.clone(),
+        };
+        let encoded = encode_message(&msg);
+        let decoded: ProtocolMessage = decode_message(&encoded).unwrap();
+        match decoded {
+            ProtocolMessage::RefundArtifact {
+                artifact: decoded_artifact,
+            } => {
+                assert_eq!(decoded_artifact, artifact);
             }
             _ => panic!("wrong variant"),
         }

@@ -1,12 +1,19 @@
-// Vendored upstream test code — lint suppressed
-#![allow(clippy::needless_borrows_for_generic_args, clippy::manual_div_ceil, clippy::identity_op, clippy::erasing_op, dead_code, unused_variables)]
+// Vendored upstream test code; lint suppressed
+#![allow(
+    clippy::needless_borrows_for_generic_args,
+    clippy::manual_div_ceil,
+    clippy::identity_op,
+    clippy::erasing_op,
+    dead_code,
+    unused_variables
+)]
 //! Encryption verification against C reference.
 
 use polyseed::{Coin, Language, Polyseed};
 use zeroize::Zeroizing;
 
-use sha2::Sha256;
 use pbkdf2::pbkdf2_hmac;
+use sha2::Sha256;
 
 // Constants mirrored from the C reference and Rust lib.rs
 const SECRET_BITS: usize = 150;
@@ -35,7 +42,10 @@ fn verify_constants_match_c_reference() {
     assert_eq!(ENCRYPTED_MASK, 0x10, "ENCRYPTED_MASK must be 0x10");
 
     // KDF_NUM_ITERATIONS in C: 10000
-    assert_eq!(POLYSEED_CRYPT_ITERATIONS, 10000, "KDF iterations must be 10000");
+    assert_eq!(
+        POLYSEED_CRYPT_ITERATIONS, 10000,
+        "KDF iterations must be 10000"
+    );
 }
 
 // Verify salt construction matches C reference exactly.
@@ -119,9 +129,13 @@ fn verify_xor_loop_range() {
     // Create a seed, encrypt it, and verify only the first 19 bytes changed
     let seed_str = "raven tail swear infant grief assist regular lamp \
         duck valid someone little harsh puppy airport language";
-    let original =
-        Polyseed::from_string(Language::English, Zeroizing::new(seed_str.into()), Coin::Monero, 0)
-            .unwrap();
+    let original = Polyseed::from_string(
+        Language::English,
+        Zeroizing::new(seed_str.into()),
+        Coin::Monero,
+        0,
+    )
+    .unwrap();
     let original_entropy = original.entropy().clone();
 
     let mut encrypted = original.clone();
@@ -131,7 +145,8 @@ fn verify_xor_loop_range() {
     // Bytes 19..32 should remain zero
     for i in SECRET_SIZE..32 {
         assert_eq!(
-            encrypted.entropy()[i], 0,
+            encrypted.entropy()[i],
+            0,
             "Byte {} (beyond SECRET_SIZE) must remain zero after encryption",
             i
         );
@@ -157,11 +172,19 @@ fn verify_xor_loop_range() {
 fn verify_feature_toggle() {
     let seed_str = "raven tail swear infant grief assist regular lamp \
         duck valid someone little harsh puppy airport language";
-    let original =
-        Polyseed::from_string(Language::English, Zeroizing::new(seed_str.into()), Coin::Monero, 0)
-            .unwrap();
+    let original = Polyseed::from_string(
+        Language::English,
+        Zeroizing::new(seed_str.into()),
+        Coin::Monero,
+        0,
+    )
+    .unwrap();
 
-    assert_eq!(original.features() & ENCRYPTED_MASK, 0, "Original should not have ENCRYPTED bit");
+    assert_eq!(
+        original.features() & ENCRYPTED_MASK,
+        0,
+        "Original should not have ENCRYPTED bit"
+    );
     assert!(!original.is_encrypted());
 
     let mut seed = original.clone();
@@ -173,7 +196,11 @@ fn verify_feature_toggle() {
     );
     assert!(seed.is_encrypted());
     // features should be exactly 0x10 (0 XOR 0x10)
-    assert_eq!(seed.features(), 0x10, "Features should be exactly 0x10 after encrypting a features=0 seed");
+    assert_eq!(
+        seed.features(),
+        0x10,
+        "Features should be exactly 0x10 after encrypting a features=0 seed"
+    );
 
     seed.crypt("password");
     assert_eq!(
@@ -182,7 +209,11 @@ fn verify_feature_toggle() {
         "After second crypt, ENCRYPTED bit must be cleared"
     );
     assert!(!seed.is_encrypted());
-    assert_eq!(seed.features(), 0, "Features should be back to 0 after decrypt");
+    assert_eq!(
+        seed.features(),
+        0,
+        "Features should be back to 0 after decrypt"
+    );
 }
 
 // Verify checksum recalculation after encryption
@@ -190,9 +221,13 @@ fn verify_feature_toggle() {
 fn verify_checksum_recalculation() {
     let seed_str = "raven tail swear infant grief assist regular lamp \
         duck valid someone little harsh puppy airport language";
-    let original =
-        Polyseed::from_string(Language::English, Zeroizing::new(seed_str.into()), Coin::Monero, 0)
-            .unwrap();
+    let original = Polyseed::from_string(
+        Language::English,
+        Zeroizing::new(seed_str.into()),
+        Coin::Monero,
+        0,
+    )
+    .unwrap();
 
     let mut encrypted = original.clone();
     encrypted.crypt("password");
@@ -208,7 +243,10 @@ fn verify_checksum_recalculation() {
 
     let loaded = loaded.unwrap();
     assert_eq!(loaded, encrypted, "Loaded encrypted seed should match");
-    assert!(loaded.is_encrypted(), "Loaded seed should still be encrypted");
+    assert!(
+        loaded.is_encrypted(),
+        "Loaded seed should still be encrypted"
+    );
 }
 
 // Full round-trip: encrypt then decrypt == original (self-inverse property)
@@ -216,22 +254,37 @@ fn verify_checksum_recalculation() {
 fn verify_full_roundtrip_self_inverse() {
     let seed_str = "raven tail swear infant grief assist regular lamp \
         duck valid someone little harsh puppy airport language";
-    let original =
-        Polyseed::from_string(Language::English, Zeroizing::new(seed_str.into()), Coin::Monero, 0)
-            .unwrap();
+    let original = Polyseed::from_string(
+        Language::English,
+        Zeroizing::new(seed_str.into()),
+        Coin::Monero,
+        0,
+    )
+    .unwrap();
 
     let mut seed = original.clone();
 
     // Encrypt
     seed.crypt("my_secret_password");
     assert!(seed.is_encrypted());
-    assert_ne!(*seed.entropy(), *original.entropy(), "Encrypted entropy should differ");
+    assert_ne!(
+        *seed.entropy(),
+        *original.entropy(),
+        "Encrypted entropy should differ"
+    );
 
     // Decrypt (second application is the inverse)
     seed.crypt("my_secret_password");
     assert!(!seed.is_encrypted());
-    assert_eq!(*seed.entropy(), *original.entropy(), "Decrypted entropy should match original");
-    assert_eq!(seed, original, "Decrypted seed should be identical to original");
+    assert_eq!(
+        *seed.entropy(),
+        *original.entropy(),
+        "Decrypted entropy should match original"
+    );
+    assert_eq!(
+        seed, original,
+        "Decrypted seed should be identical to original"
+    );
 }
 
 // Verify encrypted seed can encode/decode through mnemonic phrases
@@ -239,9 +292,13 @@ fn verify_full_roundtrip_self_inverse() {
 fn verify_encrypted_seed_phrase_roundtrip() {
     let seed_str = "raven tail swear infant grief assist regular lamp \
         duck valid someone little harsh puppy airport language";
-    let original =
-        Polyseed::from_string(Language::English, Zeroizing::new(seed_str.into()), Coin::Monero, 0)
-            .unwrap();
+    let original = Polyseed::from_string(
+        Language::English,
+        Zeroizing::new(seed_str.into()),
+        Coin::Monero,
+        0,
+    )
+    .unwrap();
     let original_key = original.key(Coin::Monero);
 
     // Encrypt
@@ -252,9 +309,11 @@ fn verify_encrypted_seed_phrase_roundtrip() {
     let encrypted_phrase = encrypted.to_string(Coin::Monero);
 
     // Decode the encrypted phrase
-    let decoded =
-        Polyseed::from_string(Language::English, encrypted_phrase, Coin::Monero, 0);
-    assert!(decoded.is_ok(), "Encrypted seed phrase should decode successfully");
+    let decoded = Polyseed::from_string(Language::English, encrypted_phrase, Coin::Monero, 0);
+    assert!(
+        decoded.is_ok(),
+        "Encrypted seed phrase should decode successfully"
+    );
 
     let mut decoded = decoded.unwrap();
     assert!(decoded.is_encrypted(), "Decoded seed should be encrypted");
@@ -265,7 +324,10 @@ fn verify_encrypted_seed_phrase_roundtrip() {
 
     // Verify key matches original
     let decrypted_key = decoded.key(Coin::Monero);
-    assert_eq!(*decrypted_key, *original_key, "Decrypted key should match original");
+    assert_eq!(
+        *decrypted_key, *original_key,
+        "Decrypted key should match original"
+    );
     assert_eq!(decoded, original, "Decrypted seed should match original");
 }
 
@@ -274,9 +336,13 @@ fn verify_encrypted_seed_phrase_roundtrip() {
 fn verify_encrypted_seed_store_load_roundtrip() {
     let seed_str = "raven tail swear infant grief assist regular lamp \
         duck valid someone little harsh puppy airport language";
-    let original =
-        Polyseed::from_string(Language::English, Zeroizing::new(seed_str.into()), Coin::Monero, 0)
-            .unwrap();
+    let original = Polyseed::from_string(
+        Language::English,
+        Zeroizing::new(seed_str.into()),
+        Coin::Monero,
+        0,
+    )
+    .unwrap();
 
     let mut encrypted = original.clone();
     encrypted.crypt("password");
@@ -302,7 +368,10 @@ fn verify_encrypted_seed_store_load_roundtrip() {
     // Decrypt the loaded seed
     loaded.crypt("password");
     assert!(!loaded.is_encrypted());
-    assert_eq!(loaded, original, "Decrypted loaded seed should match original");
+    assert_eq!(
+        loaded, original,
+        "Decrypted loaded seed should match original"
+    );
 }
 
 // Verify NFKD normalization of password
@@ -331,9 +400,13 @@ fn verify_password_nfkd_normalization() {
     // Verify round-trip: encrypt with NFC password, decrypt with NFD password
     let seed_str = "raven tail swear infant grief assist regular lamp \
         duck valid someone little harsh puppy airport language";
-    let original =
-        Polyseed::from_string(Language::English, Zeroizing::new(seed_str.into()), Coin::Monero, 0)
-            .unwrap();
+    let original = Polyseed::from_string(
+        Language::English,
+        Zeroizing::new(seed_str.into()),
+        Coin::Monero,
+        0,
+    )
+    .unwrap();
 
     let mut encrypted = original.clone();
     encrypted.crypt(password_nfc);
@@ -352,9 +425,13 @@ fn verify_password_nfkd_normalization() {
 fn verify_wrong_password_fails() {
     let seed_str = "raven tail swear infant grief assist regular lamp \
         duck valid someone little harsh puppy airport language";
-    let original =
-        Polyseed::from_string(Language::English, Zeroizing::new(seed_str.into()), Coin::Monero, 0)
-            .unwrap();
+    let original = Polyseed::from_string(
+        Language::English,
+        Zeroizing::new(seed_str.into()),
+        Coin::Monero,
+        0,
+    )
+    .unwrap();
 
     let mut encrypted = original.clone();
     encrypted.crypt("correct_password");
@@ -364,13 +441,19 @@ fn verify_wrong_password_fails() {
 
     // The features bit will be cleared (toggled twice), but the entropy will
     // be wrong because the XOR masks don't cancel out
-    assert!(!wrong_decrypt.is_encrypted(), "Features toggle regardless of password");
+    assert!(
+        !wrong_decrypt.is_encrypted(),
+        "Features toggle regardless of password"
+    );
     assert_ne!(
         *wrong_decrypt.entropy(),
         *original.entropy(),
         "Wrong password should produce different entropy"
     );
-    assert_ne!(wrong_decrypt, original, "Wrong password should not recover original seed");
+    assert_ne!(
+        wrong_decrypt, original,
+        "Wrong password should not recover original seed"
+    );
 }
 
 // Verify C seed3 encryption math (manual XOR, since Rust doesn't support features=1)
@@ -425,10 +508,16 @@ fn verify_c_seed3_encryption_math() {
     // Verify features toggle
     let original_features: u8 = 1; // FEATURE_FOO
     let encrypted_features = original_features ^ ENCRYPTED_MASK;
-    assert_eq!(encrypted_features, 0x11, "features=1 XOR ENCRYPTED_MASK should be 0x11");
+    assert_eq!(
+        encrypted_features, 0x11,
+        "features=1 XOR ENCRYPTED_MASK should be 0x11"
+    );
 
     let decrypted_features = encrypted_features ^ ENCRYPTED_MASK;
-    assert_eq!(decrypted_features, original_features, "Features toggle should be self-inverse");
+    assert_eq!(
+        decrypted_features, original_features,
+        "Features toggle should be self-inverse"
+    );
 }
 
 // Verify PBKDF2 inputs match the C test's assertions and the real output
@@ -436,7 +525,11 @@ fn verify_c_seed3_encryption_math() {
 fn verify_c_test_vector_inputs_and_real_mask() {
     // Verify the inputs match what the C test asserts
     let pw = b"password";
-    assert_eq!(hex::encode(pw), "70617373776f7264", "Password hex must match C test assertion");
+    assert_eq!(
+        hex::encode(pw),
+        "70617373776f7264",
+        "Password hex must match C test assertion"
+    );
 
     let mut salt = [0u8; 16];
     salt[..13].copy_from_slice(b"POLYSEED mask");
@@ -471,9 +564,13 @@ fn verify_c_test_vector_inputs_and_real_mask() {
 fn verify_full_encryption_known_seed() {
     let seed_str = "raven tail swear infant grief assist regular lamp \
         duck valid someone little harsh puppy airport language";
-    let seed =
-        Polyseed::from_string(Language::English, Zeroizing::new(seed_str.into()), Coin::Monero, 0)
-            .unwrap();
+    let seed = Polyseed::from_string(
+        Language::English,
+        Zeroizing::new(seed_str.into()),
+        Coin::Monero,
+        0,
+    )
+    .unwrap();
 
     let original_entropy = seed.entropy().clone();
 
@@ -547,8 +644,7 @@ fn verify_features_mask_interaction() {
 
     // The encrypted seed can be encoded and decoded
     let phrase = encrypted.to_string(Coin::Monero);
-    let decoded =
-        Polyseed::from_string(Language::English, phrase, Coin::Monero, 0);
+    let decoded = Polyseed::from_string(Language::English, phrase, Coin::Monero, 0);
     assert!(
         decoded.is_ok(),
         "Encrypted seed with features=0x10 should be decodable"
@@ -578,9 +674,13 @@ fn verify_double_crypt_is_identity() {
 fn verify_different_passwords_produce_different_results() {
     let seed_str = "raven tail swear infant grief assist regular lamp \
         duck valid someone little harsh puppy airport language";
-    let original =
-        Polyseed::from_string(Language::English, Zeroizing::new(seed_str.into()), Coin::Monero, 0)
-            .unwrap();
+    let original = Polyseed::from_string(
+        Language::English,
+        Zeroizing::new(seed_str.into()),
+        Coin::Monero,
+        0,
+    )
+    .unwrap();
 
     let mut enc1 = original.clone();
     enc1.crypt("password1");
@@ -606,9 +706,13 @@ fn verify_different_passwords_produce_different_results() {
 fn verify_empty_password() {
     let seed_str = "raven tail swear infant grief assist regular lamp \
         duck valid someone little harsh puppy airport language";
-    let original =
-        Polyseed::from_string(Language::English, Zeroizing::new(seed_str.into()), Coin::Monero, 0)
-            .unwrap();
+    let original = Polyseed::from_string(
+        Language::English,
+        Zeroizing::new(seed_str.into()),
+        Coin::Monero,
+        0,
+    )
+    .unwrap();
 
     let mut encrypted = original.clone();
     encrypted.crypt("");
@@ -628,9 +732,13 @@ fn verify_empty_password() {
 fn verify_crypt_coin_independence() {
     let seed_str = "raven tail swear infant grief assist regular lamp \
         duck valid someone little harsh puppy airport language";
-    let original =
-        Polyseed::from_string(Language::English, Zeroizing::new(seed_str.into()), Coin::Monero, 0)
-            .unwrap();
+    let original = Polyseed::from_string(
+        Language::English,
+        Zeroizing::new(seed_str.into()),
+        Coin::Monero,
+        0,
+    )
+    .unwrap();
 
     // Encrypt/decrypt cycle should work regardless of which coin is used
     // for encoding/decoding, because crypt() does not depend on the coin.
@@ -643,9 +751,11 @@ fn verify_crypt_coin_independence() {
     let phrase_wownero = encrypted.to_string(Coin::Wownero);
 
     // Decode back with the correct coin
-    let dec_monero = Polyseed::from_string(Language::English, phrase_monero, Coin::Monero, 0).unwrap();
+    let dec_monero =
+        Polyseed::from_string(Language::English, phrase_monero, Coin::Monero, 0).unwrap();
     let dec_aeon = Polyseed::from_string(Language::English, phrase_aeon, Coin::Aeon, 0).unwrap();
-    let dec_wownero = Polyseed::from_string(Language::English, phrase_wownero, Coin::Wownero, 0).unwrap();
+    let dec_wownero =
+        Polyseed::from_string(Language::English, phrase_wownero, Coin::Wownero, 0).unwrap();
 
     assert_eq!(dec_monero, encrypted);
     assert_eq!(dec_aeon, encrypted);
@@ -668,9 +778,13 @@ fn verify_crypt_coin_independence() {
 fn verify_auto_detection_with_encrypted_seed() {
     let seed_str = "raven tail swear infant grief assist regular lamp \
         duck valid someone little harsh puppy airport language";
-    let original =
-        Polyseed::from_string(Language::English, Zeroizing::new(seed_str.into()), Coin::Monero, 0)
-            .unwrap();
+    let original = Polyseed::from_string(
+        Language::English,
+        Zeroizing::new(seed_str.into()),
+        Coin::Monero,
+        0,
+    )
+    .unwrap();
 
     let mut encrypted = original.clone();
     encrypted.crypt("password");

@@ -6,7 +6,7 @@ pub mod simnet_testbed {
     //! Use the standalone crate directly.
 }
 
-use xmr_wow_sharechain::{SwapChain, SwapShare, EscrowOp, Difficulty};
+use xmr_wow_sharechain::{Difficulty, EscrowOp, SwapChain, SwapShare};
 
 /// Build the genesis share.
 pub fn genesis() -> SwapShare {
@@ -18,7 +18,8 @@ pub fn next_share(chain: &SwapChain, ops: Vec<EscrowOp>) -> SwapShare {
     let parent_hash = chain.tip_id().unwrap_or([0u8; 32]);
     let parent_height = chain.tip_height();
     let diff = Difficulty::from_u64(1);
-    let parent_cumdiff = chain.get_share(&parent_hash)
+    let parent_cumdiff = chain
+        .get_share(&parent_hash)
         .map(|s| s.cumulative_difficulty)
         .unwrap_or(diff);
     SwapShare {

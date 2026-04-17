@@ -5,14 +5,14 @@ Swap Agent for XMR-WOW Atomic Swap Simulation (monerosim/Shadow).
 This agent implements the atomic swap protocol steps against real monerod/wallet
 RPC endpoints running inside a Shadow network simulation. It follows the
 monerosim agent pattern (extends BaseAgent) and maps directly to the XMR-WOW
-swap protocol phases:
+swap protocol steps:
 
-    Phase 1: Key Generation -- generate Ed25519 key pair for swap contribution
-    Phase 2: Key Exchange   -- send/receive key material with counterparty
-    Phase 3: Address Derivation -- derive joint spend addresses on both chains
-    Phase 4: Lock           -- transfer funds to joint address
-    Phase 5: Verify Lock    -- confirm counterparty's lock on the other chain
-    Phase 6: Claim          -- sweep funds using revealed secret (or refund)
+    1. Key Generation -- generate Ed25519 key pair for swap contribution
+    2. Key Exchange   -- send/receive key material with counterparty
+    3. Address Derivation -- derive joint spend addresses on both chains
+    4. Lock           -- transfer funds to joint address
+    5. Verify Lock    -- confirm counterparty's lock on the other chain
+    6. Claim          -- sweep funds using revealed secret (or refund)
 
 The agent is designed to run inside Shadow with real monerod wallet RPC. It is
 NOT intended for standalone use outside of a Shadow simulation.

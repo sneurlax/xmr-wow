@@ -49,7 +49,7 @@ pub struct RefundCheckpoint {
     pub artifact_present: bool,
     pub artifact_validated: bool,
     pub refund_address: Option<String>,
-    pub refund_height: u64,
+    pub refund_delay_seconds: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

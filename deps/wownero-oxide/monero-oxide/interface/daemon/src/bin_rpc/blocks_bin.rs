@@ -197,8 +197,8 @@ async fn expand<T: HttpTransport>(
           "daemon sent us a block it doesn't have the transactions for".to_string(),
         ),
         TransactionsError::PrunedTransaction => InterfaceError::InternalError(
-          "complaining about receiving a pruned transaction when".to_string() +
-            " requesting a pruned transaction",
+          "complaining about receiving a pruned transaction when".to_string()
+            + " requesting a pruned transaction",
         ),
       })?;
   let mut next_ringct_output_index = None;
@@ -235,7 +235,7 @@ impl<T: HttpTransport> ProvidesUnvalidatedScannableBlocks for MoneroDaemon<T> {
       // `fetch_contiguous_blocks` cannot handle
       if *range.start() == 0 {
         res.push(ProvidesUnvalidatedScannableBlocks::scannable_block_by_number(self, 0).await?);
-        range = 1 ..= *range.end();
+        range = 1..=*range.end();
       }
       let len_before_fetch = res.len();
 
@@ -251,7 +251,7 @@ impl<T: HttpTransport> ProvidesUnvalidatedScannableBlocks for MoneroDaemon<T> {
           // If the new start is unrepresentable, it exceeds the representable end
           return Ok(res);
         };
-        range = new_start ..= *range.end();
+        range = new_start..=*range.end();
 
         // Fall back to what's presumably JSON methods
         for block in ProvidesUnvalidatedBlockchain::contiguous_blocks(self, range).await? {

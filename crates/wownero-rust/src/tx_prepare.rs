@@ -33,8 +33,7 @@ pub fn prepare_send_inputs(
             !o.spent
                 && !o.frozen
                 && is_spendable(o, daemon_height)
-                && !excluded_key_images
-                    .is_some_and(|exc| exc.contains(&o.key_image))
+                && !excluded_key_images.is_some_and(|exc| exc.contains(&o.key_image))
         })
         .cloned()
         .collect();
@@ -73,8 +72,7 @@ pub fn prepare_sweep_inputs(
             !o.spent
                 && !o.frozen
                 && is_spendable(o, daemon_height)
-                && !excluded_key_images
-                    .is_some_and(|exc| exc.contains(&o.key_image))
+                && !excluded_key_images.is_some_and(|exc| exc.contains(&o.key_image))
         })
         .cloned()
         .collect();
@@ -170,9 +168,7 @@ mod tests {
 
     #[test]
     fn send_error_when_only_frozen() {
-        let outputs = vec![
-            make_frozen(5_000_000_000_000, 100, "tx1"),
-        ];
+        let outputs = vec![make_frozen(5_000_000_000_000, 100, "tx1")];
         let result = prepare_send_inputs(&outputs, 200, 1_000_000_000_000, 1, None, None);
         assert!(result.is_err());
     }
@@ -180,9 +176,7 @@ mod tests {
     #[test]
     fn send_filters_out_unconfirmed() {
         // height 105: output at 100 has only 5 confirmations (needs 10)
-        let outputs = vec![
-            make_output(5_000_000_000_000, 100, "tx1"),
-        ];
+        let outputs = vec![make_output(5_000_000_000_000, 100, "tx1")];
         let result = prepare_send_inputs(&outputs, 105, 1_000_000_000_000, 1, None, None);
         assert!(result.is_err());
     }
@@ -190,9 +184,7 @@ mod tests {
     #[test]
     fn send_includes_confirmed_outputs() {
         // height 110: output at 100 has 10 confirmations
-        let outputs = vec![
-            make_output(5_000_000_000_000, 100, "tx1"),
-        ];
+        let outputs = vec![make_output(5_000_000_000_000, 100, "tx1")];
         let result = prepare_send_inputs(&outputs, 110, 1_000_000_000_000, 1, None, None).unwrap();
         assert_eq!(result.stored_outputs.len(), 1);
     }
@@ -213,9 +205,7 @@ mod tests {
     #[test]
     fn send_includes_mature_coinbase() {
         // height 160: coinbase at 100 has 60 confirmations
-        let outputs = vec![
-            make_coinbase(2_000_000_000_000, 100, "cb1"),
-        ];
+        let outputs = vec![make_coinbase(2_000_000_000_000, 100, "cb1")];
         let result = prepare_send_inputs(&outputs, 160, 1_000_000_000_000, 1, None, None).unwrap();
         assert_eq!(result.stored_outputs.len(), 1);
     }
@@ -259,16 +249,15 @@ mod tests {
             make_output(3_000_000_000_000, 100, "tx3"),
         ];
         let keys = vec!["tx1:0".to_string(), "tx3:0".to_string()];
-        let result = prepare_send_inputs(&outputs, 200, 500_000_000_000, 1, Some(&keys), None).unwrap();
+        let result =
+            prepare_send_inputs(&outputs, 200, 500_000_000_000, 1, Some(&keys), None).unwrap();
         assert_eq!(result.stored_outputs.len(), 2);
         assert_eq!(result.total_input, 4_000_000_000_000);
     }
 
     #[test]
     fn send_error_when_no_spendable() {
-        let outputs = vec![
-            make_spent(5_000_000_000_000, 100, "tx1"),
-        ];
+        let outputs = vec![make_spent(5_000_000_000_000, 100, "tx1")];
         let result = prepare_send_inputs(&outputs, 200, 1_000_000_000_000, 1, None, None);
         assert!(result.is_err());
     }
@@ -300,9 +289,7 @@ mod tests {
 
     #[test]
     fn sweep_error_when_only_frozen() {
-        let outputs = vec![
-            make_frozen(1_000_000_000_000, 100, "tx1"),
-        ];
+        let outputs = vec![make_frozen(1_000_000_000_000, 100, "tx1")];
         let result = prepare_sweep_inputs(&outputs, 200, None, None);
         assert!(result.is_err());
     }
@@ -344,9 +331,7 @@ mod tests {
 
     #[test]
     fn sweep_error_when_empty() {
-        let outputs = vec![
-            make_spent(1_000_000_000_000, 100, "tx1"),
-        ];
+        let outputs = vec![make_spent(1_000_000_000_000, 100, "tx1")];
         let result = prepare_sweep_inputs(&outputs, 200, None, None);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("No spendable outputs"));
@@ -359,7 +344,10 @@ mod tests {
         let mut o2 = make_output(2_000_000_000_000, 100, "tx_b");
         o2.output_index = 2;
         let result = prepare_sweep_inputs(&[o1, o2], 200, None, None).unwrap();
-        assert_eq!(result.spent_output_keys, vec!["tx_a:0".to_string(), "tx_b:2".to_string()]);
+        assert_eq!(
+            result.spent_output_keys,
+            vec!["tx_a:0".to_string(), "tx_b:2".to_string()]
+        );
     }
 
     #[test]
@@ -394,7 +382,9 @@ mod tests {
             make_output(2_000_000_000_000, 100, "tx2"),
         ];
         let excluded: HashSet<String> = ["ki_tx2".to_string()].into();
-        let result = prepare_send_inputs(&outputs, 200, 1_000_000_000_000, 1, None, Some(&excluded)).unwrap();
+        let result =
+            prepare_send_inputs(&outputs, 200, 1_000_000_000_000, 1, None, Some(&excluded))
+                .unwrap();
         assert_eq!(result.stored_outputs.len(), 1);
         assert_eq!(result.stored_outputs[0].tx_hash, "tx1");
     }

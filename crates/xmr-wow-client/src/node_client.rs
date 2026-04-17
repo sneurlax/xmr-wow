@@ -24,7 +24,8 @@ impl NodeClient {
             &format!("{}/json_rpc", self.base_url),
             "submit_escrow_op",
             params,
-        ).await?;
+        )
+        .await?;
         Ok(())
     }
 
@@ -35,7 +36,8 @@ impl NodeClient {
             &format!("{}/json_rpc", self.base_url),
             "get_swap_status",
             params,
-        ).await?;
+        )
+        .await?;
         let state = result["state"].as_str().unwrap_or("unknown").to_string();
         let k_b = result["k_b"].as_str().map(|s| s.to_string());
         Ok(SwapStatusResponse { state, k_b })
@@ -47,32 +49,43 @@ impl NodeClient {
             &format!("{}/json_rpc", self.base_url),
             "get_chain_height",
             Value::Null,
-        ).await?;
+        )
+        .await?;
         let height = result["height"].as_u64().unwrap_or(0);
         Ok(height)
     }
 
     /// Publish a coordination message for a swap; returns the 0-based insertion index.
-    pub async fn publish_coord_message(&self, swap_id: &[u8; 32], payload: Vec<u8>) -> anyhow::Result<usize> {
+    pub async fn publish_coord_message(
+        &self,
+        swap_id: &[u8; 32],
+        payload: Vec<u8>,
+    ) -> anyhow::Result<usize> {
         let params = json!({ "swap_id": hex::encode(swap_id), "payload": payload });
         let result: Value = rpc_call(
             &self.http,
             &format!("{}/json_rpc", self.base_url),
             "publish_coord_message",
             params,
-        ).await?;
+        )
+        .await?;
         Ok(result["index"].as_u64().unwrap_or(0) as usize)
     }
 
     /// Poll for coordination messages after `after_index`; returns (messages, next_index).
-    pub async fn poll_coord_messages(&self, swap_id: &[u8; 32], after_index: usize) -> anyhow::Result<(Vec<Vec<u8>>, usize)> {
+    pub async fn poll_coord_messages(
+        &self,
+        swap_id: &[u8; 32],
+        after_index: usize,
+    ) -> anyhow::Result<(Vec<Vec<u8>>, usize)> {
         let params = json!({ "swap_id": hex::encode(swap_id), "after_index": after_index });
         let result: Value = rpc_call(
             &self.http,
             &format!("{}/json_rpc", self.base_url),
             "poll_coord_messages",
             params,
-        ).await?;
+        )
+        .await?;
         let msgs: Vec<Vec<u8>> = serde_json::from_value(result["messages"].clone())?;
         let next = result["next_index"].as_u64().unwrap_or(0) as usize;
         Ok((msgs, next))
@@ -86,7 +99,8 @@ impl NodeClient {
             &format!("{}/json_rpc", self.base_url),
             "replay_coord_messages",
             params,
-        ).await?;
+        )
+        .await?;
         Ok(serde_json::from_value(result["messages"].clone())?)
     }
 }
@@ -111,10 +125,7 @@ async fn rpc_call<P: serde::Serialize, R: serde::de::DeserializeOwned>(
         "params": params,
     });
 
-    let resp = http.post(url)
-        .json(&body)
-        .send()
-        .await?;
+    let resp = http.post(url).json(&body).send().await?;
 
     let json: Value = resp.json().await?;
 
@@ -124,7 +135,8 @@ async fn rpc_call<P: serde::Serialize, R: serde::de::DeserializeOwned>(
         }
     }
 
-    let result = json.get("result")
+    let result = json
+        .get("result")
         .ok_or_else(|| anyhow::anyhow!("RPC response missing 'result' field"))?;
 
     Ok(serde_json::from_value(result.clone())?)

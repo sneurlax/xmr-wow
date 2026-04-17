@@ -136,7 +136,11 @@ mod tests {
         assert_eq!(adj[0].1, 1_000_000_000_000 - 33_333_334);
         assert_eq!(adj[1].1, 1_000_000_000_000 - 33_333_333);
         assert_eq!(adj[2].1, 1_000_000_000_000 - 33_333_333);
-        let total_deducted: u64 = r.iter().zip(&adj).map(|((_, orig), (_, adj))| orig - adj).sum();
+        let total_deducted: u64 = r
+            .iter()
+            .zip(&adj)
+            .map(|((_, orig), (_, adj))| orig - adj)
+            .sum();
         assert_eq!(total_deducted, 100_000_000);
     }
 

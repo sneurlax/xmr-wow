@@ -5,14 +5,14 @@ use xmr_wow_client::{
 };
 
 fn sample_params() -> SwapParams {
-    let (refund_timing, xmr_refund_height, wow_refund_height) =
+    let (refund_timing, xmr_refund_delay_seconds, wow_refund_delay_seconds) =
         build_observed_refund_timing(100, 200, 500, 800).unwrap();
 
     SwapParams {
         amount_xmr: 1_000_000_000_000,
         amount_wow: 500_000_000_000_000,
-        xmr_refund_height,
-        wow_refund_height,
+        xmr_refund_delay_seconds,
+        wow_refund_delay_seconds,
         refund_timing: Some(refund_timing),
         alice_refund_address: None,
         bob_refund_address: None,
@@ -60,7 +60,7 @@ fn extract_pubkey_and_proof(state: &SwapState) -> ([u8; 32], xmr_wow_crypto::Dle
 }
 
 #[test]
-fn phase13_complete_with_refund_requires_tx_hash() {
+fn complete_with_refund_requires_tx_hash() {
     let xmr_locked = make_joint_address(SwapRole::Alice)
         .record_xmr_lock([0xAA; 32])
         .unwrap();
@@ -73,7 +73,7 @@ fn phase13_complete_with_refund_requires_tx_hash() {
 }
 
 #[test]
-fn phase13_lock_progression_is_blocked_or_labeled_before_risky_steps() {
+fn lock_progression_is_blocked_or_labeled_before_risky_steps() {
     let params = sample_params();
     let decision =
         validate_pre_risk_entry(&params, GuaranteeMode::CurrentSingleSignerPreLockArtifact)
@@ -83,19 +83,19 @@ fn phase13_lock_progression_is_blocked_or_labeled_before_risky_steps() {
 }
 
 #[test]
-fn phase13_cooperative_refund_commands_are_fail_closed() {
+fn cooperative_refund_commands_are_fail_closed() {
     let decision = guarantee_decision(GuaranteeMode::CooperativeRefundCommands);
     assert_eq!(decision.status, GuaranteeStatus::UnsupportedForGuarantee);
 }
 
 #[test]
-fn phase13_legacy_refund_command_is_fail_closed() {
+fn legacy_refund_command_is_fail_closed() {
     let decision = guarantee_decision(GuaranteeMode::LegacyRefundNoEvidence);
     assert_eq!(decision.status, GuaranteeStatus::Blocked);
 }
 
 #[test]
-fn phase13_legacy_persisted_swap_without_refund_timing_is_rejected() {
+fn legacy_persisted_swap_without_refund_timing_is_rejected() {
     let mut params = sample_params();
     params.refund_timing = None;
 
@@ -103,13 +103,13 @@ fn phase13_legacy_persisted_swap_without_refund_timing_is_rejected() {
         .unwrap_err()
         .to_string();
     assert!(
-        err.contains("Phase 13 timing basis missing"),
+        err.contains("Timing basis missing"),
         "error: {err}"
     );
 }
 
 #[test]
-fn phase13_show_and_resume_surface_blocked_or_unsupported_guidance() {
+fn show_and_resume_surface_blocked_or_unsupported_guidance() {
     let joint_address = make_joint_address(SwapRole::Alice);
     let decision = guidance_decision(&joint_address).expect("guidance decision");
     assert_eq!(decision.status, GuaranteeStatus::UnsupportedForGuarantee);

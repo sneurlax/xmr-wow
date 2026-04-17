@@ -1,0 +1,7 @@
+{
+  "status": "claimed",
+  "swap_id": "3a80e25ed2f766b2bfe39e72140f65eb54b226ed42f1d32f0e461c24e5125861",
+  "transport": "sharechain",
+  "role": "alice",
+  "note": "swap_id produced by sharechain_transport_full_swap_init_through_claim in-process test (crates/xmr-wow-client/tests/e2e_sharechain_swap.rs). Full sharechain transport path: SharechainMessenger -> axum in-process node -> SwapState::Complete. No xmrwow1: strings or --message args used. Shadow simulation run deferred (requires Shadow + monerosim environment)."
+}

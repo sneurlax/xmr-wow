@@ -17,10 +17,7 @@
 //! any lock transaction is broadcast. If the process crashes after broadcast
 //! but before persistence, funds are permanently lost.
 
-use aes_gcm::{
-    aead::Aead,
-    Aes256Gcm, KeyInit, Nonce,
-};
+use aes_gcm::{aead::Aead, Aes256Gcm, KeyInit, Nonce};
 use argon2::{Algorithm, Argon2, Params, Version};
 use zeroize::Zeroizing;
 
@@ -67,9 +64,11 @@ pub fn decrypt_secret(key: &[u8; 32], encrypted: &[u8]) -> Result<Zeroizing<[u8;
     let nonce_arr: [u8; 12] = nonce_bytes.try_into().expect("nonce is exactly 12 bytes");
     let nonce = Nonce::from(nonce_arr);
 
-    let plaintext = cipher
-        .decrypt(&nonce, ciphertext)
-        .map_err(|_| SwapError::DecryptionFailed("AES-256-GCM decryption failed (wrong password or corrupted data)".into()))?;
+    let plaintext = cipher.decrypt(&nonce, ciphertext).map_err(|_| {
+        SwapError::DecryptionFailed(
+            "AES-256-GCM decryption failed (wrong password or corrupted data)".into(),
+        )
+    })?;
 
     if plaintext.len() != 32 {
         return Err(SwapError::DecryptionFailed(format!(
@@ -116,7 +115,11 @@ mod tests {
         let key = derive_key(b"password", b"saltsaltsaltsalt");
         let secret = [0x42u8; 32];
         let encrypted = encrypt_secret(&key, &secret);
-        assert_eq!(encrypted.len(), 60, "nonce(12) + ciphertext(32) + tag(16) = 60");
+        assert_eq!(
+            encrypted.len(),
+            60,
+            "nonce(12) + ciphertext(32) + tag(16) = 60"
+        );
     }
 
     #[test]

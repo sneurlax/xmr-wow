@@ -103,16 +103,16 @@ impl Eventuality {
     let Transaction::V2 { proofs: Some(PrunedRctProofs { ref base, .. }), .. } = tx else {
       return false;
     };
-    if base.commitments !=
-      commitments_and_encrypted_amounts
+    if base.commitments
+      != commitments_and_encrypted_amounts
         .iter()
         .map(|(commitment, _)| commitment.commit().compress())
         .collect::<Vec<_>>()
     {
       return false;
     }
-    if base.encrypted_amounts !=
-      commitments_and_encrypted_amounts.into_iter().map(|(_, amount)| amount).collect::<Vec<_>>()
+    if base.encrypted_amounts
+      != commitments_and_encrypted_amounts.into_iter().map(|(_, amount)| amount).collect::<Vec<_>>()
     {
       return false;
     }

@@ -6,8 +6,8 @@ use std::path::PathBuf;
 /// workspace root, which we locate via the CARGO_MANIFEST_DIR env var that
 /// Cargo sets when running integration tests.
 fn main_rs_path() -> PathBuf {
-    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")
-        .expect("CARGO_MANIFEST_DIR must be set by cargo test");
+    let manifest_dir =
+        std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR must be set by cargo test");
     PathBuf::from(manifest_dir).join("src/main.rs")
 }
 

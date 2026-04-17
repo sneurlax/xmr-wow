@@ -561,9 +561,6 @@ mod tests {
         let spend_scalar = Scalar::from_bytes_mod_order([7u8; 32]);
         let point = spend_key_from_scalar(&spend_scalar);
         // Verify it's a valid point by checking it's not the identity
-        assert_ne!(
-            point,
-            curve25519_dalek::edwards::EdwardsPoint::default()
-        );
+        assert_ne!(point, curve25519_dalek::edwards::EdwardsPoint::default());
     }
 }

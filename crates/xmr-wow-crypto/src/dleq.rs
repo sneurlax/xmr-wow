@@ -116,8 +116,7 @@ impl DleqProof {
             .decompress()
             .ok_or(CryptoError::DleqVerificationFailed)?;
 
-        let s = parse_scalar(self.response)
-            .ok_or(CryptoError::DleqVerificationFailed)?;
+        let s = parse_scalar(self.response).ok_or(CryptoError::DleqVerificationFailed)?;
 
         let c = challenge_single(K, &R, context);
 
@@ -193,8 +192,7 @@ impl DleqProofDual {
             .decompress()
             .ok_or(CryptoError::DleqVerificationFailed)?;
 
-        let s = parse_scalar(self.response)
-            .ok_or(CryptoError::DleqVerificationFailed)?;
+        let s = parse_scalar(self.response).ok_or(CryptoError::DleqVerificationFailed)?;
 
         let c = challenge_dual(K, J, H, &R_g, &R_h, context);
 
@@ -242,7 +240,10 @@ impl DleqProof {
             .decompress()
             .ok_or(CryptoError::InvalidPoint)?;
         parse_scalar(response).ok_or(CryptoError::InvalidScalar)?;
-        Ok(DleqProof { commitment, response })
+        Ok(DleqProof {
+            commitment,
+            response,
+        })
     }
 }
 
@@ -279,10 +280,10 @@ mod tests {
         proof.response[0] ^= 0x01;
         // May produce invalid canonical scalar -> DleqVerificationFailed
         let _ = proof.verify(&K, b"test-context"); // either ok-but-wrong or Err
-        // Either way, it must NOT succeed with the original K
-        // (flipping a byte in s makes s*G != R + c*K with overwhelming probability)
-        // Re-run until we get a non-canonical byte flip that still parses:
-        // Just assert both cases are handled (no panic):
+                                                   // Either way, it must NOT succeed with the original K
+                                                   // (flipping a byte in s makes s*G != R + c*K with overwhelming probability)
+                                                   // Re-run until we get a non-canonical byte flip that still parses:
+                                                   // Just assert both cases are handled (no panic):
         let mut proof2 = DleqProof::prove(&k, &K, b"test-context", &mut OsRng);
         // force response to all-zeros (valid canonical scalar = 0)
         proof2.response = [0u8; 32];

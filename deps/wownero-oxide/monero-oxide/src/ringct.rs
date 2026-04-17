@@ -126,36 +126,35 @@ impl RctType {
       RctType::AggregateMlsagBorromean | RctType::MlsagBorromean | RctType::MlsagBulletproofs => {
         false
       }
-      RctType::MlsagBulletproofsCompactAmount |
-      RctType::ClsagBulletproof |
-      RctType::ClsagBulletproofPlus |
-      RctType::WowneroClsagBulletproofPlus => true,
+      RctType::MlsagBulletproofsCompactAmount
+      | RctType::ClsagBulletproof
+      | RctType::ClsagBulletproofPlus
+      | RctType::WowneroClsagBulletproofPlus => true,
     }
   }
 
   /// True if this RctType uses a Bulletproof, false otherwise.
   pub(crate) fn bulletproof(&self) -> bool {
     match self {
-      RctType::MlsagBulletproofs |
-      RctType::MlsagBulletproofsCompactAmount |
-      RctType::ClsagBulletproof => true,
-      RctType::AggregateMlsagBorromean |
-      RctType::MlsagBorromean |
-      RctType::ClsagBulletproofPlus |
-      RctType::WowneroClsagBulletproofPlus => false,
+      RctType::MlsagBulletproofs
+      | RctType::MlsagBulletproofsCompactAmount
+      | RctType::ClsagBulletproof => true,
+      RctType::AggregateMlsagBorromean
+      | RctType::MlsagBorromean
+      | RctType::ClsagBulletproofPlus
+      | RctType::WowneroClsagBulletproofPlus => false,
     }
   }
 
   /// True if this RctType uses a Bulletproof+, false otherwise.
   pub(crate) fn bulletproof_plus(&self) -> bool {
     match self {
-      RctType::ClsagBulletproofPlus |
-      RctType::WowneroClsagBulletproofPlus => true,
-      RctType::AggregateMlsagBorromean |
-      RctType::MlsagBorromean |
-      RctType::MlsagBulletproofs |
-      RctType::MlsagBulletproofsCompactAmount |
-      RctType::ClsagBulletproof => false,
+      RctType::ClsagBulletproofPlus | RctType::WowneroClsagBulletproofPlus => true,
+      RctType::AggregateMlsagBorromean
+      | RctType::MlsagBorromean
+      | RctType::MlsagBulletproofs
+      | RctType::MlsagBulletproofsCompactAmount
+      | RctType::ClsagBulletproof => false,
     }
   }
 }
@@ -211,11 +210,11 @@ impl RctBase {
 
     match rct_type {
       RctType::AggregateMlsagBorromean | RctType::MlsagBorromean => {}
-      RctType::MlsagBulletproofs |
-      RctType::MlsagBulletproofsCompactAmount |
-      RctType::ClsagBulletproof |
-      RctType::ClsagBulletproofPlus |
-      RctType::WowneroClsagBulletproofPlus => {
+      RctType::MlsagBulletproofs
+      | RctType::MlsagBulletproofsCompactAmount
+      | RctType::ClsagBulletproof
+      | RctType::ClsagBulletproofPlus
+      | RctType::WowneroClsagBulletproofPlus => {
         if outputs == 0 {
           // Because the Bulletproofs(+) layout must be canonical, there must be 1 Bulletproof if
           // Bulletproofs are in use
@@ -240,7 +239,7 @@ impl RctBase {
         } else {
           vec![]
         },
-        encrypted_amounts: (0 .. outputs)
+        encrypted_amounts: (0..outputs)
           .map(|_| EncryptedAmount::read(rct_type.compact_encrypted_amounts(), r))
           .collect::<Result<_, _>>()?,
         commitments: read_raw_vec(CompressedPoint::read, outputs, r)?,
@@ -313,8 +312,8 @@ impl RctPrunable {
         write_raw_vec(BorromeanRange::write, borromean, w)?;
         write_raw_vec(Mlsag::write, mlsags, w)
       }
-      RctPrunable::MlsagBulletproofs { bulletproof, mlsags, pseudo_outs } |
-      RctPrunable::MlsagBulletproofsCompactAmount { bulletproof, mlsags, pseudo_outs } => {
+      RctPrunable::MlsagBulletproofs { bulletproof, mlsags, pseudo_outs }
+      | RctPrunable::MlsagBulletproofsCompactAmount { bulletproof, mlsags, pseudo_outs } => {
         if rct_type == RctType::MlsagBulletproofs {
           w.write_all(&1u32.to_le_bytes())?;
         } else {
@@ -365,7 +364,7 @@ impl RctPrunable {
       },
       RctType::MlsagBorromean => RctPrunable::MlsagBorromean {
         borromean: read_raw_vec(BorromeanRange::read, outputs, r)?,
-        mlsags: (0 .. inputs).map(|_| Mlsag::read(ring_length, 2, r)).collect::<Result<_, _>>()?,
+        mlsags: (0..inputs).map(|_| Mlsag::read(ring_length, 2, r)).collect::<Result<_, _>>()?,
       },
       RctType::MlsagBulletproofs | RctType::MlsagBulletproofsCompactAmount => {
         let bulletproof = {
@@ -380,7 +379,7 @@ impl RctPrunable {
           Bulletproof::read(r)?
         };
         let mlsags =
-          (0 .. inputs).map(|_| Mlsag::read(ring_length, 2, r)).collect::<Result<_, _>>()?;
+          (0..inputs).map(|_| Mlsag::read(ring_length, 2, r)).collect::<Result<_, _>>()?;
         let pseudo_outs = read_raw_vec(CompressedPoint::read, inputs, r)?;
         if rct_type == RctType::MlsagBulletproofs {
           RctPrunable::MlsagBulletproofs { bulletproof, mlsags, pseudo_outs }
@@ -389,7 +388,9 @@ impl RctPrunable {
           RctPrunable::MlsagBulletproofsCompactAmount { bulletproof, mlsags, pseudo_outs }
         }
       }
-      RctType::ClsagBulletproof | RctType::ClsagBulletproofPlus | RctType::WowneroClsagBulletproofPlus => RctPrunable::Clsag {
+      RctType::ClsagBulletproof
+      | RctType::ClsagBulletproofPlus
+      | RctType::WowneroClsagBulletproofPlus => RctPrunable::Clsag {
         rct_type,
         bulletproof: {
           if read_byte(r)? != 1 {
@@ -401,7 +402,7 @@ impl RctPrunable {
             Bulletproof::read_plus
           })(r)?
         },
-        clsags: (0 .. inputs).map(|_| Clsag::read(ring_length, r)).collect::<Result<_, _>>()?,
+        clsags: (0..inputs).map(|_| Clsag::read(ring_length, r)).collect::<Result<_, _>>()?,
         pseudo_outs: read_raw_vec(CompressedPoint::read, inputs, r)?,
       },
     })
@@ -410,13 +411,13 @@ impl RctPrunable {
   /// Write the RctPrunable as necessary for signing the signature.
   pub(crate) fn signature_write<W: Write>(&self, w: &mut W) -> io::Result<()> {
     match self {
-      RctPrunable::AggregateMlsagBorromean { borromean, .. } |
-      RctPrunable::MlsagBorromean { borromean, .. } => {
+      RctPrunable::AggregateMlsagBorromean { borromean, .. }
+      | RctPrunable::MlsagBorromean { borromean, .. } => {
         borromean.iter().try_for_each(|rs| rs.write(w))
       }
-      RctPrunable::MlsagBulletproofs { bulletproof, .. } |
-      RctPrunable::MlsagBulletproofsCompactAmount { bulletproof, .. } |
-      RctPrunable::Clsag { bulletproof, .. } => bulletproof.signature_write(w),
+      RctPrunable::MlsagBulletproofs { bulletproof, .. }
+      | RctPrunable::MlsagBulletproofsCompactAmount { bulletproof, .. }
+      | RctPrunable::Clsag { bulletproof, .. } => bulletproof.signature_write(w),
     }
   }
 }

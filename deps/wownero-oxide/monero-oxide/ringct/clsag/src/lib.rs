@@ -3,7 +3,7 @@
 #![deny(missing_docs)]
 #![cfg_attr(not(feature = "std"), no_std)]
 #![allow(non_snake_case)]
-// Vendored upstream code — MSRV lint suppressed
+// Vendored upstream code; MSRV lint suppressed
 #![allow(clippy::incompatible_msrv)]
 
 use core::ops::Deref;
@@ -179,7 +179,7 @@ fn core(
 
   // Truncate it for the round transcript, altering the DST as needed
   to_hash.truncate(((2 * n) + 1) * 32);
-  for i in 0 .. ROUND.len() {
+  for i in 0..ROUND.len() {
     to_hash[PREFIX.len() + i] = ROUND[i];
   }
   // Unfortunately, it's I D pseudo_out instead of pseudo_out I D, meaning this needs to be
@@ -214,7 +214,7 @@ fn core(
   // Perform the core loop
   let mut in_range = Choice::from(0);
   let mut c1 = c;
-  for mut i in 0 .. iter_end {
+  for mut i in 0..iter_end {
     in_range |= i.ct_eq(&start);
     in_range ^= i.ct_eq(&end);
     i %= n;
@@ -298,7 +298,7 @@ impl Clsag {
         .into();
     let D = H * mask_delta;
     let mut s = Vec::with_capacity(input.decoys.ring().len());
-    for _ in 0 .. input.decoys.ring().len() {
+    for _ in 0..input.decoys.ring().len() {
       s.push(Scalar::random(rng));
     }
     let ((D, c_p, c_c), c1) = core(
@@ -371,7 +371,7 @@ impl Clsag {
 
     let mut res = Vec::with_capacity(inputs.len());
     let mut sum_pseudo_outs = DScalar::ZERO;
-    for i in 0 .. inputs.len() {
+    for i in 0..inputs.len() {
       let mask;
       // If this is the last input, set the mask as described above
       if i == (inputs.len() - 1) {
@@ -396,9 +396,9 @@ impl Clsag {
       // ring member's commitment and our pseudo-out commitment (which will only have a known
       // discrete log over G if the amounts cancel out)
       incomplete_clsag.s[usize::from(inputs[i].1.decoys.signer_index())] = Scalar::from(
-        nonce.deref() -
-          ((key_challenge * Zeroizing::new((*inputs[i].0.deref()).into()).deref()) +
-            challenged_mask),
+        nonce.deref()
+          - ((key_challenge * Zeroizing::new((*inputs[i].0.deref()).into()).deref())
+            + challenged_mask),
       );
       let clsag = incomplete_clsag;
 

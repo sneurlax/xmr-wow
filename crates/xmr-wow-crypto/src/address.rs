@@ -52,10 +52,10 @@ impl Network {
     /// Prefixes >= 128 require 2+ varint bytes and change the address length.
     pub fn prefix_bytes(self) -> alloc::vec::Vec<u8> {
         let prefix: u64 = match self {
-            Network::MoneroMainnet  => 18,    // 0x12, 1 varint byte
-            Network::MoneroStagenet => 24,    // 0x18, 1 varint byte
-            Network::MoneroTestnet  => 53,    // 0x35, 1 varint byte
-            Network::Wownero        => 4146,  // 0x1032, 2 varint bytes -> 97-char address
+            Network::MoneroMainnet => 18,  // 0x12, 1 varint byte
+            Network::MoneroStagenet => 24, // 0x18, 1 varint byte
+            Network::MoneroTestnet => 53,  // 0x35, 1 varint byte
+            Network::Wownero => 4146,      // 0x1032, 2 varint bytes -> 97-char address
         };
         encode_varint(prefix)
     }
@@ -63,11 +63,11 @@ impl Network {
     /// Match a decoded varint prefix back to a Network variant.
     fn from_prefix(prefix: u64) -> Option<Network> {
         match prefix {
-            18   => Some(Network::MoneroMainnet),
-            24   => Some(Network::MoneroStagenet),
-            53   => Some(Network::MoneroTestnet),
+            18 => Some(Network::MoneroMainnet),
+            24 => Some(Network::MoneroStagenet),
+            53 => Some(Network::MoneroTestnet),
             4146 => Some(Network::Wownero),
-            _    => None,
+            _ => None,
         }
     }
 }
@@ -120,18 +120,18 @@ const ENCODED_BLOCK_SIZES: [usize; 9] = [0, 2, 3, 5, 6, 7, 9, 10, 11];
 /// Decoded block bytes from a given number of chars.
 /// Inverse of ENCODED_BLOCK_SIZES (0 maps to 0 chars, etc.).
 const DECODED_BLOCK_SIZES: [Option<usize>; 12] = [
-    Some(0),  // 0 chars -> 0 bytes
-    None,     // 1 char -> invalid
-    Some(1),  // 2 chars -> 1 byte
-    Some(2),  // 3 chars -> 2 bytes
-    None,     // 4 chars -> invalid
-    Some(3),  // 5 chars -> 3 bytes
-    Some(4),  // 6 chars -> 4 bytes
-    Some(5),  // 7 chars -> 5 bytes
-    None,     // 8 chars -> invalid
-    Some(6),  // 9 chars -> 6 bytes
-    Some(7),  // 10 chars -> 7 bytes
-    Some(8),  // 11 chars -> 8 bytes
+    Some(0), // 0 chars -> 0 bytes
+    None,    // 1 char -> invalid
+    Some(1), // 2 chars -> 1 byte
+    Some(2), // 3 chars -> 2 bytes
+    None,    // 4 chars -> invalid
+    Some(3), // 5 chars -> 3 bytes
+    Some(4), // 6 chars -> 4 bytes
+    Some(5), // 7 chars -> 5 bytes
+    None,    // 8 chars -> invalid
+    Some(6), // 9 chars -> 6 bytes
+    Some(7), // 10 chars -> 7 bytes
+    Some(8), // 11 chars -> 8 bytes
 ];
 
 const FULL_BLOCK_BYTES: usize = 8;
@@ -226,7 +226,10 @@ pub fn base58_decode(s: &str) -> Option<alloc::vec::Vec<u8>> {
 
     if remainder_chars > 0 {
         let chunk = &bytes[full_blocks * FULL_BLOCK_CHARS..];
-        let expected_bytes = DECODED_BLOCK_SIZES.get(remainder_chars).copied().flatten()?;
+        let expected_bytes = DECODED_BLOCK_SIZES
+            .get(remainder_chars)
+            .copied()
+            .flatten()?;
         let decoded = decode_block(chunk, expected_bytes)?;
         out.extend_from_slice(&decoded);
     }
@@ -261,7 +264,11 @@ pub fn encode_address_from_bytes(
     build_address_string(&network.prefix_bytes(), spend_bytes, view_bytes)
 }
 
-fn build_address_string(prefix: &[u8], spend_bytes: &[u8; 32], view_bytes: &[u8; 32]) -> alloc::string::String {
+fn build_address_string(
+    prefix: &[u8],
+    spend_bytes: &[u8; 32],
+    view_bytes: &[u8; 32],
+) -> alloc::string::String {
     let mut payload = alloc::vec::Vec::with_capacity(prefix.len() + 64);
     payload.extend_from_slice(prefix);
     payload.extend_from_slice(spend_bytes);
@@ -278,22 +285,24 @@ fn build_address_string(prefix: &[u8], spend_bytes: &[u8; 32], view_bytes: &[u8;
 /// Returns `Err(CryptoError::AddressError(...))` if the address is malformed,
 /// has an invalid checksum, or uses an unknown network prefix.
 pub fn decode_address(addr: &str) -> Result<(EdwardsPoint, EdwardsPoint, Network), CryptoError> {
-    let raw = base58_decode(addr)
-        .ok_or_else(|| CryptoError::AddressError("invalid base58".into()))?;
+    let raw =
+        base58_decode(addr).ok_or_else(|| CryptoError::AddressError("invalid base58".into()))?;
 
     // Decode the varint prefix
     let (prefix_val, prefix_len) = decode_varint(&raw)
         .ok_or_else(|| CryptoError::AddressError("malformed varint prefix".into()))?;
 
-    let network = Network::from_prefix(prefix_val)
-        .ok_or_else(|| CryptoError::AddressError(alloc::format!("unknown prefix {}", prefix_val)))?;
+    let network = Network::from_prefix(prefix_val).ok_or_else(|| {
+        CryptoError::AddressError(alloc::format!("unknown prefix {}", prefix_val))
+    })?;
 
     // After prefix: 32 bytes spend + 32 bytes view + 4 bytes checksum
     let rest = &raw[prefix_len..];
     if rest.len() != 68 {
-        return Err(CryptoError::AddressError(
-            alloc::format!("wrong payload length: expected 68 got {}", rest.len())
-        ));
+        return Err(CryptoError::AddressError(alloc::format!(
+            "wrong payload length: expected 68 got {}",
+            rest.len()
+        )));
     }
 
     let spend_bytes: [u8; 32] = rest[..32]
@@ -394,10 +403,9 @@ mod tests {
         // Known spend key from monero-rs docs:
         // "77916d0cd56ed1920aef6ca56d8a41bac915b68e4c46a589e0956e27a7b77404"
         let spend_bytes: [u8; 32] = [
-            0x77, 0x91, 0x6d, 0x0c, 0xd5, 0x6e, 0xd1, 0x92,
-            0x0a, 0xef, 0x6c, 0xa5, 0x6d, 0x8a, 0x41, 0xba,
-            0xc9, 0x15, 0xb6, 0x8e, 0x4c, 0x46, 0xa5, 0x89,
-            0xe0, 0x95, 0x6e, 0x27, 0xa7, 0xb7, 0x74, 0x04,
+            0x77, 0x91, 0x6d, 0x0c, 0xd5, 0x6e, 0xd1, 0x92, 0x0a, 0xef, 0x6c, 0xa5, 0x6d, 0x8a,
+            0x41, 0xba, 0xc9, 0x15, 0xb6, 0x8e, 0x4c, 0x46, 0xa5, 0x89, 0xe0, 0x95, 0x6e, 0x27,
+            0xa7, 0xb7, 0x74, 0x04,
         ];
         let spend = Scalar::from_bytes_mod_order(spend_bytes);
         let view = derive_view_key(&spend);
@@ -406,13 +414,15 @@ mod tests {
         // Our function is Keccak256(spend.as_bytes()) ; spend is already canonical
         // so spend.as_bytes() == spend_bytes. Computed expected value:
         let expected: [u8; 32] = [
-            0x24, 0xe1, 0x2a, 0xe3, 0xca, 0x29, 0xf8, 0x9e,
-            0xc8, 0xcb, 0x9e, 0x81, 0xb4, 0xa2, 0xfe, 0x5c,
-            0x00, 0xf1, 0xeb, 0xa2, 0xbd, 0xba, 0x1c, 0xe5,
-            0x82, 0x89, 0x7a, 0x27, 0x2c, 0x94, 0x3b, 0x03,
+            0x24, 0xe1, 0x2a, 0xe3, 0xca, 0x29, 0xf8, 0x9e, 0xc8, 0xcb, 0x9e, 0x81, 0xb4, 0xa2,
+            0xfe, 0x5c, 0x00, 0xf1, 0xeb, 0xa2, 0xbd, 0xba, 0x1c, 0xe5, 0x82, 0x89, 0x7a, 0x27,
+            0x2c, 0x94, 0x3b, 0x03,
         ];
-        assert_eq!(view.to_bytes(), expected,
-            "view key derivation must match Keccak256(spend) mod l");
+        assert_eq!(
+            view.to_bytes(),
+            expected,
+            "view key derivation must match Keccak256(spend) mod l"
+        );
     }
 
     #[test]
@@ -421,8 +431,8 @@ mod tests {
         // We verify that our encoding matches what monero-rs produces.
         let one = Scalar::from(1u64);
         let two = Scalar::from(2u64);
-        let spend_pub = one * G;  // = G
-        let view_pub = two * G;   // = 2*G
+        let spend_pub = one * G; // = G
+        let view_pub = two * G; // = 2*G
 
         let addr = encode_address(&spend_pub, &view_pub, Network::MoneroStagenet);
 
@@ -430,12 +440,16 @@ mod tests {
         // payload = 1 (prefix) + 32 (spend) + 32 (view) + 4 (checksum) = 69 bytes
         // 69 = 8 full blocks (64 bytes) + 5 remainder bytes
         // encoded = 8*11 + ENCODED_BLOCK_SIZES[5] = 88 + 7 = 95 chars
-        assert_eq!(addr.len(), 95, "stagenet address should be 95 chars, got {}", addr);
+        assert_eq!(
+            addr.len(),
+            95,
+            "stagenet address should be 95 chars, got {}",
+            addr
+        );
         // All chars must be in the base58 alphabet.
         for ch in addr.chars() {
             assert!(
-                b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
-                    .contains(&(ch as u8)),
+                b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz".contains(&(ch as u8)),
                 "non-base58 char: {}",
                 ch
             );
@@ -450,8 +464,15 @@ mod tests {
         let mainnet = encode_address(&spend, &view, Network::MoneroMainnet);
         let stagenet = encode_address(&spend, &view, Network::MoneroStagenet);
 
-        assert_ne!(mainnet, stagenet, "mainnet and stagenet addresses must differ");
-        assert_eq!(mainnet.len(), stagenet.len(), "same length regardless of network");
+        assert_ne!(
+            mainnet, stagenet,
+            "mainnet and stagenet addresses must differ"
+        );
+        assert_eq!(
+            mainnet.len(),
+            stagenet.len(),
+            "same length regardless of network"
+        );
     }
 
     #[test]
@@ -482,7 +503,12 @@ mod tests {
         // payload = 2 + 32 + 32 + 4 = 70 bytes
         // 70 = 8 full blocks (64 bytes) + 6 remainder
         // encoded = 8*11 + ENCODED_BLOCK_SIZES[6] = 88 + 9 = 97 chars
-        assert_eq!(addr.len(), 97, "Wownero 70-byte payload -> 97 chars, got {}", addr);
+        assert_eq!(
+            addr.len(),
+            97,
+            "Wownero 70-byte payload -> 97 chars, got {}",
+            addr
+        );
     }
 
     #[test]
@@ -518,15 +544,15 @@ mod tests {
         let view = Scalar::random(&mut OsRng) * G;
         let addr = encode_address(&spend, &view, Network::Wownero);
         assert_eq!(
-            addr.len(), 97,
+            addr.len(),
+            97,
             "Wownero address must be 97 chars (70-byte payload), got {}",
             addr.len()
         );
         // All characters must be valid base58
         for ch in addr.chars() {
             assert!(
-                b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
-                    .contains(&(ch as u8)),
+                b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz".contains(&(ch as u8)),
                 "non-base58 character in WOW address: {}",
                 ch
             );
@@ -541,10 +567,14 @@ mod tests {
         let view = view_scalar * G;
 
         let addr = encode_address(&spend, &view, Network::Wownero);
-        let (decoded_spend, decoded_view, decoded_net) = decode_address(&addr)
-            .expect("WOW address must decode successfully");
+        let (decoded_spend, decoded_view, decoded_net) =
+            decode_address(&addr).expect("WOW address must decode successfully");
 
-        assert_eq!(decoded_net, Network::Wownero, "network must round-trip as Wownero");
+        assert_eq!(
+            decoded_net,
+            Network::Wownero,
+            "network must round-trip as Wownero"
+        );
         assert_eq!(
             decoded_spend.compress().to_bytes(),
             spend.compress().to_bytes(),
@@ -632,10 +662,9 @@ mod tests {
         // In little-endian: low byte is 0xec (since p low byte is 0xed, minus 1 = 0xec),
         // bytes 1..30 are 0xff, high byte is 0x7f (bit 255 clear = even x coordinate).
         let two_torsion_bytes: [u8; 32] = [
-            0xec, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-            0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-            0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
-            0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x7f,
+            0xec, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+            0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+            0xff, 0xff, 0xff, 0x7f,
         ];
 
         // Verify the bytes decode to a valid Ed25519 point that is NOT torsion-free.
@@ -651,10 +680,11 @@ mod tests {
         // Build a syntactically valid address with the 2-torsion point as spend key.
         // encode_address_from_bytes computes the correct checksum.
         let view_scalar = Scalar::random(&mut OsRng);
-        let view_point  = view_scalar * G;
-        let view_bytes  = view_point.compress().to_bytes();
+        let view_point = view_scalar * G;
+        let view_bytes = view_point.compress().to_bytes();
 
-        let addr = encode_address_from_bytes(&two_torsion_bytes, &view_bytes, Network::MoneroMainnet);
+        let addr =
+            encode_address_from_bytes(&two_torsion_bytes, &view_bytes, Network::MoneroMainnet);
 
         let result = decode_address(&addr);
         assert!(

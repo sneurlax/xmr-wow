@@ -1,0 +1,83 @@
+# XMR-WOW Docker Compose: sharechain node + Alice + Bob swap clients.
+#
+# SCOPE NOTE: End-to-end swap execution is not yet implemented in the entrypoint
+# scripts (production-mode swap orchestration between two clients is pending).
+# This file defines the correct service topology and wiring.
+#
+# Usage:
+#   docker compose -f docker/docker-compose.yaml build
+#   docker compose -f docker/docker-compose.yaml up
+#
+# Required env vars (see docker/README.md for details):
+#   ALICE_XMR_ADDRESS : Alice's Monero stagenet address
+#   ALICE_WOW_ADDRESS : Alice's Wownero mainnet address
+#   BOB_XMR_ADDRESS   : Bob's Monero stagenet address
+#   BOB_WOW_ADDRESS   : Bob's Wownero mainnet address
+#   XMR_DAEMON_URL    : Monero stagenet daemon RPC URL
+#   WOW_DAEMON_URL    : Wownero mainnet daemon RPC URL
+#   SWAP_PASSWORD     : Key encryption password (same for both clients)
+
+version: "3.9"
+
+services:
+  sharechain-node:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.xmr-wow
+    image: xmr-wow:latest
+    entrypoint: ["/usr/local/bin/sharechain-node-entrypoint.sh"]
+    ports:
+      - "18091:18091"
+    healthcheck:
+      test: ["CMD", "sh", "-c", "curl -sf http://localhost:18091/ || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    restart: unless-stopped
+
+  alice:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.xmr-wow
+    image: xmr-wow:latest
+    entrypoint: ["/usr/local/bin/alice-entrypoint.sh"]
+    depends_on:
+      sharechain-node:
+        condition: service_healthy
+    volumes:
+      - alice-data:/home/xmrwow
+    environment:
+      - NODE_URL=http://sharechain-node:18091
+      - ALICE_XMR_ADDRESS=${ALICE_XMR_ADDRESS}
+      - ALICE_WOW_ADDRESS=${ALICE_WOW_ADDRESS}
+      - XMR_DAEMON_URL=${XMR_DAEMON_URL}
+      - WOW_DAEMON_URL=${WOW_DAEMON_URL}
+      - SWAP_PASSWORD=${SWAP_PASSWORD}
+    restart: "no"
+
+  bob:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.xmr-wow
+    image: xmr-wow:latest
+    entrypoint: ["/usr/local/bin/bob-entrypoint.sh"]
+    depends_on:
+      sharechain-node:
+        condition: service_healthy
+    volumes:
+      - bob-data:/home/xmrwow
+      - coord-data:/coord
+    environment:
+      - NODE_URL=http://sharechain-node:18091
+      - BOB_XMR_ADDRESS=${BOB_XMR_ADDRESS}
+      - BOB_WOW_ADDRESS=${BOB_WOW_ADDRESS}
+      - XMR_DAEMON_URL=${XMR_DAEMON_URL}
+      - WOW_DAEMON_URL=${WOW_DAEMON_URL}
+      - SWAP_PASSWORD=${SWAP_PASSWORD}
+    restart: "no"
+
+volumes:
+  alice-data:
+  bob-data:
+  coord-data:

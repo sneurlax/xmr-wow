@@ -1,14 +1,14 @@
-/// Swap state and timelock rules for the XMR<->WOW protocol.
-use serde::{Deserialize, Serialize};
 use crate::guarantee::{guarantee_decision, GuaranteeMode, GuaranteeStatus};
 use crate::readiness::{
     RefundCheckpoint, RefundCheckpointName, RefundCheckpointStatus, RefundEvidence,
 };
-use xmr_wow_wallet::{RefundArtifact, RefundArtifactMetadata, RefundChain, TxHash};
+/// Swap state and timelock rules for the XMR<->WOW protocol.
+use serde::{Deserialize, Serialize};
 use xmr_wow_crypto::{
     combine_public_keys, derive_view_key, joint_address, keccak256, AdaptorSignature,
     CompletedSignature, DleqProof, KeyContribution, Network,
 };
+use xmr_wow_wallet::{RefundArtifact, RefundArtifactMetadata, RefundChain, TxHash};
 /// The role of this party in the swap.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SwapRole {
@@ -25,8 +25,8 @@ pub enum RefundTimingSource {
 pub struct RefundTimingObservation {
     pub xmr_base_height: u64,
     pub wow_base_height: u64,
-    pub xmr_lock_blocks: u64,
-    pub wow_lock_blocks: u64,
+    pub xmr_refund_delay_seconds: u64,
+    pub wow_refund_delay_seconds: u64,
     pub source: RefundTimingSource,
 }
 
@@ -35,8 +35,8 @@ pub struct RefundTimingObservation {
 pub struct SwapParams {
     pub amount_xmr: u64,
     pub amount_wow: u64,
-    pub xmr_refund_height: u64,
-    pub wow_refund_height: u64,
+    pub xmr_refund_delay_seconds: u64,
+    pub wow_refund_delay_seconds: u64,
     #[serde(default)]
     pub refund_timing: Option<RefundTimingObservation>,
     /// Alice refund address if the swap aborts.
@@ -45,55 +45,57 @@ pub struct SwapParams {
     pub bob_refund_address: Option<String>,
 }
 
-/// Minimum gap between Alice's XMR refund and Bob's WOW refund.
-pub const MIN_RESPONSE_BLOCKS: u64 = 100;
+/// Minimum gap between Alice's XMR refund delay and Bob's WOW refund delay.
+pub const MIN_RESPONSE_DELAY_SECONDS: u64 = 100;
 
-/// Compute refund heights and enforce the minimum lock window.
-pub fn validate_timelocks(
-    current_xmr_height: u64,
-    current_wow_height: u64,
-    xmr_lock_blocks: u64,
-    wow_lock_blocks: u64,
-) -> Result<(u64, u64), SwapError> {
-    let xmr_refund_height = current_xmr_height + xmr_lock_blocks;
-    let wow_refund_height = current_wow_height + wow_lock_blocks;
-    if xmr_lock_blocks < 10 || wow_lock_blocks < 10 {
+/// Enforce minimum refund-delay ordering for the two swap legs.
+pub fn validate_refund_delays(
+    xmr_refund_delay_seconds: u64,
+    wow_refund_delay_seconds: u64,
+) -> Result<(), SwapError> {
+    if xmr_refund_delay_seconds < 10 || wow_refund_delay_seconds < 10 {
         return Err(SwapError::InvalidTimelock(
-            "lock period too short (min 10 blocks)".into(),
+            "refund delay too short (min 10 seconds)".into(),
         ));
     }
-    if wow_refund_height <= xmr_refund_height + MIN_RESPONSE_BLOCKS {
+    if wow_refund_delay_seconds <= xmr_refund_delay_seconds + MIN_RESPONSE_DELAY_SECONDS {
         return Err(SwapError::InvalidTimelock(format!(
-            "WOW refund height ({}) must be > XMR refund height ({}) + MIN_RESPONSE_BLOCKS ({})",
-            wow_refund_height, xmr_refund_height, MIN_RESPONSE_BLOCKS
+            "WOW refund delay ({}) must be > XMR refund delay ({}) + MIN_RESPONSE_DELAY_SECONDS ({})",
+            wow_refund_delay_seconds, xmr_refund_delay_seconds, MIN_RESPONSE_DELAY_SECONDS
         )));
     }
-    Ok((xmr_refund_height, wow_refund_height))
+    Ok(())
+}
+
+/// Compatibility wrapper retained for existing tests and call sites.
+pub fn validate_timelocks(
+    _current_xmr_height: u64,
+    _current_wow_height: u64,
+    xmr_refund_delay_seconds: u64,
+    wow_refund_delay_seconds: u64,
+) -> Result<(u64, u64), SwapError> {
+    validate_refund_delays(xmr_refund_delay_seconds, wow_refund_delay_seconds)?;
+    Ok((xmr_refund_delay_seconds, wow_refund_delay_seconds))
 }
 
 pub fn build_observed_refund_timing(
     current_xmr_height: u64,
     current_wow_height: u64,
-    xmr_lock_blocks: u64,
-    wow_lock_blocks: u64,
+    xmr_refund_delay_seconds: u64,
+    wow_refund_delay_seconds: u64,
 ) -> Result<(RefundTimingObservation, u64, u64), SwapError> {
-    let (xmr_refund_height, wow_refund_height) = validate_timelocks(
-        current_xmr_height,
-        current_wow_height,
-        xmr_lock_blocks,
-        wow_lock_blocks,
-    )?;
+    validate_refund_delays(xmr_refund_delay_seconds, wow_refund_delay_seconds)?;
 
     Ok((
         RefundTimingObservation {
             xmr_base_height: current_xmr_height,
             wow_base_height: current_wow_height,
-            xmr_lock_blocks,
-            wow_lock_blocks,
+            xmr_refund_delay_seconds,
+            wow_refund_delay_seconds,
             source: RefundTimingSource::DaemonHeightQuery,
         },
-        xmr_refund_height,
-        wow_refund_height,
+        xmr_refund_delay_seconds,
+        wow_refund_delay_seconds,
     ))
 }
 
@@ -101,7 +103,7 @@ impl SwapParams {
     pub fn require_observed_refund_timing(&self) -> Result<&RefundTimingObservation, SwapError> {
         self.refund_timing.as_ref().ok_or_else(|| {
             SwapError::InvalidTimelock(
-                "Phase 13 timing basis missing: legacy swap state does not record refund_timing"
+                "Timing basis missing: legacy swap state does not record refund_timing"
                     .into(),
             )
         })
@@ -109,23 +111,20 @@ impl SwapParams {
 
     pub fn validate_observed_refund_timing(&self) -> Result<(), SwapError> {
         let observation = self.require_observed_refund_timing()?;
-        let (_, expected_xmr_refund_height, expected_wow_refund_height) =
-            build_observed_refund_timing(
-                observation.xmr_base_height,
-                observation.wow_base_height,
-                observation.xmr_lock_blocks,
-                observation.wow_lock_blocks,
-            )?;
+        validate_refund_delays(
+            observation.xmr_refund_delay_seconds,
+            observation.wow_refund_delay_seconds,
+        )?;
 
-        if self.xmr_refund_height != expected_xmr_refund_height
-            || self.wow_refund_height != expected_wow_refund_height
+        if self.xmr_refund_delay_seconds != observation.xmr_refund_delay_seconds
+            || self.wow_refund_delay_seconds != observation.wow_refund_delay_seconds
         {
             return Err(SwapError::InvalidTimelock(format!(
-                "Phase 13 timing basis mismatch: stored heights ({}, {}) do not match observed basis ({}, {})",
-                self.xmr_refund_height,
-                self.wow_refund_height,
-                expected_xmr_refund_height,
-                expected_wow_refund_height,
+                "stored refund delays ({}, {}) do not match observed basis ({}, {})",
+                self.xmr_refund_delay_seconds,
+                self.wow_refund_delay_seconds,
+                observation.xmr_refund_delay_seconds,
+                observation.wow_refund_delay_seconds,
             )));
         }
 
@@ -156,33 +155,45 @@ pub struct JointAddresses {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PersistedRefundArtifact {
     pub metadata: RefundArtifactMetadata,
-    pub tx_hash: TxHash,
-    pub tx_bytes: Vec<u8>,
+    /// VTS time-lock puzzle containing the locked refund spend secret.
+    pub puzzle: xmr_wow_vts::TimeLockPuzzle,
+    pub verification_proof: xmr_wow_vts::VerificationProof,
+    pub binding_proof: DleqProof,
 }
 
 impl PersistedRefundArtifact {
     pub fn to_wallet_artifact(&self) -> RefundArtifact {
         RefundArtifact {
             metadata: self.metadata.clone(),
-            tx_hash: self.tx_hash,
-            tx_bytes: self.tx_bytes.clone(),
+            puzzle: self.puzzle.clone(),
+            verification_proof: self.verification_proof.clone(),
+            binding_proof: self.binding_proof.clone(),
         }
     }
 
     pub fn validate_binding(
         &self,
         expected_chain: RefundChain,
-        expected_lock_tx_hash: TxHash,
+        expected_swap_id: TxHash,
         expected_destination: &str,
-        expected_refund_height: u64,
+        expected_refund_delay_seconds: u64,
+        expected_locked_pubkey: &[u8; 32],
     ) -> Result<(), SwapError> {
         self.to_wallet_artifact()
             .validate_binding(
                 expected_chain,
-                expected_lock_tx_hash,
+                expected_swap_id,
                 expected_destination,
-                expected_refund_height,
+                expected_refund_delay_seconds,
+                expected_locked_pubkey,
             )
+            .map_err(|e| SwapError::InvalidRefundArtifact(e.to_string()))
+    }
+
+    /// Solve the VTS puzzle to recover the locked refund spend secret.
+    pub fn solve(&self) -> Result<Vec<u8>, SwapError> {
+        self.to_wallet_artifact()
+            .solve()
             .map_err(|e| SwapError::InvalidRefundArtifact(e.to_string()))
     }
 }
@@ -191,8 +202,9 @@ impl From<RefundArtifact> for PersistedRefundArtifact {
     fn from(value: RefundArtifact) -> Self {
         Self {
             metadata: value.metadata,
-            tx_hash: value.tx_hash,
-            tx_bytes: value.tx_bytes,
+            puzzle: value.puzzle,
+            verification_proof: value.verification_proof,
+            binding_proof: value.binding_proof,
         }
     }
 }
@@ -201,7 +213,7 @@ impl From<RefundArtifact> for PersistedRefundArtifact {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "phase", rename_all = "snake_case")]
 pub enum SwapState {
-    /// Phase 1: local key generation complete.
+    /// Local key generation complete.
     KeyGeneration {
         role: SwapRole,
         params: SwapParams,
@@ -213,7 +225,7 @@ pub enum SwapState {
         #[serde(skip)]
         secret_bytes: [u8; 32],
     },
-    /// Phase 2: both pubkeys and proofs received; DLEQ verified.
+    /// Both pubkeys and proofs received; DLEQ verified.
     DleqExchange {
         role: SwapRole,
         params: SwapParams,
@@ -222,7 +234,7 @@ pub enum SwapState {
         #[serde(skip)]
         secret_bytes: [u8; 32],
     },
-    /// Phase 3: joint addresses derived.
+    /// Joint addresses derived.
     JointAddress {
         role: SwapRole,
         params: SwapParams,
@@ -231,6 +243,8 @@ pub enum SwapState {
         counterparty_pubkey: [u8; 32],
         #[serde(default)]
         before_wow_lock_checkpoint: Option<RefundCheckpoint>,
+        #[serde(default)]
+        refund_artifact: Option<PersistedRefundArtifact>,
         #[serde(skip)]
         secret_bytes: [u8; 32],
     },
@@ -301,98 +315,138 @@ pub enum SwapState {
 impl std::fmt::Debug for SwapState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            SwapState::KeyGeneration { role, params, my_pubkey, my_proof, secret_bytes: _ } => {
-                f.debug_struct("KeyGeneration")
-                    .field("role", role)
-                    .field("params", params)
-                    .field("my_pubkey", my_pubkey)
-                    .field("my_proof", my_proof)
-                    .field("secret_bytes", &"[REDACTED]")
-                    .finish()
-            }
-            SwapState::DleqExchange { role, params, my_pubkey, counterparty_pubkey, secret_bytes: _ } => {
-                f.debug_struct("DleqExchange")
-                    .field("role", role)
-                    .field("params", params)
-                    .field("my_pubkey", my_pubkey)
-                    .field("counterparty_pubkey", counterparty_pubkey)
-                    .field("secret_bytes", &"[REDACTED]")
-                    .finish()
-            }
+            SwapState::KeyGeneration {
+                role,
+                params,
+                my_pubkey,
+                my_proof,
+                secret_bytes: _,
+            } => f
+                .debug_struct("KeyGeneration")
+                .field("role", role)
+                .field("params", params)
+                .field("my_pubkey", my_pubkey)
+                .field("my_proof", my_proof)
+                .field("secret_bytes", &"[REDACTED]")
+                .finish(),
+            SwapState::DleqExchange {
+                role,
+                params,
+                my_pubkey,
+                counterparty_pubkey,
+                secret_bytes: _,
+            } => f
+                .debug_struct("DleqExchange")
+                .field("role", role)
+                .field("params", params)
+                .field("my_pubkey", my_pubkey)
+                .field("counterparty_pubkey", counterparty_pubkey)
+                .field("secret_bytes", &"[REDACTED]")
+                .finish(),
             SwapState::JointAddress {
-                role, params, addresses, my_pubkey, counterparty_pubkey,
-                before_wow_lock_checkpoint, secret_bytes: _,
-            } => {
-                f.debug_struct("JointAddress")
-                    .field("role", role)
-                    .field("params", params)
-                    .field("addresses", addresses)
-                    .field("my_pubkey", my_pubkey)
-                    .field("counterparty_pubkey", counterparty_pubkey)
-                    .field("before_wow_lock_checkpoint", before_wow_lock_checkpoint)
-                    .field("secret_bytes", &"[REDACTED]")
-                    .finish()
-            }
+                role,
+                params,
+                addresses,
+                my_pubkey,
+                counterparty_pubkey,
+                before_wow_lock_checkpoint,
+                refund_artifact,
+                secret_bytes: _,
+            } => f
+                .debug_struct("JointAddress")
+                .field("role", role)
+                .field("params", params)
+                .field("addresses", addresses)
+                .field("my_pubkey", my_pubkey)
+                .field("counterparty_pubkey", counterparty_pubkey)
+                .field("before_wow_lock_checkpoint", before_wow_lock_checkpoint)
+                .field("refund_artifact", refund_artifact)
+                .field("secret_bytes", &"[REDACTED]")
+                .finish(),
             SwapState::XmrLocked {
-                role, params, addresses, wow_lock_tx, xmr_lock_tx, my_pubkey,
-                counterparty_pubkey, my_adaptor_pre_sig, counterparty_pre_sig,
-                adaptor_point, before_wow_lock_checkpoint, before_xmr_lock_checkpoint,
-                refund_artifact, secret_bytes: _,
-            } => {
-                f.debug_struct("XmrLocked")
-                    .field("role", role)
-                    .field("params", params)
-                    .field("addresses", addresses)
-                    .field("wow_lock_tx", wow_lock_tx)
-                    .field("xmr_lock_tx", xmr_lock_tx)
-                    .field("my_pubkey", my_pubkey)
-                    .field("counterparty_pubkey", counterparty_pubkey)
-                    .field("my_adaptor_pre_sig", my_adaptor_pre_sig)
-                    .field("counterparty_pre_sig", counterparty_pre_sig)
-                    .field("adaptor_point", adaptor_point)
-                    .field("before_wow_lock_checkpoint", before_wow_lock_checkpoint)
-                    .field("before_xmr_lock_checkpoint", before_xmr_lock_checkpoint)
-                    .field("refund_artifact", refund_artifact)
-                    .field("secret_bytes", &"[REDACTED]")
-                    .finish()
-            }
+                role,
+                params,
+                addresses,
+                wow_lock_tx,
+                xmr_lock_tx,
+                my_pubkey,
+                counterparty_pubkey,
+                my_adaptor_pre_sig,
+                counterparty_pre_sig,
+                adaptor_point,
+                before_wow_lock_checkpoint,
+                before_xmr_lock_checkpoint,
+                refund_artifact,
+                secret_bytes: _,
+            } => f
+                .debug_struct("XmrLocked")
+                .field("role", role)
+                .field("params", params)
+                .field("addresses", addresses)
+                .field("wow_lock_tx", wow_lock_tx)
+                .field("xmr_lock_tx", xmr_lock_tx)
+                .field("my_pubkey", my_pubkey)
+                .field("counterparty_pubkey", counterparty_pubkey)
+                .field("my_adaptor_pre_sig", my_adaptor_pre_sig)
+                .field("counterparty_pre_sig", counterparty_pre_sig)
+                .field("adaptor_point", adaptor_point)
+                .field("before_wow_lock_checkpoint", before_wow_lock_checkpoint)
+                .field("before_xmr_lock_checkpoint", before_xmr_lock_checkpoint)
+                .field("refund_artifact", refund_artifact)
+                .field("secret_bytes", &"[REDACTED]")
+                .finish(),
             SwapState::WowLocked {
-                role, params, addresses, wow_lock_tx, my_pubkey, counterparty_pubkey,
-                my_adaptor_pre_sig, counterparty_pre_sig, adaptor_point,
-                before_wow_lock_checkpoint, before_xmr_lock_checkpoint,
-                refund_artifact, secret_bytes: _,
-            } => {
-                f.debug_struct("WowLocked")
-                    .field("role", role)
-                    .field("params", params)
-                    .field("addresses", addresses)
-                    .field("wow_lock_tx", wow_lock_tx)
-                    .field("my_pubkey", my_pubkey)
-                    .field("counterparty_pubkey", counterparty_pubkey)
-                    .field("my_adaptor_pre_sig", my_adaptor_pre_sig)
-                    .field("counterparty_pre_sig", counterparty_pre_sig)
-                    .field("adaptor_point", adaptor_point)
-                    .field("before_wow_lock_checkpoint", before_wow_lock_checkpoint)
-                    .field("before_xmr_lock_checkpoint", before_xmr_lock_checkpoint)
-                    .field("refund_artifact", refund_artifact)
-                    .field("secret_bytes", &"[REDACTED]")
-                    .finish()
-            }
-            SwapState::Complete { role, addresses, k_b_revealed } => {
-                f.debug_struct("Complete")
-                    .field("role", role)
-                    .field("addresses", addresses)
-                    .field("k_b_revealed", k_b_revealed)
-                    .finish()
-            }
-            SwapState::Refunded { role, addresses, refund_tx_hash, refund_evidence } => {
-                f.debug_struct("Refunded")
-                    .field("role", role)
-                    .field("addresses", addresses)
-                    .field("refund_tx_hash", refund_tx_hash)
-                    .field("refund_evidence", refund_evidence)
-                    .finish()
-            }
+                role,
+                params,
+                addresses,
+                wow_lock_tx,
+                my_pubkey,
+                counterparty_pubkey,
+                my_adaptor_pre_sig,
+                counterparty_pre_sig,
+                adaptor_point,
+                before_wow_lock_checkpoint,
+                before_xmr_lock_checkpoint,
+                refund_artifact,
+                secret_bytes: _,
+            } => f
+                .debug_struct("WowLocked")
+                .field("role", role)
+                .field("params", params)
+                .field("addresses", addresses)
+                .field("wow_lock_tx", wow_lock_tx)
+                .field("my_pubkey", my_pubkey)
+                .field("counterparty_pubkey", counterparty_pubkey)
+                .field("my_adaptor_pre_sig", my_adaptor_pre_sig)
+                .field("counterparty_pre_sig", counterparty_pre_sig)
+                .field("adaptor_point", adaptor_point)
+                .field("before_wow_lock_checkpoint", before_wow_lock_checkpoint)
+                .field("before_xmr_lock_checkpoint", before_xmr_lock_checkpoint)
+                .field("refund_artifact", refund_artifact)
+                .field("secret_bytes", &"[REDACTED]")
+                .finish(),
+            SwapState::Complete {
+                role,
+                addresses,
+                k_b_revealed,
+            } => f
+                .debug_struct("Complete")
+                .field("role", role)
+                .field("addresses", addresses)
+                .field("k_b_revealed", k_b_revealed)
+                .finish(),
+            SwapState::Refunded {
+                role,
+                addresses,
+                refund_tx_hash,
+                refund_evidence,
+            } => f
+                .debug_struct("Refunded")
+                .field("role", role)
+                .field("addresses", addresses)
+                .field("refund_tx_hash", refund_tx_hash)
+                .field("refund_evidence", refund_evidence)
+                .finish(),
         }
     }
 }
@@ -438,7 +492,7 @@ impl SwapState {
         (state, secret_bytes)
     }
 
-    /// Phase 2: Receive counterparty's pubkey + proof and verify.
+    /// Receive counterparty's pubkey + proof and verify.
     pub fn receive_counterparty_key(
         self,
         counterparty_pubkey: [u8; 32],
@@ -475,7 +529,7 @@ impl SwapState {
         }
     }
 
-    /// Phase 3: Derive joint addresses from the two public keys.
+    /// Derive joint addresses from the two public keys.
     pub fn derive_joint_addresses(self) -> Result<SwapState, SwapError> {
         match self {
             SwapState::DleqExchange {
@@ -537,6 +591,7 @@ impl SwapState {
                     my_pubkey,
                     counterparty_pubkey,
                     before_wow_lock_checkpoint: None,
+                    refund_artifact: None,
                     secret_bytes,
                 })
             }
@@ -566,8 +621,8 @@ impl SwapState {
                 adaptor_point,
                 before_wow_lock_checkpoint,
                 before_xmr_lock_checkpoint,
+                refund_artifact,
                 secret_bytes,
-                ..
             } => Ok(SwapState::XmrLocked {
                 role,
                 params,
@@ -581,7 +636,7 @@ impl SwapState {
                 adaptor_point,
                 before_wow_lock_checkpoint,
                 before_xmr_lock_checkpoint,
-                refund_artifact: None,
+                refund_artifact,
                 secret_bytes,
             }),
             SwapState::JointAddress {
@@ -591,6 +646,7 @@ impl SwapState {
                 my_pubkey,
                 counterparty_pubkey,
                 before_wow_lock_checkpoint,
+                refund_artifact,
                 secret_bytes,
             } => {
                 let my_scalar =
@@ -624,7 +680,7 @@ impl SwapState {
                     adaptor_point: counterparty_pubkey,
                     before_wow_lock_checkpoint,
                     before_xmr_lock_checkpoint: None,
-                    refund_artifact: None,
+                    refund_artifact,
                     secret_bytes,
                 })
             }
@@ -648,6 +704,7 @@ impl SwapState {
                 my_pubkey,
                 counterparty_pubkey,
                 before_wow_lock_checkpoint,
+                refund_artifact,
                 secret_bytes,
             } => {
                 // Bob's first lock: create adaptor pre-sig
@@ -680,7 +737,7 @@ impl SwapState {
                     adaptor_point: counterparty_pubkey,
                     before_wow_lock_checkpoint,
                     before_xmr_lock_checkpoint: None,
-                    refund_artifact: None,
+                    refund_artifact,
                     secret_bytes,
                 })
             }
@@ -943,7 +1000,7 @@ impl SwapState {
         name: RefundCheckpointName,
         chain: RefundChain,
         refund_address: Option<String>,
-        refund_height: u64,
+        refund_delay_seconds: u64,
         artifact_present: bool,
         artifact_validated: bool,
         mode: GuaranteeMode,
@@ -957,7 +1014,7 @@ impl SwapState {
                 artifact_present,
                 artifact_validated,
                 refund_address,
-                refund_height,
+                refund_delay_seconds,
             };
         }
 
@@ -985,7 +1042,10 @@ impl SwapState {
             };
             (RefundCheckpointStatus::Blocked, reason)
         } else {
-            (Self::checkpoint_status(decision.status), decision.reason.to_string())
+            (
+                Self::checkpoint_status(decision.status),
+                decision.reason.to_string(),
+            )
         };
 
         RefundCheckpoint {
@@ -996,7 +1056,7 @@ impl SwapState {
             artifact_present,
             artifact_validated,
             refund_address,
-            refund_height,
+            refund_delay_seconds,
         }
     }
 
@@ -1009,10 +1069,10 @@ impl SwapState {
             RefundCheckpointName::BeforeWowLock,
             RefundChain::Wow,
             params.bob_refund_address.clone(),
-            params.wow_refund_height,
+            params.wow_refund_delay_seconds,
             artifact_present,
             artifact_validated,
-            GuaranteeMode::CurrentSingleSignerPreLockArtifact,
+            GuaranteeMode::VtsRefundArtifact,
         )
     }
 
@@ -1025,10 +1085,10 @@ impl SwapState {
             RefundCheckpointName::BeforeXmrLock,
             RefundChain::Xmr,
             params.alice_refund_address.clone(),
-            params.xmr_refund_height,
+            params.xmr_refund_delay_seconds,
             artifact_present,
             artifact_validated,
-            GuaranteeMode::LiveXmrUnlockTimeRefund,
+            GuaranteeMode::VtsRefundArtifact,
         )
     }
 
@@ -1120,52 +1180,74 @@ impl SwapState {
 
     fn expected_refund_binding_owned(
         &self,
-    ) -> Result<(RefundChain, TxHash, String, u64), SwapError> {
+    ) -> Result<(RefundChain, TxHash, String, u64, [u8; 32]), SwapError> {
         match self {
-            SwapState::XmrLocked {
+            SwapState::JointAddress {
+                role,
                 params,
-                xmr_lock_tx,
+                addresses,
+                counterparty_pubkey,
                 ..
-            } => {
-                let destination = params.alice_refund_address.clone().ok_or_else(|| {
-                    SwapError::InvalidRefundArtifact(
-                        "alice_refund_address missing for XMR refund artifact".into(),
-                    )
-                })?;
-                Ok((
-                    RefundChain::Xmr,
-                    *xmr_lock_tx,
-                    destination,
-                    params.xmr_refund_height,
-                ))
             }
-            SwapState::WowLocked {
+            | SwapState::XmrLocked {
+                role,
                 params,
-                wow_lock_tx,
+                addresses,
+                counterparty_pubkey,
+                ..
+            }
+            | SwapState::WowLocked {
+                role,
+                params,
+                addresses,
+                counterparty_pubkey,
                 ..
             } => {
-                let destination = params.bob_refund_address.clone().ok_or_else(|| {
-                    SwapError::InvalidRefundArtifact(
-                        "bob_refund_address missing for WOW refund artifact".into(),
-                    )
-                })?;
+                let (chain, destination, refund_delay_seconds) = match role {
+                    SwapRole::Alice => (
+                        RefundChain::Xmr,
+                        params.alice_refund_address.clone().ok_or_else(|| {
+                            SwapError::InvalidRefundArtifact(
+                                "alice_refund_address missing for XMR refund artifact".into(),
+                            )
+                        })?,
+                        params.xmr_refund_delay_seconds,
+                    ),
+                    SwapRole::Bob => (
+                        RefundChain::Wow,
+                        params.bob_refund_address.clone().ok_or_else(|| {
+                            SwapError::InvalidRefundArtifact(
+                                "bob_refund_address missing for WOW refund artifact".into(),
+                            )
+                        })?,
+                        params.wow_refund_delay_seconds,
+                    ),
+                };
                 Ok((
-                    RefundChain::Wow,
-                    *wow_lock_tx,
+                    chain,
+                    addresses.swap_id,
                     destination,
-                    params.wow_refund_height,
+                    refund_delay_seconds,
+                    *counterparty_pubkey,
                 ))
             }
             _ => Err(SwapError::InvalidTransition(
-                "refund artifacts only apply to locked swap states".into(),
+                "refund artifacts only apply to joint/locked swap states".into(),
             )),
         }
     }
 
     pub fn refund_artifact(&self) -> Option<&PersistedRefundArtifact> {
         match self {
-            SwapState::XmrLocked { refund_artifact, .. }
-            | SwapState::WowLocked { refund_artifact, .. } => refund_artifact.as_ref(),
+            SwapState::JointAddress {
+                refund_artifact, ..
+            }
+            | SwapState::XmrLocked {
+                refund_artifact, ..
+            }
+            | SwapState::WowLocked {
+                refund_artifact, ..
+            } => refund_artifact.as_ref(),
             _ => None,
         }
     }
@@ -1173,27 +1255,58 @@ impl SwapState {
     pub fn require_refund_artifact(&self) -> Result<&PersistedRefundArtifact, SwapError> {
         self.refund_artifact().ok_or_else(|| {
             SwapError::InvalidRefundArtifact(
-                "refund artifact missing for locked state".into(),
+                "refund artifact missing for joint/locked state".into(),
             )
         })
     }
 
     pub fn validate_refund_artifact(&self) -> Result<(), SwapError> {
         let artifact = self.require_refund_artifact()?;
-        let (chain, lock_tx_hash, destination, refund_height) =
+        let (chain, swap_id, destination, refund_delay_seconds, locked_pubkey) =
             self.expected_refund_binding_owned()?;
-        artifact.validate_binding(chain, lock_tx_hash, &destination, refund_height)
+        artifact.validate_binding(
+            chain,
+            swap_id,
+            &destination,
+            refund_delay_seconds,
+            &locked_pubkey,
+        )
     }
 
     pub fn record_refund_artifact(
         self,
         artifact: PersistedRefundArtifact,
     ) -> Result<SwapState, SwapError> {
-        let (chain, lock_tx_hash, destination, refund_height) =
+        let (chain, swap_id, destination, refund_delay_seconds, locked_pubkey) =
             self.expected_refund_binding_owned()?;
-        artifact.validate_binding(chain, lock_tx_hash, &destination, refund_height)?;
+        artifact.validate_binding(
+            chain,
+            swap_id,
+            &destination,
+            refund_delay_seconds,
+            &locked_pubkey,
+        )?;
 
         match self {
+            SwapState::JointAddress {
+                role,
+                params,
+                addresses,
+                my_pubkey,
+                counterparty_pubkey,
+                before_wow_lock_checkpoint,
+                secret_bytes,
+                ..
+            } => Ok(SwapState::JointAddress {
+                role,
+                params,
+                addresses,
+                my_pubkey,
+                counterparty_pubkey,
+                before_wow_lock_checkpoint,
+                refund_artifact: Some(artifact),
+                secret_bytes,
+            }),
             SwapState::XmrLocked {
                 role,
                 params,
@@ -1255,7 +1368,7 @@ impl SwapState {
                 secret_bytes,
             }),
             _ => Err(SwapError::InvalidTransition(
-                "refund artifacts only apply to locked swap states".into(),
+                "refund artifacts only apply to joint/locked swap states".into(),
             )),
         }
         .and_then(SwapState::refresh_refund_readiness)
@@ -1269,19 +1382,40 @@ impl SwapState {
                 addresses,
                 my_pubkey,
                 counterparty_pubkey,
+                refund_artifact,
                 secret_bytes,
                 ..
-            } => Ok(SwapState::JointAddress {
-                role,
-                params: params.clone(),
-                addresses,
-                my_pubkey,
-                counterparty_pubkey,
-                before_wow_lock_checkpoint: Some(Self::build_before_wow_lock_checkpoint(
-                    &params, false, false,
-                )),
-                secret_bytes,
-            }),
+            } => {
+                let artifact_present = refund_artifact.is_some();
+                let artifact_validated = role == SwapRole::Bob
+                    && Self::JointAddress {
+                        role,
+                        params: params.clone(),
+                        addresses: addresses.clone(),
+                        my_pubkey,
+                        counterparty_pubkey,
+                        before_wow_lock_checkpoint: None,
+                        refund_artifact: refund_artifact.clone(),
+                        secret_bytes,
+                    }
+                    .validate_refund_artifact()
+                    .is_ok();
+
+                Ok(SwapState::JointAddress {
+                    role,
+                    params: params.clone(),
+                    addresses,
+                    my_pubkey,
+                    counterparty_pubkey,
+                    before_wow_lock_checkpoint: Some(Self::build_before_wow_lock_checkpoint(
+                        &params,
+                        artifact_present,
+                        artifact_validated,
+                    )),
+                    refund_artifact,
+                    secret_bytes,
+                })
+            }
             SwapState::WowLocked {
                 role,
                 params,
@@ -1299,12 +1433,7 @@ impl SwapState {
                 let artifact_present = refund_artifact.is_some();
                 let artifact_validated = refund_artifact
                     .as_ref()
-                    .map(|_| {
-                        refund_artifact
-                            .as_ref()
-                            .map(|_| ())
-                            .is_some()
-                    })
+                    .map(|_| refund_artifact.as_ref().map(|_| ()).is_some())
                     .unwrap_or(false)
                     && Self::WowLocked {
                         role,
@@ -1336,11 +1465,29 @@ impl SwapState {
                     adaptor_point,
                     before_wow_lock_checkpoint: Some(Self::build_before_wow_lock_checkpoint(
                         &params,
-                        artifact_present,
-                        artifact_validated,
+                        if role == SwapRole::Bob {
+                            artifact_present
+                        } else {
+                            false
+                        },
+                        if role == SwapRole::Bob {
+                            artifact_validated
+                        } else {
+                            false
+                        },
                     )),
                     before_xmr_lock_checkpoint: Some(Self::build_before_xmr_lock_checkpoint(
-                        &params, false, false,
+                        &params,
+                        if role == SwapRole::Alice {
+                            artifact_present
+                        } else {
+                            false
+                        },
+                        if role == SwapRole::Alice {
+                            artifact_validated
+                        } else {
+                            false
+                        },
                     )),
                     refund_artifact,
                     secret_bytes,
@@ -1395,12 +1542,32 @@ impl SwapState {
                     counterparty_pre_sig,
                     adaptor_point,
                     before_wow_lock_checkpoint: before_wow_lock_checkpoint.or_else(|| {
-                        Some(Self::build_before_wow_lock_checkpoint(&params, false, false))
+                        Some(Self::build_before_wow_lock_checkpoint(
+                            &params,
+                            if role == SwapRole::Bob {
+                                artifact_present
+                            } else {
+                                false
+                            },
+                            if role == SwapRole::Bob {
+                                artifact_validated
+                            } else {
+                                false
+                            },
+                        ))
                     }),
                     before_xmr_lock_checkpoint: Some(Self::build_before_xmr_lock_checkpoint(
                         &params,
-                        artifact_present,
-                        artifact_validated,
+                        if role == SwapRole::Alice {
+                            artifact_present
+                        } else {
+                            false
+                        },
+                        if role == SwapRole::Alice {
+                            artifact_validated
+                        } else {
+                            false
+                        },
                     )),
                     refund_artifact,
                     secret_bytes,
@@ -1449,10 +1616,7 @@ impl SwapState {
         }
     }
 
-    pub fn require_checkpoint_ready(
-        &self,
-        name: RefundCheckpointName,
-    ) -> Result<(), SwapError> {
+    pub fn require_checkpoint_ready(&self, name: RefundCheckpointName) -> Result<(), SwapError> {
         let checkpoint = self.checkpoint(name).ok_or_else(|| {
             SwapError::RefundCheckpointBlocked(format!(
                 "{} checkpoint missing from persisted state",
@@ -1477,6 +1641,29 @@ impl SwapState {
         }
 
         Ok(())
+    }
+
+    pub fn proof_harness_checkpoint_allowed(&self, name: RefundCheckpointName) -> bool {
+        let checkpoint = match self.checkpoint(name) {
+            Some(checkpoint) => checkpoint,
+            None => return false,
+        };
+
+        if checkpoint.refund_address.is_none() {
+            return false;
+        }
+
+        let expected = match name {
+            RefundCheckpointName::BeforeWowLock => {
+                guarantee_decision(GuaranteeMode::CurrentSingleSignerPreLockArtifact)
+            }
+            RefundCheckpointName::BeforeXmrLock => {
+                guarantee_decision(GuaranteeMode::LiveXmrUnlockTimeRefund)
+            }
+        };
+
+        checkpoint.status == Self::checkpoint_status(expected.status)
+            && checkpoint.reason == expected.reason
     }
 
     pub fn next_safe_action(&self) -> String {
@@ -1584,9 +1771,7 @@ impl SwapState {
             SwapState::Complete { .. } => {
                 "Swap completed successfully. No further action needed.".into()
             }
-            SwapState::Refunded { .. } => {
-                "Refund recorded. No further action needed.".into()
-            }
+            SwapState::Refunded { .. } => "Refund recorded. No further action needed.".into(),
         }
     }
 
@@ -1668,6 +1853,7 @@ pub fn restore_secret_into_state(
             my_pubkey,
             counterparty_pubkey,
             before_wow_lock_checkpoint,
+            refund_artifact,
             ..
         } => {
             let computed = (scalar * G).compress().to_bytes();
@@ -1681,6 +1867,7 @@ pub fn restore_secret_into_state(
                 my_pubkey,
                 counterparty_pubkey,
                 before_wow_lock_checkpoint,
+                refund_artifact,
                 secret_bytes: secret,
             })
         }
@@ -1776,27 +1963,27 @@ mod tests {
         RefundTimingObservation {
             xmr_base_height: 100,
             wow_base_height: 200,
-            xmr_lock_blocks: 500,
-            wow_lock_blocks: 800,
+            xmr_refund_delay_seconds: 500,
+            wow_refund_delay_seconds: 800,
             source: RefundTimingSource::DaemonHeightQuery,
         }
     }
 
     fn sample_params() -> SwapParams {
         let refund_timing = sample_refund_timing();
-        let (_, xmr_refund_height, wow_refund_height) = build_observed_refund_timing(
+        let (_, xmr_refund_delay_seconds, wow_refund_delay_seconds) = build_observed_refund_timing(
             refund_timing.xmr_base_height,
             refund_timing.wow_base_height,
-            refund_timing.xmr_lock_blocks,
-            refund_timing.wow_lock_blocks,
+            refund_timing.xmr_refund_delay_seconds,
+            refund_timing.wow_refund_delay_seconds,
         )
         .unwrap();
 
         SwapParams {
             amount_xmr: 1_000_000_000_000,
             amount_wow: 500_000_000_000_000,
-            xmr_refund_height,
-            wow_refund_height,
+            xmr_refund_delay_seconds,
+            wow_refund_delay_seconds,
             refund_timing: Some(refund_timing),
             alice_refund_address: None,
             bob_refund_address: None,
@@ -2150,14 +2337,14 @@ mod tests {
 
     #[test]
     fn validate_timelocks_succeeds_with_valid_params() {
-        let (xmr_h, wow_h) = validate_timelocks(100, 100, 500, 1000).unwrap();
-        assert_eq!(xmr_h, 600);
-        assert_eq!(wow_h, 1100);
+        let (xmr_delay, wow_delay) = validate_timelocks(100, 100, 500, 1000).unwrap();
+        assert_eq!(xmr_delay, 500);
+        assert_eq!(wow_delay, 1000);
     }
 
     #[test]
     fn validate_timelocks_fails_ordering() {
-        // xmr_refund_height=300, wow_refund_height=300 => 300 <= 300 + 100 = 400 => fail
+        // wow delay must exceed xmr delay by MIN_RESPONSE_DELAY_SECONDS.
         let result = validate_timelocks(100, 100, 200, 200);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
@@ -2173,7 +2360,14 @@ mod tests {
     }
 
     #[test]
-    fn phase13_observed_refund_timing_derives_heights_from_recorded_base_heights() {
+    fn validate_timelocks_ignores_cross_chain_height_scale() {
+        let (xmr_delay, wow_delay) = validate_timelocks(2_096_699, 829_836, 50, 200).unwrap();
+        assert_eq!(xmr_delay, 50);
+        assert_eq!(wow_delay, 200);
+    }
+
+    #[test]
+    fn observed_refund_timing_derives_heights_from_recorded_base_heights() {
         let params = sample_params();
         params.validate_observed_refund_timing().unwrap();
         let observation = params.require_observed_refund_timing().unwrap();
@@ -2181,7 +2375,7 @@ mod tests {
     }
 
     #[test]
-    fn phase13_observed_refund_timing_rejects_missing_basis() {
+    fn observed_refund_timing_rejects_missing_basis() {
         let params = SwapParams {
             refund_timing: None,
             ..sample_params()
@@ -2192,21 +2386,21 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(
-            err.contains("Phase 13 timing basis missing"),
+            err.contains("Timing basis missing"),
             "error: {err}"
         );
     }
 
     #[test]
-    fn phase13_observed_refund_timing_rejects_mismatched_heights() {
+    fn observed_refund_timing_rejects_mismatched_delays() {
         let mut params = sample_params();
-        params.xmr_refund_height += 1;
+        params.xmr_refund_delay_seconds += 1;
 
         let err = params
             .validate_observed_refund_timing()
             .unwrap_err()
             .to_string();
-        assert!(err.contains("timing basis mismatch"), "error: {err}");
+        assert!(err.contains("stored refund delays"), "error: {err}");
     }
 
     #[test]
@@ -2387,6 +2581,54 @@ mod tests {
         assert!(
             err_msg.contains("pre-sig"),
             "error should mention pre-sig, got: {err_msg}"
+        );
+    }
+
+    /// Happy-path unit test for proof_harness_checkpoint_allowed.
+    ///
+    /// Uses the existing make_alice_bob() helpers extended with refund addresses.
+    /// Verifies that BeforeXmrLock allows proof-harness bypass when status and
+    /// reason match the expected LiveXmrUnlockTimeRefund guarantee decision.
+    #[test]
+    fn proof_harness_checkpoint_allowed_behavior() {
+        let mut params = sample_params();
+        params.alice_refund_address = Some("alice-refund-test-address".into());
+        params.bob_refund_address = Some("bob-refund-test-address".into());
+
+        let (alice, _alice_secret) =
+            SwapState::generate(SwapRole::Alice, params.clone(), &mut OsRng);
+        let (bob, _bob_secret) = SwapState::generate(SwapRole::Bob, params, &mut OsRng);
+
+        let (bob_pub, bob_proof) = get_pubkey_and_proof(&bob);
+        let (alice_pub, alice_proof) = get_pubkey_and_proof(&alice);
+
+        let alice_joint = alice
+            .receive_counterparty_key(bob_pub, &bob_proof)
+            .unwrap()
+            .derive_joint_addresses()
+            .unwrap();
+        // Bob also needs to advance so Alice can record his lock.
+        let _bob_joint = bob
+            .receive_counterparty_key(alice_pub, &alice_proof)
+            .unwrap()
+            .derive_joint_addresses()
+            .unwrap();
+
+        // Verify bypass is denied when checkpoint is absent (JointAddress state, pre-lock).
+        // We must check this BEFORE consuming alice_joint with record_wow_lock.
+        assert!(
+            !alice_joint.proof_harness_checkpoint_allowed(RefundCheckpointName::BeforeXmrLock),
+            "proof_harness_checkpoint_allowed should return false when checkpoint is absent"
+        );
+
+        // Alice records Bob's WOW lock: this populates BeforeXmrLock checkpoint.
+        let alice_wow_locked = alice_joint.record_wow_lock([0xCC; 32]).unwrap();
+
+        // The production pre-lock artifact path should no longer match the legacy
+        // proof-harness bypass conditions once VTS exchange is required.
+        assert!(
+            !alice_wow_locked.proof_harness_checkpoint_allowed(RefundCheckpointName::BeforeXmrLock),
+            "proof_harness_checkpoint_allowed should return false once BeforeXmrLock depends on the exchanged VTS artifact path"
         );
     }
 }
