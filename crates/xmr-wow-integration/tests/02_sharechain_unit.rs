@@ -1,20 +1,20 @@
+use xmr_wow_integration::{build_chain, genesis, next_share};
 /// Integration tests: sharechain component tests.
 use xmr_wow_sharechain::{
-    SwapChain, SwapShare, EscrowOp, EscrowState, EscrowIndex, Difficulty, CONSENSUS_ID,
-    EscrowCommitment,
+    Difficulty, EscrowCommitment, EscrowIndex, EscrowOp, EscrowState, SwapChain, SwapShare,
+    CONSENSUS_ID,
 };
-use xmr_wow_integration::{genesis, next_share, build_chain};
 
 fn make_commitment(id: u8) -> EscrowCommitment {
     EscrowCommitment {
-        swap_id:         [id; 32],
+        swap_id: [id; 32],
         alice_sc_pubkey: [id + 1; 32],
-        bob_sc_pubkey:   [id + 2; 32],
-        k_b_expected:    [id + 3; 32],
-        k_b_prime:       [id + 4; 32],
-        claim_timelock:  1000,
+        bob_sc_pubkey: [id + 2; 32],
+        k_b_expected: [id + 3; 32],
+        k_b_prime: [id + 4; 32],
+        claim_timelock: 1000,
         refund_timelock: 2000,
-        amount:          1_000_000_000_000,
+        amount: 1_000_000_000_000,
     }
 }
 
@@ -55,7 +55,13 @@ fn escrow_open_claim_lifecycle() {
 
     // Claim ; k_b must match k_b_expected from the commitment
     let expected_k_b = [1 + 3; 32]; // make_commitment(1) sets k_b_expected = [id + 3; 32]
-    let s2 = next_share(&chain, vec![EscrowOp::Claim { swap_id: id, k_b: expected_k_b }]);
+    let s2 = next_share(
+        &chain,
+        vec![EscrowOp::Claim {
+            swap_id: id,
+            k_b: expected_k_b,
+        }],
+    );
     chain.add_share(s2).unwrap();
 
     let idx = chain.escrow_index.read();
@@ -88,7 +94,13 @@ fn escrow_open_refund_lifecycle() {
     };
     chain.add_share(s1).unwrap();
 
-    let s2 = next_share(&chain, vec![EscrowOp::Refund { swap_id: id, sig: [0u8; 64] }]);
+    let s2 = next_share(
+        &chain,
+        vec![EscrowOp::Refund {
+            swap_id: id,
+            sig: [0u8; 64],
+        }],
+    );
     chain.add_share(s2).unwrap();
 
     let idx = chain.escrow_index.read();
@@ -125,14 +137,18 @@ fn escrow_index_standalone() {
     assert!(matches!(idx.get(&id), Some(EscrowState::Open(_))));
 
     // k_b must match k_b_expected from the commitment: make_commitment(10) -> [10 + 3; 32]
-    idx.apply(&EscrowOp::Claim { swap_id: id, k_b: [10 + 3; 32] }).unwrap();
+    idx.apply(&EscrowOp::Claim {
+        swap_id: id,
+        k_b: [10 + 3; 32],
+    })
+    .unwrap();
     assert!(matches!(idx.get(&id), Some(EscrowState::Claimed { .. })));
 }
 
 #[test]
 fn p2p_message_encodes_and_decodes() {
-    use xmr_wow_sharechain::p2p::messages::{P2PMessage, MessageId};
     use bytes::Bytes;
+    use xmr_wow_sharechain::p2p::messages::{MessageId, P2PMessage};
     // Use ListenPort as a simple round-trip message (no Ping variant exists)
     let msg = P2PMessage::ListenPort(12345);
     let enc = msg.encode();

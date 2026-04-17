@@ -25,7 +25,7 @@ pub use readiness::{
 pub use store::SwapStore;
 pub use swap_messenger::{MessengerError, OobMessenger, SharechainMessenger, SwapMessenger};
 pub use swap_state::{
-    build_observed_refund_timing, restore_secret_into_state, validate_timelocks, JointAddresses,
-    PersistedRefundArtifact, RefundTimingObservation, RefundTimingSource, SwapError, SwapParams,
-    SwapRole, SwapState,
+    build_observed_refund_timing, restore_secret_into_state, validate_refund_delays,
+    validate_timelocks, JointAddresses, PersistedRefundArtifact, RefundTimingObservation,
+    RefundTimingSource, SwapError, SwapParams, SwapRole, SwapState,
 };

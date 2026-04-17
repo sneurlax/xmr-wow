@@ -1,6 +1,6 @@
 //! Time-lock puzzle generation and solving.
 //!
-//! Implements the Rivest–Shamir–Wagner time-lock puzzle scheme:
+//! Implements the Rivest-Shamir-Wagner time-lock puzzle scheme:
 //!
 //! - **Generator** (knows factorization): computes `a^(2^t) mod n` efficiently
 //!   using the trapdoor `λ(n)`, locks secret as `c_k = secret + a^(2^t) mod n`.
@@ -22,7 +22,7 @@ use crate::rsa::RsaModulus;
 /// The puzzle can only be solved by performing `t` sequential squarings
 /// of `a` modulo `n`. The generator creates the puzzle efficiently using
 /// the RSA trapdoor (knowledge of the factorization of `n`).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TimeLockPuzzle {
     /// RSA modulus (public). Product of two safe primes.
     #[serde(with = "biguint_serde")]
@@ -53,14 +53,14 @@ impl TimeLockPuzzle {
     /// sequential squarings. The generator uses the RSA trapdoor to compute
     /// the puzzle efficiently.
     ///
-    /// Returns `(puzzle, modulus)`; the modulus contains the secret factorization
+    /// Returns `(puzzle, modulus)`: the modulus contains the secret factorization
     /// that the generator should discard after creating the puzzle.
     ///
     /// # Arguments
     ///
-    /// * `secret`; The bytes to lock behind the time-lock.
-    /// * `difficulty_seconds`; How many seconds the solver should take.
-    /// * `squarings_per_second`; Estimated squarings/sec on solver hardware.
+    /// * `secret`: The bytes to lock behind the time-lock.
+    /// * `difficulty_seconds`: How many seconds the solver should take.
+    /// * `squarings_per_second`: Estimated squarings/sec on solver hardware.
     ///
     /// # Errors
     ///
@@ -70,7 +70,12 @@ impl TimeLockPuzzle {
         difficulty_seconds: u64,
         squarings_per_second: u64,
     ) -> Result<(Self, RsaModulus), VtsError> {
-        Self::generate_with_rng(secret, difficulty_seconds, squarings_per_second, &mut rand::thread_rng())
+        Self::generate_with_rng(
+            secret,
+            difficulty_seconds,
+            squarings_per_second,
+            &mut rand::thread_rng(),
+        )
     }
 
     /// Generate a puzzle with a provided RNG (for deterministic testing).
@@ -78,6 +83,35 @@ impl TimeLockPuzzle {
         secret: &[u8],
         difficulty_seconds: u64,
         squarings_per_second: u64,
+        rng: &mut impl Rng,
+    ) -> Result<(Self, RsaModulus), VtsError> {
+        // Use the configured bit length (smaller in tests for speed).
+        let bit_length = if cfg!(test) { 512 } else { 2048 };
+        Self::generate_with_bits(
+            secret,
+            difficulty_seconds,
+            squarings_per_second,
+            bit_length,
+            rng,
+        )
+    }
+
+    /// Generate a puzzle with an explicit RSA modulus bit length.
+    ///
+    /// This is the core generation function. Use `generate()` or
+    /// `generate_with_rng()` for the default bit length. Use this function
+    /// directly when you need a specific bit length (e.g., 256 or 512 for
+    /// integration tests that run in debug mode).
+    ///
+    /// # Safety
+    ///
+    /// Using bit lengths < 2048 is insecure for production. Only use small
+    /// moduli for testing.
+    pub fn generate_with_bits(
+        secret: &[u8],
+        difficulty_seconds: u64,
+        squarings_per_second: u64,
+        bit_length: u32,
         rng: &mut impl Rng,
     ) -> Result<(Self, RsaModulus), VtsError> {
         if difficulty_seconds == 0 {
@@ -103,10 +137,12 @@ impl TimeLockPuzzle {
             ));
         }
 
-        // Use the configured bit length (smaller in tests for speed).
-        let bit_length = if cfg!(test) { 512 } else { 2048 };
-
-        let modulus = RsaModulus::generate(bit_length, rng)?;
+        let modulus = if bit_length < 2048 {
+            // Small moduli: assume testing path
+            RsaModulus::generate_for_test(bit_length, rng)?
+        } else {
+            RsaModulus::generate(bit_length, rng)?
+        };
 
         // Pick random base in [2, n-1]
         let a = loop {
@@ -149,7 +185,7 @@ impl TimeLockPuzzle {
     /// Solve the puzzle by sequential squaring to recover the locked secret.
     ///
     /// This is the slow path: `t` sequential squarings of `a mod n`.
-    /// Time complexity is O(t) modular squarings; intentionally slow.
+    /// Time complexity is O(t) modular squarings: intentionally slow.
     ///
     /// Returns the recovered secret as bytes.
     pub fn solve(&self) -> Result<Vec<u8>, VtsError> {
@@ -265,7 +301,10 @@ mod tests {
         let secret = b"test";
         let result = TimeLockPuzzle::generate(secret, 0, 100);
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("difficulty_seconds"));
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("difficulty_seconds"));
     }
 
     #[test]

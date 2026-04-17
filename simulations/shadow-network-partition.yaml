@@ -15,10 +15,22 @@ general:
   simulation_seed: 314
   enable_dns_server: true
   shadow_log_level: warning
-  bootstrap_end_time: 2.5h
+  bootstrap_end_time: 9000s
   progress: true
   runahead: 100ms
   process_threads: 2
+  daemon_defaults:
+    log-level: 1
+    max-log-file-size: 0
+    db-sync-mode: fastest
+    no-zmq: true
+    non-interactive: true
+    disable-rpc-ban: true
+    allow-local-ip: true
+    offline: true
+    fixed-difficulty: 1
+  wallet_defaults:
+    log-level: 1
 
 network:
   type: 1_gbit_switch
@@ -46,30 +58,45 @@ agents:
     daemon: monerod
     wallet: 'monero-wallet-rpc'
     script: agents.xmr_wow_cli_agent
-    start_time: 60s
+    start_time: 300s
+    can_receive_distributions: true
     attributes:
       role: alice
       counterparty: bob
       binary: target/release/xmr-wow
       db: /tmp/alice-shadow-refund.db
       password: shadow-test
+      xmr_daemon: 'http://alice:18081'
+      wow_daemon: 'http://bob:18081'
       amount_xmr: '1000000000000'
       amount_wow: '500000000000'
-      xmr_lock_blocks: '120'
-      wow_lock_blocks: '260'
+      xmr_refund_delay: '120'
+      wow_refund_delay: '260'
+      bootstrap_xmr_blocks: '1000'
+      vts_squarings_per_second: '10'
+      vts_modulus_bits: '512'
       destination: 'SHADOW_ALICE_REFUND_DESTINATION'
       mode: refund_test
 
   bob:
-    daemon: monerod
-    wallet: 'monero-wallet-rpc'
+    daemon: wownerod
+    wallet: 'wownero-wallet-rpc'
     script: agents.xmr_wow_cli_agent
-    start_time: 60s
+    start_time: 300s
+    can_receive_distributions: true
+    daemon_args:
+      - '--spendkey=b38b8e43906ce98683b8c5752fdd73cc8fb1ab519c2858cf9d8efcd3fa7cbc01'
     attributes:
       role: bob
       counterparty: alice
       binary: target/release/xmr-wow
       db: /tmp/bob-shadow-refund.db
       password: shadow-test
+      xmr_daemon: 'http://alice:18081'
+      wow_daemon: 'http://bob:18081'
+      bootstrap_wow_blocks: '1000'
+      vts_squarings_per_second: '10'
+      vts_modulus_bits: '512'
+      mnemonic: 'inbound,beware,having,happens,lair,zones,soapy,cake,occur,lagoon,tonic,pivot,lied,sample,ascend,avoid,suture,owls,menu,roomy,nail,bobsled,bygones,camp,lair'
       destination: 'SHADOW_BOB_REFUND_DESTINATION'
       mode: refund_test

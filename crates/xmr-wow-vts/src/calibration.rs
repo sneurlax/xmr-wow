@@ -104,11 +104,7 @@ mod tests {
         let rate = calibrate_squarings_per_second(512).unwrap();
         assert!(rate > 0, "calibration should return a positive rate");
         // Sanity: should be at least 1000 squarings/sec even on slow hardware
-        assert!(
-            rate > 1000,
-            "calibrated rate {} is implausibly low",
-            rate
-        );
+        assert!(rate > 1000, "calibrated rate {} is implausibly low", rate);
     }
 
     #[test]

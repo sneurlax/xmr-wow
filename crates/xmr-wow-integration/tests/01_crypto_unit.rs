@@ -1,19 +1,13 @@
+use curve25519_dalek::{constants::ED25519_BASEPOINT_POINT as G, scalar::Scalar};
+use rand::rngs::OsRng;
 /// Integration tests: full crypto primitive tests using real xmr-wow-crypto.
 ///
 /// These complement the unit tests in xmr-wow-crypto, exercising the API
 /// from the perspective of an external consumer.
 use xmr_wow_crypto::{
-    KeyContribution, combine_public_keys, combine_secrets, verify_keypair,
-    DleqProof,
-    AdaptorSignature,
-    Network, encode_address, joint_address, derive_view_key,
-    keccak256,
+    combine_public_keys, combine_secrets, derive_view_key, encode_address, joint_address,
+    keccak256, verify_keypair, AdaptorSignature, DleqProof, KeyContribution, Network,
 };
-use curve25519_dalek::{
-    constants::ED25519_BASEPOINT_POINT as G,
-    scalar::Scalar,
-};
-use rand::rngs::OsRng;
 
 // --- Key split tests ---------------------------------------------------------
 
@@ -96,7 +90,9 @@ fn adaptor_sig_roundtrip() {
     let msg = b"xmr-wow-swap-claim";
 
     let pre_sig = AdaptorSignature::sign(&a, &a_point, msg, &adaptor_point, &mut OsRng);
-    assert!(pre_sig.verify_pre_sig(&a_point, msg, &adaptor_point).is_ok());
+    assert!(pre_sig
+        .verify_pre_sig(&a_point, msg, &adaptor_point)
+        .is_ok());
 
     let completed = pre_sig.complete(&t).unwrap();
     assert!(completed.verify(&a_point, msg).is_ok());
@@ -126,7 +122,12 @@ fn wow_address_is_97_chars() {
     let spend = Scalar::random(&mut OsRng) * G;
     let view = Scalar::random(&mut OsRng) * G;
     let addr = encode_address(&spend, &view, Network::Wownero);
-    assert_eq!(addr.len(), 97, "WOW address must be 97 chars, got {}", addr.len());
+    assert_eq!(
+        addr.len(),
+        97,
+        "WOW address must be 97 chars, got {}",
+        addr.len()
+    );
 }
 
 #[test]

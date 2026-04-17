@@ -11,14 +11,14 @@ use xmr_wow_client::{
 use xmr_wow_crypto::DleqProof;
 
 fn sample_params_with_addresses() -> SwapParams {
-    let (refund_timing, xmr_refund_height, wow_refund_height) =
+    let (refund_timing, xmr_refund_delay_seconds, wow_refund_delay_seconds) =
         build_observed_refund_timing(100, 200, 500, 800).unwrap();
 
     SwapParams {
         amount_xmr: 1_000_000_000_000,
         amount_wow: 500_000_000_000_000,
-        xmr_refund_height,
-        wow_refund_height,
+        xmr_refund_delay_seconds,
+        wow_refund_delay_seconds,
         refund_timing: Some(refund_timing),
         alice_refund_address: Some("alice-refund-addr".into()),
         bob_refund_address: Some("bob-refund-addr".into()),
@@ -26,14 +26,14 @@ fn sample_params_with_addresses() -> SwapParams {
 }
 
 fn sample_params_no_alice_address() -> SwapParams {
-    let (refund_timing, xmr_refund_height, wow_refund_height) =
+    let (refund_timing, xmr_refund_delay_seconds, wow_refund_delay_seconds) =
         build_observed_refund_timing(100, 200, 500, 800).unwrap();
 
     SwapParams {
         amount_xmr: 1_000_000_000_000,
         amount_wow: 500_000_000_000_000,
-        xmr_refund_height,
-        wow_refund_height,
+        xmr_refund_delay_seconds,
+        wow_refund_delay_seconds,
         refund_timing: Some(refund_timing),
         alice_refund_address: None,
         bob_refund_address: Some("bob-refund-addr".into()),
@@ -74,14 +74,14 @@ fn make_wow_locked_alice(params: SwapParams) -> SwapState {
         .derive_joint_addresses()
         .unwrap();
 
-    // Alice records Bob's wow lock; triggers build_before_xmr_lock_checkpoint.
+    // Alice records Bob's wow lock: this triggers build_before_xmr_lock_checkpoint.
     alice_joint.record_wow_lock([0xBB; 32]).unwrap()
 }
 
-// Test 1: BeforeXmrLock checkpoint with matching status/reason and a refund_address
-// proof_harness_checkpoint_allowed returns true.
+// Test 1: BeforeXmrLock checkpoint with a refund address no longer matches the
+// legacy proof-harness bypass once exchanged VTS artifacts are required.
 #[test]
-fn proof_harness_helper_allows_before_xmr_lock_when_guarantee_matches() {
+fn proof_harness_helper_rejects_before_xmr_lock_without_exchanged_vts_artifact() {
     let state = make_wow_locked_alice(sample_params_with_addresses());
 
     // Verify the checkpoint exists and has the expected shape.
@@ -94,12 +94,12 @@ fn proof_harness_helper_allows_before_xmr_lock_when_guarantee_matches() {
     );
 
     assert!(
-        state.proof_harness_checkpoint_allowed(RefundCheckpointName::BeforeXmrLock),
-        "proof_harness_checkpoint_allowed should return true when status/reason match the expected guarantee and refund_address is present"
+        !state.proof_harness_checkpoint_allowed(RefundCheckpointName::BeforeXmrLock),
+        "proof_harness_checkpoint_allowed should return false once BeforeXmrLock depends on an exchanged VTS artifact"
     );
 }
 
-// Test 2: BeforeXmrLock checkpoint with refund_address = None; returns false.
+// Test 2: BeforeXmrLock checkpoint with refund_address = None: returns false.
 #[test]
 fn proof_harness_helper_rejects_missing_refund_address() {
     let state = make_wow_locked_alice(sample_params_no_alice_address());
@@ -118,8 +118,7 @@ fn proof_harness_helper_rejects_missing_refund_address() {
     );
 }
 
-// Test 3: BeforeXmrLock checkpoint present with wrong status (mutated via JSON)
-// Returns false.
+// Test 3: BeforeXmrLock checkpoint with wrong status (mutated via JSON): returns false.
 #[test]
 fn proof_harness_helper_rejects_wrong_status() {
     let state = make_wow_locked_alice(sample_params_with_addresses());
@@ -139,8 +138,7 @@ fn proof_harness_helper_rejects_wrong_status() {
     );
 }
 
-// Test 4: No BeforeXmrLock checkpoint (state is JointAddress, not WowLocked)
-// Returns false.
+// Test 4: No BeforeXmrLock checkpoint (state is JointAddress, not WowLocked): returns false.
 #[test]
 fn proof_harness_helper_rejects_missing_checkpoint() {
     let params = sample_params_with_addresses();
@@ -148,7 +146,7 @@ fn proof_harness_helper_rejects_missing_checkpoint() {
     let (bob, _) = SwapState::generate(SwapRole::Bob, params, &mut OsRng);
     let (bob_pub, bob_proof) = extract_pubkey_and_proof(&bob);
 
-    // Alice is in JointAddress; no BeforeXmrLock checkpoint yet.
+    // Alice is in JointAddress: no BeforeXmrLock checkpoint yet.
     let alice_joint = alice
         .receive_counterparty_key(bob_pub, &bob_proof)
         .unwrap()

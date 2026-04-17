@@ -34,13 +34,13 @@ async fn spawn_rpc_server(chain: Arc<SwapChain>) -> TestServer {
 }
 
 fn sample_params() -> SwapParams {
-    let (refund_timing, xmr_refund_height, wow_refund_height) =
+    let (refund_timing, xmr_refund_delay_seconds, wow_refund_delay_seconds) =
         build_observed_refund_timing(100, 200, 500, 800).unwrap();
     SwapParams {
         amount_xmr: 1_000_000_000_000,
         amount_wow: 500_000_000_000_000,
-        xmr_refund_height,
-        wow_refund_height,
+        xmr_refund_delay_seconds,
+        wow_refund_delay_seconds,
         refund_timing: Some(refund_timing),
         alice_refund_address: Some("alice-refund-addr".into()),
         bob_refund_address: Some("bob-refund-addr".into()),
@@ -57,11 +57,21 @@ async fn receive_next(messenger: &SharechainMessenger, coord_id: &[u8; 32]) -> P
     unwrap_protocol_message(&coord).expect("unwrap_protocol_message must succeed")
 }
 
+async fn expect_no_message(messenger: &SharechainMessenger, coord_id: &[u8; 32]) {
+    let coord = messenger
+        .receive(coord_id)
+        .await
+        .expect("receive must not error");
+    assert!(
+        coord.is_none(),
+        "receive must return None when the counterparty has not published yet"
+    );
+}
+
 /// Full sharechain swap integration test: both Alice and Bob reach SwapState::Complete
 /// with all coordination messages routed through an in-process axum sharechain node.
 ///
-/// This satisfies TEST-01: proves sharechain transport works end-to-end in automated
-/// tests without external daemons.
+/// Proves sharechain transport works end-to-end in automated tests without external daemons.
 ///
 /// Design: Two unidirectional channels avoid self-message cursor issues.
 ///   alice_channel = keccak256(alice_pub): Alice sends here; Bob receives from here.
@@ -77,19 +87,15 @@ async fn receive_next(messenger: &SharechainMessenger, coord_id: &[u8; 32]) -> P
 ///   bob_channel@1:   AdaptorPreSig (bob_pre_sig)
 ///   bob_channel@2:   ClaimProof (bob_completed_sig)
 ///   alice_channel@2: ClaimProof (alice_completed_sig)
-#[tokio::test]
-async fn sharechain_transport_full_swap_init_through_claim() {
-    // 1. Spawn in-process sharechain node 
+async fn run_sharechain_transport_full_swap(expect_initial_empty_polls: bool) {
     let chain = Arc::new(SwapChain::new(Difficulty::from_u64(1)));
     let server = spawn_rpc_server(chain).await;
 
-    // 2. Key generation 
     let params = sample_params();
     let params_for_init = params.clone();
     let (alice, _alice_secret) = SwapState::generate(SwapRole::Alice, params.clone(), &mut OsRng);
     let (bob, bob_secret) = SwapState::generate(SwapRole::Bob, params, &mut OsRng);
 
-    // Extract pubkeys and proofs before consuming states.
     let (alice_pub, alice_proof) = match &alice {
         SwapState::KeyGeneration {
             my_pubkey,
@@ -107,18 +113,9 @@ async fn sharechain_transport_full_swap_init_through_claim() {
         _ => panic!("expected Bob in KeyGeneration"),
     };
 
-    // 3. Two-channel routing: alice_channel and bob_channel 
-    // Alice sends to alice_channel; Bob receives from alice_channel.
-    // Bob sends to bob_channel; Alice receives from bob_channel.
-    // coord_id for sharechain routing is keccak256(alice_pubkey).
     let alice_channel = keccak256(&alice_pub);
     let bob_channel = keccak256(&bob_pub);
 
-    // 4. Create SharechainMessengers 
-    // alice_sender: Alice uses this to send to alice_channel.
-    // bob_reader:   Bob uses this to receive from alice_channel.
-    // bob_sender:   Bob uses this to send to bob_channel.
-    // alice_reader: Alice uses this to receive from bob_channel.
     let alice_sender_store = Arc::new(Mutex::new(SwapStore::open_in_memory().unwrap()));
     let bob_reader_store = Arc::new(Mutex::new(SwapStore::open_in_memory().unwrap()));
     let bob_sender_store = Arc::new(Mutex::new(SwapStore::open_in_memory().unwrap()));
@@ -141,14 +138,16 @@ async fn sharechain_transport_full_swap_init_through_claim() {
         store: alice_reader_store,
     };
 
-    // 5. Alice sends Init; Bob receives.
+    if expect_initial_empty_polls {
+        expect_no_message(&bob_reader, &alice_channel).await;
+    }
     let init_msg = ProtocolMessage::Init {
         pubkey: alice_pub,
         proof: alice_proof.clone(),
         amount_xmr: params_for_init.amount_xmr,
         amount_wow: params_for_init.amount_wow,
-        xmr_refund_height: params_for_init.xmr_refund_height,
-        wow_refund_height: params_for_init.wow_refund_height,
+        xmr_refund_delay_seconds: params_for_init.xmr_refund_delay_seconds,
+        wow_refund_delay_seconds: params_for_init.wow_refund_delay_seconds,
         refund_timing: params_for_init.refund_timing.clone(),
         alice_refund_address: params_for_init.alice_refund_address.clone(),
     };
@@ -171,11 +170,14 @@ async fn sharechain_transport_full_swap_init_through_claim() {
         "Bob must receive Alice's pubkey via sharechain"
     );
 
-    // 6. Bob sends Response; Alice receives.
+    if expect_initial_empty_polls {
+        expect_no_message(&alice_reader, &bob_channel).await;
+    }
     let response_msg = ProtocolMessage::Response {
         pubkey: bob_pub,
         proof: bob_proof.clone(),
         bob_refund_address: None,
+        refund_artifact: None,
     };
     let response_coord = wrap_protocol_message(bob_channel, &response_msg).unwrap();
     bob_sender
@@ -196,7 +198,6 @@ async fn sharechain_transport_full_swap_init_through_claim() {
         "Alice must receive Bob's pubkey via sharechain"
     );
 
-    // 7. Both advance to JointAddress 
     let bob_joint = bob
         .receive_counterparty_key(received_alice_pub, &received_alice_proof)
         .unwrap()
@@ -209,7 +210,6 @@ async fn sharechain_transport_full_swap_init_through_claim() {
         .derive_joint_addresses()
         .unwrap();
 
-    // 8. Assert swap_id agreement 
     let alice_swap_id = match &alice_joint {
         SwapState::JointAddress { addresses, .. } => addresses.swap_id,
         _ => panic!("expected Alice in JointAddress"),
@@ -223,13 +223,9 @@ async fn sharechain_transport_full_swap_init_through_claim() {
         "Alice and Bob must agree on swap_id"
     );
 
-    // 9. Lock funds 
-    // Bob locks WOW first (WOW-first lock order).
     let bob_wow_locked = bob_joint.record_wow_lock([0xBB; 32]).unwrap();
-    // Alice locks XMR from JointAddress.
     let alice_xmr_locked = alice_joint.record_xmr_lock([0xAA; 32]).unwrap();
 
-    // Extract adaptor pre-sigs from locked states.
     let alice_pre_sig = match &alice_xmr_locked {
         SwapState::XmrLocked {
             my_adaptor_pre_sig, ..
@@ -243,7 +239,9 @@ async fn sharechain_transport_full_swap_init_through_claim() {
         _ => panic!("expected Bob in WowLocked"),
     };
 
-    // 10. Alice sends her AdaptorPreSig; Bob receives.
+    if expect_initial_empty_polls {
+        expect_no_message(&bob_reader, &alice_channel).await;
+    }
     let alice_presig_msg = ProtocolMessage::AdaptorPreSig {
         pre_sig: alice_pre_sig,
     };
@@ -262,7 +260,9 @@ async fn sharechain_transport_full_swap_init_through_claim() {
         ),
     };
 
-    // 11. Bob sends his AdaptorPreSig; Alice receives.
+    if expect_initial_empty_polls {
+        expect_no_message(&alice_reader, &bob_channel).await;
+    }
     let bob_presig_msg = ProtocolMessage::AdaptorPreSig {
         pre_sig: bob_pre_sig,
     };
@@ -281,7 +281,6 @@ async fn sharechain_transport_full_swap_init_through_claim() {
         ),
     };
 
-    // 12. Apply counterparty pre-sigs 
     let bob_with_presig = bob_wow_locked
         .receive_counterparty_pre_sig(alice_pre_sig_for_bob)
         .expect("Bob must accept Alice's pre-sig");
@@ -290,7 +289,6 @@ async fn sharechain_transport_full_swap_init_through_claim() {
         .receive_counterparty_pre_sig(bob_pre_sig_for_alice)
         .expect("Alice must accept Bob's pre-sig");
 
-    // 13. Bob sends ClaimProof; Alice receives and completes.
     let bob_secret_scalar = curve25519_dalek::scalar::Scalar::from_canonical_bytes(bob_secret)
         .into_option()
         .expect("Bob's secret must be a valid scalar");
@@ -305,6 +303,9 @@ async fn sharechain_transport_full_swap_init_through_claim() {
         .complete(&bob_secret_scalar)
         .expect("Bob must complete his pre-sig");
 
+    if expect_initial_empty_polls {
+        expect_no_message(&alice_reader, &bob_channel).await;
+    }
     let bob_claim_msg = ProtocolMessage::ClaimProof {
         completed_sig: bob_completed_sig,
     };
@@ -314,7 +315,6 @@ async fn sharechain_transport_full_swap_init_through_claim() {
         .await
         .expect("Bob sends ClaimProof");
 
-    // Extract Alice's data before consuming alice_with_presig.
     let alice_own_pre_sig = match &alice_with_presig {
         SwapState::XmrLocked {
             my_adaptor_pre_sig, ..
@@ -340,7 +340,6 @@ async fn sharechain_transport_full_swap_init_through_claim() {
         ),
     };
 
-    // Alice extracts Bob's secret and reaches Complete.
     let (alice_complete, _bob_secret_extracted) = alice_with_presig
         .complete_with_adaptor_claim(&bob_completed_sig_for_alice)
         .expect("Alice must complete with adaptor claim");
@@ -350,11 +349,13 @@ async fn sharechain_transport_full_swap_init_through_claim() {
         "Alice must reach Complete state"
     );
 
-    // 14. Alice sends ClaimProof; Bob receives and completes.
     let alice_completed_sig = alice_own_pre_sig
         .complete(&alice_secret_scalar)
         .expect("Alice must complete her pre-sig");
 
+    if expect_initial_empty_polls {
+        expect_no_message(&bob_reader, &alice_channel).await;
+    }
     let alice_claim_msg = ProtocolMessage::ClaimProof {
         completed_sig: alice_completed_sig,
     };
@@ -373,7 +374,6 @@ async fn sharechain_transport_full_swap_init_through_claim() {
         ),
     };
 
-    // Bob extracts Alice's secret and reaches Complete.
     let alice_pre_sig_in_bob = match &bob_with_presig {
         SwapState::WowLocked {
             counterparty_pre_sig: Some(pre_sig),
@@ -389,7 +389,6 @@ async fn sharechain_transport_full_swap_init_through_claim() {
         .complete_with_claim(alice_secret_extracted.to_bytes())
         .expect("Bob must reach Complete state");
 
-    // 15. Final assertions 
     assert!(
         matches!(bob_complete, SwapState::Complete { .. }),
         "Bob must reach Complete state"
@@ -430,4 +429,14 @@ async fn sharechain_transport_full_swap_init_through_claim() {
     );
 
     println!("SHARECHAIN_SWAP_ID={}", hex::encode(alice_complete_swap_id));
+}
+
+#[tokio::test]
+async fn sharechain_transport_full_swap_init_through_claim() {
+    run_sharechain_transport_full_swap(false).await;
+}
+
+#[tokio::test]
+async fn sharechain_transport_full_swap_tolerates_missing_message_polls() {
+    run_sharechain_transport_full_swap(true).await;
 }

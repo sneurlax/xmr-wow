@@ -22,6 +22,7 @@ xmr-wow-crypto     = { workspace = true }
 xmr-wow-sharechain = { workspace = true }
 xmr-wow-client     = { workspace = true }
 xmr-wow-wallet     = { workspace = true }
+xmr-wow-vts        = { workspace = true }
 
 tokio              = { workspace = true }
 axum               = { workspace = true }

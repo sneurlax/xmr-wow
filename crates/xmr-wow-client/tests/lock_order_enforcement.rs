@@ -9,13 +9,13 @@ use xmr_wow_crypto::DleqProof;
 // ---------------------------------------------------------------------------
 
 fn sample_params() -> SwapParams {
-    let (refund_timing, xmr_refund_height, wow_refund_height) =
+    let (refund_timing, xmr_refund_delay_seconds, wow_refund_delay_seconds) =
         build_observed_refund_timing(100, 200, 500, 800).unwrap();
     SwapParams {
         amount_xmr: 1_000_000_000_000,
         amount_wow: 500_000_000_000_000,
-        xmr_refund_height,
-        wow_refund_height,
+        xmr_refund_delay_seconds,
+        wow_refund_delay_seconds,
         refund_timing: Some(refund_timing),
         alice_refund_address: Some("alice-refund-addr".into()),
         bob_refund_address: Some("bob-refund-addr".into()),
@@ -63,20 +63,10 @@ fn advance_to_joint_address() -> (SwapState, SwapState) {
     (alice_joint, bob_joint)
 }
 
-// ---------------------------------------------------------------------------
-// Test 1: Primary path: WOW-first lock order produces non-zero wow_lock_tx
-// ---------------------------------------------------------------------------
-
 #[test]
 fn test_primary_path_wow_first_enforced() {
-    // Bob records WOW lock first (primary WOW-first path).
-    // Then Alice records XMR lock via the WowLocked state.
-    // The resulting XmrLocked state must have wow_lock_tx == [0x11; 32] (non-zero),
-    // proving WOW was locked before XMR.
-
     let (_alice_joint, bob_joint) = advance_to_joint_address();
 
-    // Step 1: Bob locks WOW first: JointAddress -> WowLocked
     let bob_wow_locked = bob_joint.record_wow_lock([0x11; 32]).unwrap();
 
     match &bob_wow_locked {
@@ -89,10 +79,8 @@ fn test_primary_path_wow_first_enforced() {
         _ => panic!("expected WowLocked state after record_wow_lock"),
     }
 
-    // Step 2: Bob records XMR lock (from WowLocked -> XmrLocked, primary path)
     let bob_xmr_locked = bob_wow_locked.record_xmr_lock([0x22; 32]).unwrap();
 
-    // Verify: wow_lock_tx is non-zero (WOW was locked first)
     match bob_xmr_locked {
         SwapState::XmrLocked {
             wow_lock_tx,
@@ -116,22 +104,10 @@ fn test_primary_path_wow_first_enforced() {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Test 2: Fallback path: XMR locked without prior WOW lock -> sentinel [0u8;32]
-// ---------------------------------------------------------------------------
-
 #[test]
 fn test_fallback_path_xmr_without_wow() {
-    // Alice (or any party) records XMR lock directly from JointAddress state,
-    // skipping the WOW lock step.  The resulting XmrLocked state must have
-    // wow_lock_tx == [0u8; 32]: the zero-hash sentinel documenting the bypass.
-    //
-    // This test intentionally documents that the bypass exists (it is the fallback
-    // path in the current state machine design).
-
     let (alice_joint, _bob_joint) = advance_to_joint_address();
 
-    // Record XMR lock directly from JointAddress (fallback path: no WOW lock first)
     let alice_xmr_locked = alice_joint.record_xmr_lock([0x33; 32]).unwrap();
 
     match alice_xmr_locked {
@@ -153,14 +129,8 @@ fn test_fallback_path_xmr_without_wow() {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Test 3: record_xmr_lock from KeyGeneration state is rejected
-// ---------------------------------------------------------------------------
-
 #[test]
 fn test_xmr_lock_from_keygen_rejected() {
-    // record_xmr_lock requires at least JointAddress state.
-    // Calling it from KeyGeneration must produce InvalidTransition.
     let params = sample_params();
     let (alice, _) = SwapState::generate(SwapRole::Alice, params, &mut OsRng);
 
@@ -171,21 +141,14 @@ fn test_xmr_lock_from_keygen_rejected() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Test 4: record_xmr_lock from DleqExchange state is rejected
-// ---------------------------------------------------------------------------
-
 #[test]
 fn test_xmr_lock_from_dleq_rejected() {
-    // record_xmr_lock requires at least JointAddress state.
-    // Calling it from DleqExchange must produce InvalidTransition.
     let params = sample_params();
     let (alice, bob) = make_alice_bob(params);
 
     let (bob_pub, bob_proof) = extract_pubkey_and_proof(&bob);
     let alice_dleq = alice.receive_counterparty_key(bob_pub, &bob_proof).unwrap();
 
-    // Verify we are in DleqExchange
     assert!(
         matches!(alice_dleq, SwapState::DleqExchange { .. }),
         "expected DleqExchange state"
@@ -201,14 +164,8 @@ fn test_xmr_lock_from_dleq_rejected() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// Test 5: record_wow_lock only succeeds from JointAddress; all other states reject it
-// ---------------------------------------------------------------------------
-
 #[test]
 fn test_wow_lock_only_from_joint_address() {
-    // record_wow_lock must fail from: KeyGeneration, DleqExchange, WowLocked, XmrLocked.
-    // It must succeed ONLY from JointAddress.
 
     let params = sample_params();
     let (alice, bob) = make_alice_bob(params.clone());

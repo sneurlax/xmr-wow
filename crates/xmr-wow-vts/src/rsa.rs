@@ -22,7 +22,7 @@ pub const TEST_MIN_BIT_LENGTH: u32 = 256;
 ///
 /// The factorization (`p`, `q`) is the trapdoor that allows the puzzle
 /// generator to compute `a^(2^t) mod n` efficiently. Once the puzzle
-/// is published, only `n` is revealed; the solver must perform
+/// is published, only `n` is revealed: the solver must perform
 /// sequential squaring.
 pub struct RsaModulus {
     /// The RSA modulus `n = p * q`.
@@ -36,7 +36,13 @@ pub struct RsaModulus {
 impl std::fmt::Debug for RsaModulus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("RsaModulus")
-            .field("n", &format!("{}...", &self.n.to_str_radix(16)[..8.min(self.n.to_str_radix(16).len())]))
+            .field(
+                "n",
+                &format!(
+                    "{}...",
+                    &self.n.to_str_radix(16)[..8.min(self.n.to_str_radix(16).len())]
+                ),
+            )
             .field("bits", &self.n.bits())
             .finish()
     }
@@ -57,9 +63,13 @@ impl RsaModulus {
     pub fn generate(bit_length: u32, rng: &mut impl Rng) -> Result<Self, VtsError> {
         let min = if cfg!(test) {
             #[cfg(test)]
-            { TEST_MIN_BIT_LENGTH }
+            {
+                TEST_MIN_BIT_LENGTH
+            }
             #[cfg(not(test))]
-            { MIN_BIT_LENGTH }
+            {
+                MIN_BIT_LENGTH
+            }
         } else {
             MIN_BIT_LENGTH
         };
@@ -71,6 +81,28 @@ impl RsaModulus {
             )));
         }
 
+        Self::generate_inner(bit_length, rng)
+    }
+
+    /// Generate an RSA modulus with relaxed minimum bit length (256).
+    ///
+    /// **For testing only.** This bypasses the production 2048-bit minimum,
+    /// allowing 256-bit moduli for fast integration tests in debug mode.
+    ///
+    /// # Safety
+    ///
+    /// Moduli < 2048 bits are trivially factorable. Never use in production.
+    pub fn generate_for_test(bit_length: u32, rng: &mut impl Rng) -> Result<Self, VtsError> {
+        if bit_length < 256 {
+            return Err(VtsError::ModulusGeneration(format!(
+                "bit length {} is below test minimum 256",
+                bit_length
+            )));
+        }
+        Self::generate_inner(bit_length, rng)
+    }
+
+    fn generate_inner(bit_length: u32, rng: &mut impl Rng) -> Result<Self, VtsError> {
         let prime_bits = bit_length / 2;
         let p = generate_safe_prime(prime_bits, rng)?;
         let q = generate_safe_prime(prime_bits, rng)?;
@@ -78,7 +110,7 @@ impl RsaModulus {
         // Ensure p != q (astronomically unlikely but verify)
         if p == q {
             return Err(VtsError::ModulusGeneration(
-                "generated identical primes (extremely unlikely; retry)".to_string(),
+                "generated identical primes (extremely unlikely: retry)".to_string(),
             ));
         }
 

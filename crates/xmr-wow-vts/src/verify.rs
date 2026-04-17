@@ -18,14 +18,14 @@ use crate::rsa::RsaModulus;
 /// Contains `(step_index, value)` pairs where `value = a^(2^step_index) mod n`.
 /// The verifier checks that consecutive checkpoints are consistent by performing
 /// the sequential squarings between them.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VerificationProof {
     /// Checkpoint pairs: `(step_index, a^(2^step_index) mod n)`.
     pub checkpoints: Vec<Checkpoint>,
 }
 
 /// A single verification checkpoint.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Checkpoint {
     /// The step index (number of squarings from base `a`).
     pub step: u64,
@@ -62,6 +62,25 @@ pub fn generate_with_proof_rng(
     num_checkpoints: u32,
     rng: &mut impl Rng,
 ) -> Result<(TimeLockPuzzle, VerificationProof, RsaModulus), VtsError> {
+    generate_with_proof_bits_rng(
+        secret,
+        difficulty_seconds,
+        squarings_per_second,
+        num_checkpoints,
+        if cfg!(test) { 512 } else { 2048 },
+        rng,
+    )
+}
+
+/// Generate with proof using an explicit RSA modulus bit length.
+pub fn generate_with_proof_bits_rng(
+    secret: &[u8],
+    difficulty_seconds: u64,
+    squarings_per_second: u64,
+    num_checkpoints: u32,
+    bit_length: u32,
+    rng: &mut impl Rng,
+) -> Result<(TimeLockPuzzle, VerificationProof, RsaModulus), VtsError> {
     if num_checkpoints == 0 {
         return Err(VtsError::VerificationFailed(
             "num_checkpoints must be > 0".to_string(),
@@ -69,8 +88,13 @@ pub fn generate_with_proof_rng(
     }
 
     // Generate the puzzle normally first
-    let (puzzle, modulus) =
-        TimeLockPuzzle::generate_with_rng(secret, difficulty_seconds, squarings_per_second, rng)?;
+    let (puzzle, modulus) = TimeLockPuzzle::generate_with_bits(
+        secret,
+        difficulty_seconds,
+        squarings_per_second,
+        bit_length,
+        rng,
+    )?;
 
     // Now compute the checkpoints using the trapdoor (fast path).
     // Evenly space checkpoints across the t squarings.
@@ -106,7 +130,7 @@ pub fn generate_with_proof_rng(
 /// Also verifies the first checkpoint from the base `a` and the last
 /// checkpoint against the puzzle's `c_k`.
 ///
-/// This requires `t / num_checkpoints` squarings per segment; much
+/// This requires `t / num_checkpoints` squarings per segment: much
 /// faster than the full `t` squarings for solving.
 pub fn verify_proof(puzzle: &TimeLockPuzzle, proof: &VerificationProof) -> Result<bool, VtsError> {
     puzzle.validate()?;
@@ -154,7 +178,7 @@ pub fn verify_proof(puzzle: &TimeLockPuzzle, proof: &VerificationProof) -> Resul
         } else {
             n - (&val - &puzzle.c_k)
         };
-        // The secret candidate exists and is in [0, n); structurally valid
+        // The secret candidate exists and is in [0, n): structurally valid
     }
 
     Ok(true)
@@ -235,8 +259,7 @@ mod tests {
     #[test]
     fn test_valid_proof_passes_verification() {
         let secret = b"verify_this_secret";
-        let (puzzle, proof, _modulus) =
-            generate_with_proof(secret, 1, 10, 3).unwrap();
+        let (puzzle, proof, _modulus) = generate_with_proof(secret, 1, 10, 3).unwrap();
 
         let result = verify_proof(&puzzle, &proof).unwrap();
         assert!(result, "valid proof should pass verification");
@@ -245,8 +268,7 @@ mod tests {
     #[test]
     fn test_tampered_checkpoint_fails_verification() {
         let secret = b"tamper_test";
-        let (puzzle, mut proof, _modulus) =
-            generate_with_proof(secret, 1, 10, 3).unwrap();
+        let (puzzle, mut proof, _modulus) = generate_with_proof(secret, 1, 10, 3).unwrap();
 
         // Tamper with a checkpoint value
         proof.checkpoints[1].value += BigUint::one();
@@ -258,8 +280,7 @@ mod tests {
     #[test]
     fn test_sampled_verification_detects_tampering() {
         let secret = b"sample_test";
-        let (puzzle, mut proof, _modulus) =
-            generate_with_proof(secret, 1, 10, 5).unwrap();
+        let (puzzle, mut proof, _modulus) = generate_with_proof(secret, 1, 10, 5).unwrap();
 
         // Tamper with a checkpoint
         proof.checkpoints[0].value += BigUint::one();
@@ -294,8 +315,7 @@ mod tests {
     #[test]
     fn test_proof_with_puzzle_still_solvable() {
         let secret = b"proof_solve_test";
-        let (puzzle, _proof, _modulus) =
-            generate_with_proof(secret, 1, 10, 3).unwrap();
+        let (puzzle, _proof, _modulus) = generate_with_proof(secret, 1, 10, 3).unwrap();
 
         // Puzzle should still solve correctly with proof
         let recovered = puzzle.solve().unwrap();
@@ -305,14 +325,17 @@ mod tests {
     #[test]
     fn test_verification_proof_serialization() {
         let secret = b"serde_proof";
-        let (_puzzle, proof, _modulus) =
-            generate_with_proof(secret, 1, 10, 2).unwrap();
+        let (_puzzle, proof, _modulus) = generate_with_proof(secret, 1, 10, 2).unwrap();
 
         let json = serde_json::to_string(&proof).unwrap();
         let deserialized: VerificationProof = serde_json::from_str(&json).unwrap();
 
         assert_eq!(proof.checkpoints.len(), deserialized.checkpoints.len());
-        for (orig, deser) in proof.checkpoints.iter().zip(deserialized.checkpoints.iter()) {
+        for (orig, deser) in proof
+            .checkpoints
+            .iter()
+            .zip(deserialized.checkpoints.iter())
+        {
             assert_eq!(orig.step, deser.step);
             assert_eq!(orig.value, deser.value);
         }

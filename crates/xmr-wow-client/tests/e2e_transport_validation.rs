@@ -46,8 +46,8 @@ fn make_test_messages(_swap_id: [u8; 32]) -> Vec<ProtocolMessage> {
         proof: proof_alice,
         amount_xmr: 1_000_000_000_000,
         amount_wow: 500_000_000_000_000,
-        xmr_refund_height: 2000,
-        wow_refund_height: 1000,
+        xmr_refund_delay_seconds: 2000,
+        wow_refund_delay_seconds: 1000,
         refund_timing: None,
         alice_refund_address: None,
     };
@@ -63,6 +63,7 @@ fn make_test_messages(_swap_id: [u8; 32]) -> Vec<ProtocolMessage> {
         pubkey: contrib_bob.public_bytes(),
         proof: proof_bob,
         bob_refund_address: None,
+        refund_artifact: None,
     };
 
     let adaptor_pre_sig = ProtocolMessage::AdaptorPreSig {
@@ -201,6 +202,7 @@ async fn sharechain_transport_full_message_flow() {
         let variant = match msg {
             ProtocolMessage::Init { .. } => "Init",
             ProtocolMessage::Response { .. } => "Response",
+            ProtocolMessage::RefundArtifact { .. } => "RefundArtifact",
             ProtocolMessage::AdaptorPreSig { .. } => "AdaptorPreSig",
             ProtocolMessage::ClaimProof { .. } => "ClaimProof",
             ProtocolMessage::RefundCooperate { .. } => "RefundCooperate",
@@ -262,6 +264,7 @@ fn oob_transport_full_message_flow_no_sharechain() {
         let variant = match &recovered {
             ProtocolMessage::Init { .. } => "Init",
             ProtocolMessage::Response { .. } => "Response",
+            ProtocolMessage::RefundArtifact { .. } => "RefundArtifact",
             ProtocolMessage::AdaptorPreSig { .. } => "AdaptorPreSig",
             ProtocolMessage::ClaimProof { .. } => "ClaimProof",
             ProtocolMessage::RefundCooperate { .. } => "RefundCooperate",
@@ -277,6 +280,7 @@ fn oob_transport_full_message_flow_no_sharechain() {
         let decoded_variant = match &decoded {
             ProtocolMessage::Init { .. } => "Init",
             ProtocolMessage::Response { .. } => "Response",
+            ProtocolMessage::RefundArtifact { .. } => "RefundArtifact",
             ProtocolMessage::AdaptorPreSig { .. } => "AdaptorPreSig",
             ProtocolMessage::ClaimProof { .. } => "ClaimProof",
             ProtocolMessage::RefundCooperate { .. } => "RefundCooperate",

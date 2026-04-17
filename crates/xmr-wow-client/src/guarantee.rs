@@ -26,7 +26,7 @@ pub enum GuaranteeMode {
     LiveWowCooperativeRefund,
     ProofHarnessValidation,
     CurrentSingleSignerPreLockArtifact,
-    /// VTS-backed refund artifact present; the refund spend secret is locked
+    /// VTS-backed refund artifact present: the refund spend secret is locked
     /// behind a verifiable time-lock puzzle. Solving the puzzle after the delay
     /// recovers the secret, enabling a normal sweep refund.
     VtsRefundArtifact,
@@ -42,7 +42,7 @@ pub fn guarantee_decision(mode: GuaranteeMode) -> GuaranteeDecision {
     match mode {
         GuaranteeMode::ObservedInitTiming => GuaranteeDecision {
             status: GuaranteeStatus::Supported,
-            reason: "Observed daemon heights provide the Phase 13 timing basis required by SAFE-09.",
+            reason: "Observed daemon heights provide the timing basis required for safe refund window validation.",
         },
         GuaranteeMode::LegacyRefundNoEvidence => GuaranteeDecision {
             status: GuaranteeStatus::Blocked,
@@ -85,39 +85,31 @@ pub fn validate_pre_risk_entry(
 
 pub fn guidance_decision(state: &SwapState) -> Option<GuaranteeDecision> {
     let mode = match state {
-        SwapState::JointAddress { .. } => Some(GuaranteeMode::CurrentSingleSignerPreLockArtifact),
-        SwapState::WowLocked {
-            role: SwapRole::Alice,
-            refund_artifact: Some(_), // VTS artifact present
+        SwapState::JointAddress {
+            refund_artifact: Some(_),
+            ..
+        }
+        | SwapState::WowLocked {
+            refund_artifact: Some(_),
+            ..
+        }
+        | SwapState::XmrLocked {
+            refund_artifact: Some(_),
             ..
         } => Some(GuaranteeMode::VtsRefundArtifact),
+        SwapState::JointAddress { .. } => Some(GuaranteeMode::CurrentSingleSignerPreLockArtifact),
         SwapState::WowLocked {
             role: SwapRole::Alice,
             ..
         } => Some(GuaranteeMode::CurrentSingleSignerPreLockArtifact),
         SwapState::WowLocked {
             role: SwapRole::Bob,
-            refund_artifact: Some(_), // VTS artifact present
-            ..
-        } => Some(GuaranteeMode::VtsRefundArtifact),
-        SwapState::WowLocked {
-            role: SwapRole::Bob,
             ..
         } => Some(GuaranteeMode::LiveWowCooperativeRefund),
         SwapState::XmrLocked {
             role: SwapRole::Alice,
-            refund_artifact: Some(_), // VTS artifact present
-            ..
-        } => Some(GuaranteeMode::VtsRefundArtifact),
-        SwapState::XmrLocked {
-            role: SwapRole::Alice,
             ..
         } => Some(GuaranteeMode::LiveXmrUnlockTimeRefund),
-        SwapState::XmrLocked {
-            role: SwapRole::Bob,
-            refund_artifact: Some(_),
-            ..
-        } => Some(GuaranteeMode::VtsRefundArtifact),
         SwapState::XmrLocked {
             role: SwapRole::Bob,
             ..
@@ -132,7 +124,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn phase13_guarantee_matrix_matches_research() {
+    fn guarantee_matrix_matches_research() {
         let cases = [
             (
                 GuaranteeMode::LiveXmrUnlockTimeRefund,
@@ -150,10 +142,7 @@ mod tests {
                 GuaranteeMode::CurrentSingleSignerPreLockArtifact,
                 GuaranteeStatus::UnsupportedForGuarantee,
             ),
-            (
-                GuaranteeMode::VtsRefundArtifact,
-                GuaranteeStatus::Supported,
-            ),
+            (GuaranteeMode::VtsRefundArtifact, GuaranteeStatus::Supported),
         ];
 
         for (mode, expected_status) in cases {

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# run-live-network-harness.sh: Live-network E2E harness for XMR<->WOW atomic swaps.
+# run-live-network-harness.sh: Live-network E2E harness for XMRXMR-WOWWOW atomic swaps.
 #
 # Usage:
-#   ./scripts/run-live-network-harness.sh [oob|sharechain] [--cleanup]
+#   ./scripts/run-live-network-harness.sh [oob|sharechain] [--cleanup] [--dry-run]
 #
 # Prerequisites:
 #   - XMR stagenet daemon at http://127.0.0.1:38081
@@ -20,6 +20,8 @@
 #   BOB_SPEND_KEY / BOB_VIEW_KEY      Bob's WOW keys (hex); or BOB_MNEMONIC
 #   AMOUNT_XMR        XMR atomic units (default: 1000000000 = 0.001 XMR)
 #   AMOUNT_WOW        WOW atomic units (default: 1000000000000 = 1.0 WOW)
+#   XMR_WOW_VTS_SQUARINGS_PER_SECOND  Proof-run VTS squaring rate override (default: 10)
+#   XMR_WOW_VTS_MODULUS_BITS          Proof-run VTS modulus size override (default: 512)
 #   *_SCAN_FROM       Block height to start wallet scan (avoids full rescan)
 #   RUN_DIR           Override run artifact directory
 #
@@ -31,36 +33,44 @@
 
 set -euo pipefail
 
-TRANSPORT_ARG="${1:-oob}"
+usage() {
+  echo "Usage: $0 [oob|sharechain] [--cleanup] [--dry-run]" >&2
+  echo "  oob        Use out-of-band copy-paste transport (default)" >&2
+  echo "  sharechain Use sharechain node transport (requires --node-url)" >&2
+  echo "  --cleanup  Remove the run directory on exit" >&2
+  echo "  --dry-run  Print the planned flow and exit without preflight or swap actions" >&2
+}
+
+TRANSPORT_MODE="out-of-band"
 CLEANUP=false
+DRY_RUN=false
 
 for arg in "$@"; do
   case "$arg" in
-    --cleanup) CLEANUP=true ;;
+    oob|out-of-band)
+      TRANSPORT_MODE="out-of-band"
+      ;;
+    sharechain)
+      TRANSPORT_MODE="sharechain"
+      ;;
+    --cleanup)
+      CLEANUP=true
+      ;;
+    --dry-run)
+      DRY_RUN=true
+      ;;
+    *)
+      usage
+      exit 2
+      ;;
   esac
 done
-
-case "$TRANSPORT_ARG" in
-  oob|out-of-band)
-    TRANSPORT_MODE="out-of-band"
-    ;;
-  sharechain)
-    TRANSPORT_MODE="sharechain"
-    ;;
-  --cleanup)
-    TRANSPORT_MODE="out-of-band"
-    ;;
-  *)
-    echo "Usage: $0 [oob|sharechain] [--cleanup]" >&2
-    echo "  oob        Use out-of-band copy-paste transport (default)" >&2
-    echo "  sharechain Use sharechain node transport (requires --node-url)" >&2
-    exit 2
-    ;;
-esac
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 BINARY="${XMR_WOW_BIN:-${ROOT_DIR}/target/release/xmr-wow}"
+export XMR_WOW_VTS_SQUARINGS_PER_SECOND="${XMR_WOW_VTS_SQUARINGS_PER_SECOND:-10}"
+export XMR_WOW_VTS_MODULUS_BITS="${XMR_WOW_VTS_MODULUS_BITS:-512}"
 
 XMR_DAEMON_URL="${XMR_DAEMON_URL:-http://127.0.0.1:38081}"
 WOW_DAEMON_URL="${WOW_DAEMON_URL:-http://127.0.0.1:34568}"
@@ -86,6 +96,8 @@ BOB_PW="${BOB_PW:-bob-test-password}"
 # 0.001 XMR / 1.0 WOW in atomic units
 AMOUNT_XMR="${AMOUNT_XMR:-1000000000}"
 AMOUNT_WOW="${AMOUNT_WOW:-1000000000000}"
+XMR_REFUND_DELAY="${XMR_REFUND_DELAY:-50}"
+WOW_REFUND_DELAY="${WOW_REFUND_DELAY:-200}"
 
 # Set to recent block heights to avoid full rescans
 ALICE_XMR_SCAN_FROM="${ALICE_XMR_SCAN_FROM:-0}"
@@ -141,7 +153,7 @@ preflight() {
   ok "WOW daemon: ${WOW_DAEMON_URL}"
 
   if [[ "$TRANSPORT_MODE" == "sharechain" ]]; then
-    if ! curl -sf --max-time 5 "${NODE_URL}/" >/dev/null 2>&1; then
+    if ! curl -sf --max-time 5 "${NODE_URL}/health" >/dev/null 2>&1; then
       fail "Sharechain node not responding at ${NODE_URL}. Start xmr-wow-node."
     fi
     ok "Sharechain node: ${NODE_URL}"
@@ -175,20 +187,31 @@ step_init_alice() {
     --amount-wow "$AMOUNT_WOW" \
     --xmr-daemon "$XMR_DAEMON_URL" \
     --wow-daemon "$WOW_DAEMON_URL" \
+    --xmr-refund-delay "$XMR_REFUND_DELAY" \
+    --wow-refund-delay "$WOW_REFUND_DELAY" \
     --alice-refund-address "$ALICE_XMR_REFUND" \
     > "${RUN_DIR}/init-alice.stdout" \
     2> "${RUN_DIR}/init-alice.stderr"
 
-  # grep stdout only: stderr carries tracing logs that would corrupt the match
-  ALICE_INIT_MSG="$(grep '^xmrwow1:' "${RUN_DIR}/init-alice.stdout" | head -1)"
-  if [[ -z "$ALICE_INIT_MSG" ]]; then
-    cat "${RUN_DIR}/init-alice.stderr" >&2
-    fail "No xmrwow1: message in init-alice output"
-  fi
+  if [[ "$TRANSPORT_MODE" == "sharechain" ]]; then
+    TEMP_SWAP_ID="$(awk '/^Swap coord ID:/ {print $NF}' "${RUN_DIR}/init-alice.stdout")"
+    if [[ -z "$TEMP_SWAP_ID" ]]; then
+      cat "${RUN_DIR}/init-alice.stderr" >&2
+      fail "Could not parse Swap coord ID from init-alice sharechain output"
+    fi
+    ALICE_INIT_MSG=""
+  else
+    # grep stdout only: stderr carries tracing logs that would corrupt the match
+    ALICE_INIT_MSG="$(grep '^xmrwow1:' "${RUN_DIR}/init-alice.stdout" | head -1)"
+    if [[ -z "$ALICE_INIT_MSG" ]]; then
+      cat "${RUN_DIR}/init-alice.stderr" >&2
+      fail "No xmrwow1: message in init-alice output"
+    fi
 
-  TEMP_SWAP_ID="$(awk '/Temp swap ID:/ {print $NF}' "${RUN_DIR}/init-alice.stdout")"
-  if [[ -z "$TEMP_SWAP_ID" ]]; then
-    fail "Could not parse Temp swap ID from init-alice output"
+    TEMP_SWAP_ID="$(awk '/Temp swap ID:/ {print $NF}' "${RUN_DIR}/init-alice.stdout")"
+    if [[ -z "$TEMP_SWAP_ID" ]]; then
+      fail "Could not parse Temp swap ID from init-alice output"
+    fi
   fi
 
   ok "Step 1: init-alice completed (temp swap ID: ${TEMP_SWAP_ID})"
@@ -197,18 +220,29 @@ step_init_alice() {
 step_init_bob() {
   log "Step 2: init-bob"
 
+  local bob_init_args=()
+  if [[ "$TRANSPORT_MODE" == "sharechain" ]]; then
+    bob_init_args=(--swap-id "$TEMP_SWAP_ID")
+  else
+    bob_init_args=(--message "$ALICE_INIT_MSG")
+  fi
+
   "$BINARY" $TRANSPORT_FLAGS \
     --password "$BOB_PW" --db "$BOB_DB" \
     init-bob \
-    --message "$ALICE_INIT_MSG" \
+    "${bob_init_args[@]}" \
     --bob-refund-address "$BOB_WOW_REFUND" \
     > "${RUN_DIR}/init-bob.stdout" \
     2> "${RUN_DIR}/init-bob.stderr"
 
-  BOB_RESPONSE_MSG="$(grep '^xmrwow1:' "${RUN_DIR}/init-bob.stdout" | head -1)"
-  if [[ -z "$BOB_RESPONSE_MSG" ]]; then
-    cat "${RUN_DIR}/init-bob.stderr" >&2
-    fail "No xmrwow1: message in init-bob output"
+  if [[ "$TRANSPORT_MODE" == "sharechain" ]]; then
+    BOB_RESPONSE_MSG=""
+  else
+    BOB_RESPONSE_MSG="$(grep '^xmrwow1:' "${RUN_DIR}/init-bob.stdout" | head -1)"
+    if [[ -z "$BOB_RESPONSE_MSG" ]]; then
+      cat "${RUN_DIR}/init-bob.stderr" >&2
+      fail "No xmrwow1: message in init-bob output"
+    fi
   fi
 
   BOB_SWAP_ID="$(awk '/^Swap ID:/ {print $NF}' "${RUN_DIR}/init-bob.stdout")"
@@ -222,11 +256,16 @@ step_init_bob() {
 step_import() {
   log "Step 3: import (Alice imports Bob's response)"
 
+  local import_args=()
+  if [[ "$TRANSPORT_MODE" != "sharechain" ]]; then
+    import_args=(--message "$BOB_RESPONSE_MSG")
+  fi
+
   "$BINARY" $TRANSPORT_FLAGS \
     --password "$ALICE_PW" --db "$ALICE_DB" \
     import \
     --swap-id "$TEMP_SWAP_ID" \
-    --message "$BOB_RESPONSE_MSG" \
+    "${import_args[@]}" \
     > "${RUN_DIR}/import.stdout" \
     2> "${RUN_DIR}/import.stderr"
 
@@ -239,6 +278,16 @@ step_import() {
     fail "Could not parse Alice swap ID from import output"
   fi
 
+  if [[ "$TRANSPORT_MODE" == "sharechain" ]]; then
+    ALICE_REFUND_ARTIFACT_MSG=""
+  else
+    ALICE_REFUND_ARTIFACT_MSG="$(grep '^xmrwow1:' "${RUN_DIR}/import.stdout" | tail -1)"
+    if [[ -z "$ALICE_REFUND_ARTIFACT_MSG" ]]; then
+      cat "${RUN_DIR}/import.stderr" >&2
+      fail "No xmrwow1: refund artifact message in import output"
+    fi
+  fi
+
   ok "Step 3: import completed (Alice swap ID: ${ALICE_SWAP_ID})"
 }
 
@@ -246,10 +295,14 @@ step_lock_wow() {
   log "Step 4: lock-wow (Bob locks WOW first: lock-order safety)"
 
   local bob_wallet_args=()
+  local bob_message_args=()
   if [[ -n "$BOB_MNEMONIC" ]]; then
     bob_wallet_args=(--mnemonic "$BOB_MNEMONIC")
   else
     bob_wallet_args=(--spend-key "$BOB_SPEND_KEY" --view-key "$BOB_VIEW_KEY")
+  fi
+  if [[ "$TRANSPORT_MODE" == "out-of-band" ]]; then
+    bob_message_args=(--message "$ALICE_REFUND_ARTIFACT_MSG")
   fi
 
   "$BINARY" $TRANSPORT_FLAGS \
@@ -257,6 +310,7 @@ step_lock_wow() {
     lock-wow \
     --swap-id "$BOB_SWAP_ID" \
     --wow-daemon "$WOW_DAEMON_URL" \
+    "${bob_message_args[@]}" \
     --scan-from "$BOB_WOW_SCAN_FROM" \
     "${bob_wallet_args[@]}" \
     > "${RUN_DIR}/lock-wow.stdout" \
@@ -376,6 +430,12 @@ if [[ "$TRANSPORT_MODE" == "sharechain" ]]; then
   echo "Sharechain node: ${NODE_URL}"
 fi
 
+if [[ "$DRY_RUN" == "true" ]]; then
+  echo "Dry run: would run preflight, init-alice, init-bob, import, lock-wow, lock-xmr, exchange-pre-sig, claim-wow, and claim-xmr."
+  echo "Dry run: no env validation, wallet scanning, network writes, or artifact directories were created."
+  exit 0
+fi
+
 preflight
 
 mkdir -p "$RUN_DIR"
@@ -387,6 +447,7 @@ BOB_RESPONSE_MSG=""
 TEMP_SWAP_ID=""
 BOB_SWAP_ID=""
 ALICE_SWAP_ID=""
+ALICE_REFUND_ARTIFACT_MSG=""
 ALICE_PRESIG_MSG=""
 BOB_PRESIG_MSG=""
 ALICE_CLAIM_PROOF_MSG=""

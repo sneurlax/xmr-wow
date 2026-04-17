@@ -222,16 +222,21 @@ impl XmrWallet {
             .ok_or_else(|| WalletError::RpcRequest("missing count in get_block_count".into()))
     }
 
-    /// Fetch a block by height and its transactions, constructing a ScannableBlock.
+    /// Fetch a block by height and any non-miner transactions it contains.
     ///
     /// Uses monerod JSON-RPC `get_block` to get the block blob, then
-    /// `/get_transactions` to fetch the non-miner transactions. Constructs
-    /// a `ScannableBlock` suitable for monero-oxide's Scanner.
-    async fn fetch_scannable_block(
+    /// `/get_transactions` to fetch the non-miner transactions.
+    async fn fetch_scannable_block_parts(
         client: &reqwest::Client,
         daemon_url: &str,
         height: u64,
-    ) -> Result<monero_interface::ScannableBlock, WalletError> {
+    ) -> Result<
+        (
+            monero_oxide::block::Block,
+            Vec<monero_oxide::transaction::Transaction<monero_oxide::transaction::Pruned>>,
+        ),
+        WalletError,
+    > {
         // Step 1: Fetch block blob via get_block
         let resp = client
             .post(format!("{}/json_rpc", daemon_url))
@@ -322,16 +327,80 @@ impl XmrWallet {
             }
         }
 
-        // Step 3: Get output_index_for_first_ringct_output
-        // For the miner transaction's first output, query its global output index.
-        // This is needed by the Scanner to correctly track output indexes on the blockchain.
-        let output_index =
-            Self::get_first_ringct_output_index(daemon_url, &block, &pruned_txs).await?;
+        Ok((block, pruned_txs))
+    }
+
+    fn block_ringct_output_count(
+        block: &monero_oxide::block::Block,
+        txs: &[monero_oxide::transaction::Transaction<monero_oxide::transaction::Pruned>],
+    ) -> Result<u64, WalletError> {
+        let mut total = 0u64;
+
+        if matches!(
+            block.miner_transaction(),
+            monero_oxide::transaction::Transaction::V2 { .. }
+        ) {
+            total = total
+                .checked_add(
+                    u64::try_from(block.miner_transaction().prefix().outputs.len()).map_err(
+                        |_| {
+                            WalletError::ScanFailed(
+                                "miner transaction output count overflow".into(),
+                            )
+                        },
+                    )?,
+                )
+                .ok_or_else(|| WalletError::ScanFailed("RingCT output index overflow".into()))?;
+        }
+
+        for tx in txs {
+            if matches!(tx, monero_oxide::transaction::Transaction::V2 { .. }) {
+                total = total
+                    .checked_add(u64::try_from(tx.prefix().outputs.len()).map_err(|_| {
+                        WalletError::ScanFailed("transaction output count overflow".into())
+                    })?)
+                    .ok_or_else(|| {
+                        WalletError::ScanFailed("RingCT output index overflow".into())
+                    })?;
+            }
+        }
+
+        Ok(total)
+    }
+
+    /// Fetch a ScannableBlock while carrying forward the RingCT output index
+    /// across a sequential height scan.
+    async fn fetch_scannable_block(
+        client: &reqwest::Client,
+        daemon_url: &str,
+        height: u64,
+        next_ringct_output_index: &mut Option<u64>,
+    ) -> Result<monero_interface::ScannableBlock, WalletError> {
+        let (block, pruned_txs) =
+            Self::fetch_scannable_block_parts(client, daemon_url, height).await?;
+        let ringct_output_count = Self::block_ringct_output_count(&block, &pruned_txs)?;
+
+        let output_index_for_first_ringct_output = if ringct_output_count == 0 {
+            None
+        } else {
+            if next_ringct_output_index.is_none() {
+                *next_ringct_output_index =
+                    Self::get_first_ringct_output_index(daemon_url, &block, &pruned_txs).await?;
+            }
+
+            let current_index = *next_ringct_output_index;
+            if let Some(next_index) = next_ringct_output_index.as_mut() {
+                *next_index = next_index.checked_add(ringct_output_count).ok_or_else(|| {
+                    WalletError::ScanFailed("RingCT output index overflow".into())
+                })?;
+            }
+            current_index
+        };
 
         Ok(monero_interface::ScannableBlock {
             block,
             transactions: pruned_txs,
-            output_index_for_first_ringct_output: output_index,
+            output_index_for_first_ringct_output,
         })
     }
 
@@ -491,13 +560,20 @@ impl XmrWallet {
     ) -> Result<(Vec<ScanResult>, Vec<monero_wallet::WalletOutput>), WalletError> {
         let view_pair = Self::create_view_pair(spend_point, view_scalar)?;
         let mut scanner = monero_wallet::Scanner::new(view_pair);
+        let mut next_ringct_output_index = None;
 
         let mut results = Vec::new();
         let mut wallet_outputs = Vec::new();
 
         // Scan blocks in range (batch-friendly: scan one block at a time)
         for height in from_height..to_height {
-            let scannable = Self::fetch_scannable_block(client, daemon_url, height).await?;
+            let scannable = Self::fetch_scannable_block(
+                client,
+                daemon_url,
+                height,
+                &mut next_ringct_output_index,
+            )
+            .await?;
 
             match scanner.scan(scannable) {
                 Ok(timelocked) => {
@@ -625,6 +701,132 @@ impl XmrWallet {
 
         Ok(unspent)
     }
+
+    /// Scan sender outputs in ascending block order and stop once enough mature,
+    /// unspent funds exist to satisfy a lock attempt.
+    async fn scan_lock_ready_outputs(
+        client: &reqwest::Client,
+        daemon_url: &str,
+        spend_point: &EdwardsPoint,
+        view_scalar: &Scalar,
+        sender_spend: &Scalar,
+        from_height: u64,
+        to_height: u64,
+        current_height: u64,
+        amount: u64,
+    ) -> Result<Vec<monero_wallet::WalletOutput>, WalletError> {
+        let view_pair = Self::create_view_pair(spend_point, view_scalar)?;
+        let mut scanner = monero_wallet::Scanner::new(view_pair);
+        let mut mature_outputs = Vec::new();
+        let mut next_ringct_output_index = None;
+
+        let mut scanned = 0u64;
+        let mut skipped_proto = 0u64;
+        for height in from_height..to_height {
+            let scannable = Self::fetch_scannable_block(
+                client,
+                daemon_url,
+                height,
+                &mut next_ringct_output_index,
+            )
+            .await?;
+
+            match scanner.scan(scannable) {
+                Ok(timelocked) => {
+                    for output in timelocked.ignore_additional_timelock() {
+                        let is_mature = match output.additional_timelock() {
+                            monero_oxide::transaction::Timelock::None => true,
+                            monero_oxide::transaction::Timelock::Block(unlock_height) => {
+                                (current_height as usize) >= unlock_height
+                            }
+                            monero_oxide::transaction::Timelock::Time(unlock_time) => {
+                                let now = std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .unwrap_or_default()
+                                    .as_secs();
+                                now >= unlock_time
+                            }
+                        };
+                        if !is_mature {
+                            continue;
+                        }
+
+                        tracing::debug!(
+                            target: "xmr_wallet",
+                            amount = output.commitment().amount,
+                            height = height,
+                            "found mature XMR lock candidate"
+                        );
+                        mature_outputs.push(output);
+                    }
+                }
+                Err(monero_wallet::ScanError::UnsupportedProtocol(version)) => {
+                    tracing::warn!(
+                        target: "xmr_wallet",
+                        height = height,
+                        version = version,
+                        "skipping block with unsupported protocol version during lock scan"
+                    );
+                    skipped_proto += 1;
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        target: "xmr_wallet",
+                        height = height,
+                        error = %err,
+                        "scan error, skipping block during lock scan"
+                    );
+                }
+            }
+            scanned += 1;
+
+            if mature_outputs.is_empty() {
+                continue;
+            }
+
+            let mature_amounts: Vec<u64> = mature_outputs
+                .iter()
+                .map(|output| output.commitment().amount)
+                .collect();
+            if Self::select_lock_output_indices(&mature_amounts, amount).is_err() {
+                continue;
+            }
+
+            let unspent =
+                Self::filter_unspent(client, daemon_url, sender_spend, mature_outputs.clone())
+                    .await?;
+            let unspent_amounts: Vec<u64> = unspent
+                .iter()
+                .map(|output| output.commitment().amount)
+                .collect();
+            if Self::select_lock_output_indices(&unspent_amounts, amount).is_ok() {
+                tracing::info!(
+                    target: "xmr_wallet",
+                    from_height = from_height,
+                    to_height = to_height,
+                    scanned = scanned,
+                    skipped_proto = skipped_proto,
+                    candidates = unspent.len(),
+                    "lock scan found sufficient mature unspent XMR outputs before tip"
+                );
+                return Ok(unspent);
+            }
+
+            mature_outputs = unspent;
+        }
+
+        tracing::info!(
+            target: "xmr_wallet",
+            from_height = from_height,
+            to_height = to_height,
+            scanned = scanned,
+            skipped_proto = skipped_proto,
+            candidates = mature_outputs.len(),
+            "lock scan exhausted range without early exit"
+        );
+
+        Self::filter_unspent(client, daemon_url, sender_spend, mature_outputs).await
+    }
 }
 
 #[async_trait::async_trait]
@@ -675,14 +877,16 @@ impl CryptoNoteWallet for XmrWallet {
         let client = &self.client;
         let current_height = Self::get_chain_height(client, &self.daemon_url).await?;
 
-        // Scan for sender's outputs then filter out already-spent ones
-        let (_scan_results, all_outputs) = Self::scan_with_scanner(
-            &self.client,
+        let sender_outputs = Self::scan_lock_ready_outputs(
+            client,
             &self.daemon_url,
             &sender_spend_point,
             sender_view,
+            sender_spend,
             self.scan_from_height,
             current_height,
+            current_height,
+            amount,
         )
         .await?;
 
@@ -691,43 +895,8 @@ impl CryptoNoteWallet for XmrWallet {
             from_height = self.scan_from_height,
             to_height = current_height,
             blocks = current_height.saturating_sub(self.scan_from_height),
-            outputs = all_outputs.len(),
-            "sender scan complete"
-        );
-
-        // Filter out immature coinbase outputs
-        let total_found = all_outputs.len();
-        let mature_outputs: Vec<_> = all_outputs
-            .into_iter()
-            .filter(|o| match o.additional_timelock() {
-                monero_oxide::transaction::Timelock::None => true,
-                monero_oxide::transaction::Timelock::Block(b) => (current_height as usize) >= b,
-                monero_oxide::transaction::Timelock::Time(t) => {
-                    let now = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_secs();
-                    now >= t
-                }
-            })
-            .collect();
-
-        if mature_outputs.len() < total_found {
-            tracing::info!(
-                target: "xmr_wallet",
-                filtered = total_found - mature_outputs.len(),
-                mature = mature_outputs.len(),
-                "filtered immature coinbase outputs"
-            );
-        }
-
-        let sender_outputs =
-            Self::filter_unspent(client, &self.daemon_url, sender_spend, mature_outputs).await?;
-
-        tracing::info!(
-            target: "xmr_wallet",
             unspent = sender_outputs.len(),
-            "completed spent-output filtering"
+            "completed XMR sender scan for lock"
         );
         for o in &sender_outputs {
             tracing::debug!(

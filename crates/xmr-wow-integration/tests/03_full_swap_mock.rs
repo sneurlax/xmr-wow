@@ -1,42 +1,40 @@
+use curve25519_dalek::{constants::ED25519_BASEPOINT_POINT as G, scalar::Scalar};
 /// Integration tests: full XMR<->WOW swap lifecycle, in-process, no network I/O.
 use rand::rngs::OsRng;
 use xmr_wow_crypto::{
-    DleqProof, KeyContribution,
-    combine_public_keys, derive_view_key, joint_address, keccak256,
+    combine_public_keys, derive_view_key, joint_address, keccak256, DleqProof, KeyContribution,
     Network,
 };
 use xmr_wow_sharechain::{
-    SwapChain, SwapShare, EscrowOp, EscrowState, EscrowCommitment, Difficulty,
-};
-use curve25519_dalek::{
-    constants::ED25519_BASEPOINT_POINT as G,
-    scalar::Scalar,
+    Difficulty, EscrowCommitment, EscrowOp, EscrowState, SwapChain, SwapShare,
 };
 
 // --- helpers -----------------------------------------------------------------
 
 fn generate_party() -> (KeyContribution, DleqProof) {
     let contrib = KeyContribution::generate(&mut OsRng);
-    let proof = DleqProof::prove(&contrib.secret, &contrib.public, b"xmr-wow-swap-v1", &mut OsRng);
+    let proof = DleqProof::prove(
+        &contrib.secret,
+        &contrib.public,
+        b"xmr-wow-swap-v1",
+        &mut OsRng,
+    );
     (contrib, proof)
 }
 
-fn make_commitment(
-    alice_pub: [u8; 32],
-    bob_pub: [u8; 32],
-) -> EscrowCommitment {
+fn make_commitment(alice_pub: [u8; 32], bob_pub: [u8; 32]) -> EscrowCommitment {
     let mut id_input = Vec::with_capacity(64);
     id_input.extend_from_slice(&alice_pub);
     id_input.extend_from_slice(&bob_pub);
     EscrowCommitment {
-        swap_id:         keccak256(&id_input),
+        swap_id: keccak256(&id_input),
         alice_sc_pubkey: alice_pub,
-        bob_sc_pubkey:   bob_pub,
-        k_b_expected:    bob_pub,   // Bob's K_b per D-06/D-07
-        k_b_prime:       bob_pub,   // Same value per D-07
-        claim_timelock:  1000,
+        bob_sc_pubkey: bob_pub,
+        k_b_expected: bob_pub, // Bob's K_b per D-06/D-07
+        k_b_prime: bob_pub,    // Same value per D-07
+        claim_timelock: 1000,
         refund_timelock: 2000,
-        amount:          1_000_000_000_000,
+        amount: 1_000_000_000_000,
     }
 }
 
@@ -76,15 +74,19 @@ fn make_child(parent_share: &SwapShare, ops: Vec<EscrowOp>) -> SwapShare {
 
 #[test]
 fn full_swap_alice_claims() {
-    // Phase 1: Key generation
+    // Key generation
     let (alice_contrib, alice_proof) = generate_party();
     let (bob_contrib, bob_proof) = generate_party();
 
-    // Phase 2: DLEQ exchange
-    alice_proof.verify(&alice_contrib.public, b"xmr-wow-swap-v1").unwrap();
-    bob_proof.verify(&bob_contrib.public, b"xmr-wow-swap-v1").unwrap();
+    // DLEQ exchange
+    alice_proof
+        .verify(&alice_contrib.public, b"xmr-wow-swap-v1")
+        .unwrap();
+    bob_proof
+        .verify(&bob_contrib.public, b"xmr-wow-swap-v1")
+        .unwrap();
 
-    // Phase 3: Joint addresses
+    // Joint addresses
     let joint_spend = combine_public_keys(&alice_contrib.public, &bob_contrib.public);
     let joint_spend_scalar = Scalar::from_bytes_mod_order(joint_spend.compress().to_bytes());
     let view_scalar = derive_view_key(&joint_spend_scalar);
@@ -117,18 +119,23 @@ fn full_swap_alice_claims() {
         Network::Wownero,
     );
 
-    assert_eq!(xmr_joint_address_alice, xmr_joint_address_bob,
-        "Both parties must derive the same XMR address");
-    assert_eq!(wow_joint_address_alice, wow_joint_address_bob,
-        "Both parties must derive the same WOW address");
-    assert_eq!(xmr_joint_address_alice.len(), 95, "XMR stagenet address is 95 chars");
+    assert_eq!(
+        xmr_joint_address_alice, xmr_joint_address_bob,
+        "Both parties must derive the same XMR address"
+    );
+    assert_eq!(
+        wow_joint_address_alice, wow_joint_address_bob,
+        "Both parties must derive the same WOW address"
+    );
+    assert_eq!(
+        xmr_joint_address_alice.len(),
+        95,
+        "XMR stagenet address is 95 chars"
+    );
     assert_eq!(wow_joint_address_alice.len(), 97, "WOW address is 97 chars");
 
-    // Phase 4: Escrow on sharechain
-    let commitment = make_commitment(
-        alice_contrib.public_bytes(),
-        bob_contrib.public_bytes(),
-    );
+    // Escrow on sharechain
+    let commitment = make_commitment(alice_contrib.public_bytes(), bob_contrib.public_bytes());
     let swap_id = commitment.swap_id;
 
     let chain = SwapChain::new(Difficulty::from_u64(1));
@@ -137,26 +144,36 @@ fn full_swap_alice_claims() {
 
     {
         let idx = chain.escrow_index.read();
-        assert!(matches!(idx.get(&swap_id), Some(EscrowState::Open(_))),
-            "EscrowState must be Open after open op");
+        assert!(
+            matches!(idx.get(&swap_id), Some(EscrowState::Open(_))),
+            "EscrowState must be Open after open op"
+        );
     }
 
-    // Phase 5: Alice claims, revealing k_bob_b
+    // Alice claims, revealing k_bob_b
     let k_bob_b_bytes = bob_contrib.public_bytes();
-    let s2 = make_child(&s1, vec![
-        EscrowOp::Claim { swap_id, k_b: k_bob_b_bytes }
-    ]);
+    let s2 = make_child(
+        &s1,
+        vec![EscrowOp::Claim {
+            swap_id,
+            k_b: k_bob_b_bytes,
+        }],
+    );
     chain.add_share(s2).unwrap();
 
     let idx = chain.escrow_index.read();
     let state = idx.get(&swap_id).unwrap();
-    assert!(matches!(state, EscrowState::Claimed { .. }),
-        "EscrowState must be Claimed after claim");
+    assert!(
+        matches!(state, EscrowState::Claimed { .. }),
+        "EscrowState must be Claimed after claim"
+    );
 
     match state {
         EscrowState::Claimed { k_b } => {
-            assert_eq!(k_b, &k_bob_b_bytes,
-                "Bob can now reconstruct joint spend key using revealed k_b");
+            assert_eq!(
+                k_b, &k_bob_b_bytes,
+                "Bob can now reconstruct joint spend key using revealed k_b"
+            );
         }
         _ => panic!("expected Claimed"),
     }
@@ -167,10 +184,7 @@ fn full_swap_bob_refunds() {
     let (alice_contrib, _alice_proof) = generate_party();
     let (bob_contrib, _bob_proof) = generate_party();
 
-    let commitment = make_commitment(
-        alice_contrib.public_bytes(),
-        bob_contrib.public_bytes(),
-    );
+    let commitment = make_commitment(alice_contrib.public_bytes(), bob_contrib.public_bytes());
     let swap_id = commitment.swap_id;
 
     let chain = SwapChain::new(Difficulty::from_u64(1));
@@ -179,14 +193,20 @@ fn full_swap_bob_refunds() {
 
     // Bob refunds (with a dummy signature ; sharechain doesn't verify crypto)
     let refund_sig = [0u8; 64];
-    let s2 = make_child(&s1, vec![
-        EscrowOp::Refund { swap_id, sig: refund_sig }
-    ]);
+    let s2 = make_child(
+        &s1,
+        vec![EscrowOp::Refund {
+            swap_id,
+            sig: refund_sig,
+        }],
+    );
     chain.add_share(s2).unwrap();
 
     let idx = chain.escrow_index.read();
-    assert!(matches!(idx.get(&swap_id), Some(EscrowState::Refunded)),
-        "EscrowState must be Refunded after refund");
+    assert!(
+        matches!(idx.get(&swap_id), Some(EscrowState::Refunded)),
+        "EscrowState must be Refunded after refund"
+    );
 }
 
 #[test]
@@ -196,10 +216,7 @@ fn wrong_k_b_claim_rejected_at_chain_level() {
     let (alice_contrib, _) = generate_party();
     let (bob_contrib, _) = generate_party();
 
-    let commitment = make_commitment(
-        alice_contrib.public_bytes(),
-        bob_contrib.public_bytes(),
-    );
+    let commitment = make_commitment(alice_contrib.public_bytes(), bob_contrib.public_bytes());
     let swap_id = commitment.swap_id;
 
     let chain = SwapChain::new(Difficulty::from_u64(1));
@@ -208,12 +225,18 @@ fn wrong_k_b_claim_rejected_at_chain_level() {
 
     // Submit wrong k_b ; chain must reject it
     let wrong_k_b = [0xABu8; 32]; // clearly wrong
-    let s2 = make_child(&s1, vec![
-        EscrowOp::Claim { swap_id, k_b: wrong_k_b }
-    ]);
+    let s2 = make_child(
+        &s1,
+        vec![EscrowOp::Claim {
+            swap_id,
+            k_b: wrong_k_b,
+        }],
+    );
     let result = chain.add_share(s2);
-    assert!(result.is_err(),
-        "Sharechain must reject claim with wrong k_b");
+    assert!(
+        result.is_err(),
+        "Sharechain must reject claim with wrong k_b"
+    );
 }
 
 #[test]
@@ -221,16 +244,23 @@ fn dleq_binding_prevents_key_substitution() {
     // Alice generates K_alice, proves DLEQ.
     // If Bob tries to substitute a different key, DleqProof::verify() must fail.
     let alice = KeyContribution::generate(&mut OsRng);
-    let alice_proof = DleqProof::prove(&alice.secret, &alice.public, b"xmr-wow-swap-v1", &mut OsRng);
+    let alice_proof =
+        DleqProof::prove(&alice.secret, &alice.public, b"xmr-wow-swap-v1", &mut OsRng);
 
     // Bob tries to substitute Charlie's public key with Alice's proof
     let charlie = KeyContribution::generate(&mut OsRng);
 
     // Alice's proof verifies Alice's public key
-    assert!(alice_proof.verify(&alice.public, b"xmr-wow-swap-v1").is_ok());
+    assert!(alice_proof
+        .verify(&alice.public, b"xmr-wow-swap-v1")
+        .is_ok());
     // But NOT Charlie's public key
-    assert!(alice_proof.verify(&charlie.public, b"xmr-wow-swap-v1").is_err(),
-        "DLEQ proof must not verify for a different public key");
+    assert!(
+        alice_proof
+            .verify(&charlie.public, b"xmr-wow-swap-v1")
+            .is_err(),
+        "DLEQ proof must not verify for a different public key"
+    );
 }
 
 #[test]

@@ -1,8 +1,7 @@
 # Shadow / monerosim scenario that drives the xmr-wow CLI with --transport sharechain.
 #
-# Ported from git 7ef5ea20 (shadow-sharechain-offer-flow.yaml) with targeted updates
-# for Phase 38.1: direct init-alice/init-bob flow (no offer publication), per-agent
-# inline xmr-wow-node (no standalone sharechain-node host), Phase 35 flag shape.
+# Uses the direct init-alice/init-bob flow (no offer publication), per-agent
+# inline xmr-wow-node (no standalone sharechain-node host).
 #
 # Alice and Bob each spawn their own xmr-wow-node process via node_binary attributes.
 # Alice's node listens on RPC 18091, Bob's on 18092; they peer with each other via
@@ -13,7 +12,7 @@ metadata:
   scenario: shadow_xmr_wow_sharechain_swap
   generator: manual
   version: '1.0'
-  purpose: 'Sharechain-mediated atomic swap; no manual message exchange, per-agent inline xmr-wow-node'
+  purpose: 'Sharechain-mediated atomic swap: no manual message exchange, per-agent inline xmr-wow-node'
 
 general:
   stop_time: 24h
@@ -21,7 +20,7 @@ general:
   simulation_seed: 211
   enable_dns_server: true
   shadow_log_level: warning
-  bootstrap_end_time: 4h
+  bootstrap_end_time: 14400s
   progress: true
   runahead: 100ms
   process_threads: 2
@@ -73,8 +72,10 @@ agents:
       password: shadow-test
       amount_xmr: '1000000000000'
       amount_wow: '500000000000'
-      xmr_lock_blocks: '120'
-      wow_lock_blocks: '320'
+      xmr_refund_delay: '120'
+      wow_refund_delay: '320'
+      vts_squarings_per_second: '10'
+      vts_modulus_bits: '512'
       destination: 'SHADOW_ALICE_DESTINATION'
       alice_refund_address: 'SHADOW_ALICE_REFUND_DESTINATION'
       node_rpc_port: '18091'
@@ -97,24 +98,17 @@ agents:
       node_binary: target/release/xmr-wow-node
       db: /tmp/bob-shadow-sharechain.db
       password: shadow-test
+      vts_squarings_per_second: '10'
+      vts_modulus_bits: '512'
       destination: 'SHADOW_BOB_DESTINATION'
       bob_refund_address: 'SHADOW_BOB_REFUND_DESTINATION'
       node_rpc_port: '18092'
       node_p2p_port: '37892'
       node_peers: '["alice:37891"]'
-      # Plan 38.1-07 Task 2 Branch A: Point Bob's CLI at Alice's xmr-wow-node
-      # so both agents share the same in-memory coord_store. Iteration 4
-      # + iteration 5 Task 1d localhost smoke test diagnosed that xmr-wow-node
-      # has no P2P gossip (main.rs line 48: "full P2P is future work ; server
-      # stub is available"; mm_rpc.rs handle_publish_coord_message writes to
-      # per-process state.msg_store with NO cross-process propagation;
-      # state.broadcast is tokio::sync::broadcast, local-process only). Two
-      # independent per-agent nodes have disjoint msg_stores; empirically
-      # confirmed by the localhost smoke test in Plan 38.1-07 Task 1d
-      # (publish_coord_message to node A, poll_coord_messages to node B
-      # returned messages: []). Simplest fix: share the node. Bob's own
-      # xmr-wow-node still spawns (harmless; just unused) to avoid a broader
-      # YAML/agent refactor in this iteration.
+      # Point Bob's CLI at Alice's xmr-wow-node so both agents share the same
+      # in-memory coord_store. xmr-wow-node has no P2P gossip, so two
+      # independent per-agent nodes would have disjoint msg_stores. Bob's own
+      # xmr-wow-node still spawns (harmless; just unused).
       node_url_override: 'http://alice:18091'
       wow_local_daemon: 'true'
       wow_daemon_binary: wownerod

@@ -10,25 +10,28 @@ use xmr_wow_client::{
 };
 use xmr_wow_wallet::{RefundArtifact, RefundChain};
 
+const TEST_VTS_BITS: u32 = 512;
+const TEST_SQUARINGS_PER_SECOND: u64 = 10;
+
 fn sample_params() -> SwapParams {
-    let (refund_timing, xmr_refund_height, wow_refund_height) =
+    let (refund_timing, xmr_refund_delay_seconds, wow_refund_delay_seconds) =
         build_observed_refund_timing(100, 200, 500, 800).unwrap();
 
     SwapParams {
         amount_xmr: 1_000_000_000_000,
         amount_wow: 500_000_000_000_000,
-        xmr_refund_height,
-        wow_refund_height,
+        xmr_refund_delay_seconds,
+        wow_refund_delay_seconds,
         refund_timing: Some(refund_timing),
         alice_refund_address: Some("alice-refund-address".into()),
         bob_refund_address: Some("bob-refund-address".into()),
     }
 }
 
-fn make_alice_bob(params: SwapParams) -> (SwapState, SwapState) {
-    let (alice, _) = SwapState::generate(SwapRole::Alice, params.clone(), &mut OsRng);
-    let (bob, _) = SwapState::generate(SwapRole::Bob, params, &mut OsRng);
-    (alice, bob)
+fn make_alice_bob(params: SwapParams) -> (SwapState, [u8; 32], SwapState, [u8; 32]) {
+    let (alice, alice_secret) = SwapState::generate(SwapRole::Alice, params.clone(), &mut OsRng);
+    let (bob, bob_secret) = SwapState::generate(SwapRole::Bob, params, &mut OsRng);
+    (alice, alice_secret, bob, bob_secret)
 }
 
 fn extract_pubkey_and_proof(state: &SwapState) -> ([u8; 32], xmr_wow_crypto::DleqProof) {
@@ -44,9 +47,9 @@ fn extract_pubkey_and_proof(state: &SwapState) -> ([u8; 32], xmr_wow_crypto::Dle
 
 /// Advance a swap to XmrLocked state via the canonical path:
 /// KeyGeneration -> DleqExchange -> JointAddress -> WowLocked (Bob) -> XmrLocked (Alice).
-fn make_xmr_locked() -> SwapState {
+fn make_xmr_locked() -> (SwapState, [u8; 32], [u8; 32]) {
     let params = sample_params();
-    let (alice, bob) = make_alice_bob(params);
+    let (alice, _alice_secret, bob, bob_secret) = make_alice_bob(params);
 
     let (bob_pub, bob_proof) = extract_pubkey_and_proof(&bob);
     let (alice_pub, alice_proof) = extract_pubkey_and_proof(&alice);
@@ -65,27 +68,33 @@ fn make_xmr_locked() -> SwapState {
         .unwrap();
 
     // Alice skips WowLocked (uses JointAddress -> XmrLocked fallback path)
-    alice_joint.record_xmr_lock([0xBB; 32]).unwrap()
+    let swap_id = alice_joint.swap_id().unwrap();
+    (
+        alice_joint.record_xmr_lock([0xBB; 32]).unwrap(),
+        bob_secret,
+        swap_id,
+    )
 }
 
-fn sample_xmr_artifact(lock_tx_hash: [u8; 32]) -> PersistedRefundArtifact {
+fn sample_xmr_artifact(swap_id: [u8; 32], bob_secret: [u8; 32]) -> PersistedRefundArtifact {
     let params = sample_params();
-    RefundArtifact::new(
+    RefundArtifact::new_with_bits(
         RefundChain::Xmr,
-        lock_tx_hash,
+        swap_id,
         "alice-refund-address",
-        params.xmr_refund_height,
-        [0xCB; 32],
-        b"phase14-xmr-artifact-payload".to_vec(),
+        params.xmr_refund_delay_seconds,
+        &bob_secret,
+        TEST_SQUARINGS_PER_SECOND,
+        TEST_VTS_BITS,
     )
+    .expect("test XMR artifact should build")
     .into()
 }
 
 /// Test 1: XMR refund artifact builds from XmrLocked state and has correct fields.
 #[test]
 fn test_xmr_refund_artifact_builds_from_xmr_locked() {
-    let xmr_lock_tx = [0xBB; 32];
-    let xmr_locked = make_xmr_locked();
+    let (xmr_locked, bob_secret, swap_id) = make_xmr_locked();
 
     // Confirm we are in XmrLocked state
     assert!(
@@ -94,7 +103,7 @@ fn test_xmr_refund_artifact_builds_from_xmr_locked() {
     );
 
     // Build and record a refund artifact
-    let artifact = sample_xmr_artifact(xmr_lock_tx);
+    let artifact = sample_xmr_artifact(swap_id, bob_secret);
     let params = sample_params();
 
     // Verify artifact fields directly before recording
@@ -104,25 +113,22 @@ fn test_xmr_refund_artifact_builds_from_xmr_locked() {
         "artifact chain must be Xmr"
     );
     assert_eq!(
-        artifact.metadata.lock_tx_hash, xmr_lock_tx,
-        "artifact lock_tx_hash must match XMR lock tx"
+        artifact.metadata.swap_id, swap_id,
+        "artifact swap_id must match the swap transcript"
     );
     assert_eq!(
         artifact.metadata.destination, "alice-refund-address",
         "artifact destination must match alice refund address"
     );
     assert!(
-        artifact.metadata.refund_height > 0,
-        "artifact refund_height must be > 0"
+        artifact.metadata.refund_delay_seconds > 0,
+        "artifact refund_delay_seconds must be > 0"
     );
     assert_eq!(
-        artifact.metadata.refund_height, params.xmr_refund_height,
-        "artifact refund_height must match swap params"
+        artifact.metadata.refund_delay_seconds, params.xmr_refund_delay_seconds,
+        "artifact refund_delay_seconds must match swap params"
     );
-    assert!(
-        !artifact.tx_bytes.is_empty(),
-        "artifact tx_bytes must be non-empty"
-    );
+    assert!(artifact.puzzle.t > 0, "artifact puzzle must require work");
 
     // Record artifact into state succeeds
     let state_with_artifact = xmr_locked.record_refund_artifact(artifact).unwrap();
@@ -139,34 +145,35 @@ fn test_xmr_refund_artifact_builds_from_xmr_locked() {
 /// rejects with wrong lock_tx_hash.
 #[test]
 fn test_xmr_refund_artifact_binding_validates() {
-    let xmr_lock_tx = [0xBB; 32];
-    let params = sample_params();
-    let artifact = sample_xmr_artifact(xmr_lock_tx);
+    let (_xmr_locked, bob_secret, swap_id) = make_xmr_locked();
+    let artifact = sample_xmr_artifact(swap_id, bob_secret);
 
     // Correct binding validates
     artifact
         .validate_binding(
             RefundChain::Xmr,
-            xmr_lock_tx,
+            swap_id,
             "alice-refund-address",
-            params.xmr_refund_height,
+            sample_params().xmr_refund_delay_seconds,
+            &artifact.metadata.locked_pubkey,
         )
         .expect("binding validation must succeed with correct params");
 
-    // Wrong lock_tx_hash is rejected
+    // Wrong swap_id is rejected
     let wrong_hash = [0xFF; 32];
     let err = artifact
         .validate_binding(
             RefundChain::Xmr,
             wrong_hash,
             "alice-refund-address",
-            params.xmr_refund_height,
+            sample_params().xmr_refund_delay_seconds,
+            &artifact.metadata.locked_pubkey,
         )
         .unwrap_err()
         .to_string();
     assert!(
-        err.contains("mismatch") || err.contains("lock tx"),
-        "error must mention mismatch or lock tx, got: {err}"
+        err.contains("mismatch") || err.contains("swap_id"),
+        "error must mention mismatch or swap_id, got: {err}"
     );
 }
 
@@ -175,7 +182,7 @@ fn test_xmr_refund_artifact_binding_validates() {
 /// Alice locked XMR and Bob vanished. She calls complete_with_refund after timelock.
 #[test]
 fn test_xmr_locked_to_refunded_transition() {
-    let xmr_locked = make_xmr_locked();
+    let (xmr_locked, ..) = make_xmr_locked();
     let refund_tx = [3u8; 32];
 
     let refunded = xmr_locked.complete_with_refund(refund_tx).unwrap();
@@ -222,7 +229,7 @@ fn test_xmr_refund_from_wrong_state_rejected() {
     );
 
     // Build Alice and Bob states for DleqExchange
-    let (alice, bob) = make_alice_bob(params.clone());
+    let (alice, _alice_secret, bob, _bob_secret) = make_alice_bob(params.clone());
     let (bob_pub, bob_proof) = extract_pubkey_and_proof(&bob);
 
     let alice_dleq = alice.receive_counterparty_key(bob_pub, &bob_proof).unwrap();
@@ -234,7 +241,7 @@ fn test_xmr_refund_from_wrong_state_rejected() {
     );
 
     // JointAddress state
-    let (alice2, bob2) = make_alice_bob(params.clone());
+    let (alice2, _alice2_secret, bob2, _bob2_secret) = make_alice_bob(params.clone());
     let (bob_pub2, bob_proof2) = extract_pubkey_and_proof(&bob2);
     let alice_joint = alice2
         .receive_counterparty_key(bob_pub2, &bob_proof2)
@@ -250,7 +257,7 @@ fn test_xmr_refund_from_wrong_state_rejected() {
 
     // Complete state: construct via complete_with_refund from XmrLocked, then try to
     // refund again from the resulting Refunded state
-    let xmr_locked = make_xmr_locked();
+    let (xmr_locked, ..) = make_xmr_locked();
     let refunded = xmr_locked.complete_with_refund([2u8; 32]).unwrap();
     let err = refunded.complete_with_refund([3u8; 32]).unwrap_err();
     assert!(

@@ -6,14 +6,14 @@ use xmr_wow_client::{
 use xmr_wow_wallet::RefundChain;
 
 fn sample_params() -> SwapParams {
-    let (refund_timing, xmr_refund_height, wow_refund_height) =
+    let (refund_timing, xmr_refund_delay_seconds, wow_refund_delay_seconds) =
         build_observed_refund_timing(100, 200, 500, 800).unwrap();
 
     SwapParams {
         amount_xmr: 1_000_000_000_000,
         amount_wow: 500_000_000_000_000,
-        xmr_refund_height,
-        wow_refund_height,
+        xmr_refund_delay_seconds,
+        wow_refund_delay_seconds,
         refund_timing: Some(refund_timing),
         alice_refund_address: Some("alice-refund-address".into()),
         bob_refund_address: Some("bob-refund-address".into()),
@@ -71,10 +71,7 @@ fn phase15_joint_address_persists_before_wow_lock_checkpoint() {
         checkpoint.refund_address.as_deref(),
         Some("bob-refund-address")
     );
-    assert_eq!(
-        checkpoint.status,
-        RefundCheckpointStatus::UnsupportedForGuarantee
-    );
+    assert_eq!(checkpoint.status, RefundCheckpointStatus::Blocked);
     assert!(!checkpoint.artifact_present);
     assert!(!checkpoint.artifact_validated);
 }
@@ -123,7 +120,7 @@ fn phase15_lock_commands_fail_before_network_work_when_checkpoint_not_ready() {
         .require_checkpoint_ready(RefundCheckpointName::BeforeWowLock)
         .unwrap_err()
         .to_string();
-    assert!(err.contains("unsupported-for-guarantee"), "error: {err}");
+    assert!(err.contains("blocked"), "error: {err}");
 
     let wow_locked_alice = make_joint_address(SwapRole::Alice)
         .record_wow_lock([0xAA; 32])
@@ -144,7 +141,7 @@ fn phase15_show_and_resume_surface_checkpoint_specific_safe_next_actions() {
         "action: {bob_action}"
     );
     assert!(
-        bob_action.contains("before WOW lock is unsupported-for-guarantee"),
+        bob_action.contains("before WOW lock is blocked"),
         "action: {bob_action}"
     );
 

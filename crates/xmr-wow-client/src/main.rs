@@ -1,7 +1,10 @@
 //! XMR-WOW atomic swap CLI.
 //! Legacy refund commands are hidden and fail closed. Signing stays local.
 
-use std::sync::{Arc, Mutex};
+use std::{
+    env,
+    sync::{Arc, Mutex},
+};
 
 use clap::{Parser, Subcommand};
 use curve25519_dalek::constants::ED25519_BASEPOINT_POINT as G;
@@ -11,14 +14,14 @@ use xmr_wow_client::coord_message::{unwrap_protocol_message, wrap_protocol_messa
 use xmr_wow_client::{
     build_observed_refund_timing, decode_message, decrypt_secret, derive_key, encode_message,
     encrypt_secret, guarantee_decision, restore_secret_into_state, GuaranteeDecision,
-    GuaranteeMode, ProtocolMessage, RefundCheckpointName, SwapParams, SwapRole, SwapState,
-    SwapStore,
+    GuaranteeMode, PersistedRefundArtifact, ProtocolMessage, RefundCheckpointName, SwapParams,
+    SwapRole, SwapState, SwapStore,
 };
 use xmr_wow_crypto::{
     derive_view_key, encode_address, keccak256, mnemonic_to_scalar, scalar_to_mnemonic,
     KeyContribution, Network, SeedCoin,
 };
-use xmr_wow_wallet::{CryptoNoteWallet, ScanResult, TxHash, WowWallet, XmrWallet};
+use xmr_wow_wallet::{CryptoNoteWallet, RefundArtifact, ScanResult, TxHash, WowWallet, XmrWallet};
 use zeroize::Zeroizing;
 
 /// Transport mode for swap coordination messages.
@@ -98,12 +101,12 @@ enum Command {
         /// WOW daemon URL for recording observed base height
         #[arg(long)]
         wow_daemon: String,
-        /// XMR lock period in blocks
-        #[arg(long, default_value = "1000")]
-        xmr_lock_blocks: u64,
-        /// WOW lock period in blocks
-        #[arg(long, default_value = "500")]
-        wow_lock_blocks: u64,
+        /// XMR refund delay in seconds
+        #[arg(long, default_value = "600")]
+        xmr_refund_delay: u64,
+        /// WOW refund delay in seconds
+        #[arg(long, default_value = "1800")]
+        wow_refund_delay: u64,
         /// Alice refund destination for her XMR if the swap fails
         #[arg(long)]
         alice_refund_address: String,
@@ -171,6 +174,9 @@ enum Command {
     LockWow {
         #[arg(long)]
         swap_id: String,
+        /// Counterparty's refund artifact message (optional when --transport sharechain)
+        #[arg(long)]
+        message: Option<String>,
         #[arg(long)]
         wow_daemon: String,
         /// Sender's private spend key (64 hex chars)
@@ -445,17 +451,21 @@ fn print_refund_timing(params: &SwapParams) {
             println!("Refund timing basis: recorded");
             println!("XMR base height:     {}", refund_timing.xmr_base_height);
             println!("WOW base height:     {}", refund_timing.wow_base_height);
-            println!("XMR lock blocks:     {}", refund_timing.xmr_lock_blocks);
-            println!("WOW lock blocks:     {}", refund_timing.wow_lock_blocks);
-            println!("XMR refund height:   {}", params.xmr_refund_height);
-            println!("WOW refund height:   {}", params.wow_refund_height);
+            println!(
+                "XMR refund delay:    {}s",
+                refund_timing.xmr_refund_delay_seconds
+            );
+            println!(
+                "WOW refund delay:    {}s",
+                refund_timing.wow_refund_delay_seconds
+            );
         }
         None => {
             println!("Refund timing basis: missing");
-            println!("XMR refund height:   {}", params.xmr_refund_height);
-            println!("WOW refund height:   {}", params.wow_refund_height);
         }
     }
+    println!("XMR refund delay:    {}s", params.xmr_refund_delay_seconds);
+    println!("WOW refund delay:    {}s", params.wow_refund_delay_seconds);
 }
 
 fn require_checkpoint_ready(
@@ -487,7 +497,7 @@ fn print_refund_checkpoints(state: &SwapState) {
             "  Refund address:     {}",
             checkpoint.refund_address.as_deref().unwrap_or("<missing>")
         );
-        println!("  Refund height:      {}", checkpoint.refund_height);
+        println!("  Refund delay:       {}s", checkpoint.refund_delay_seconds);
         println!("  Artifact present:   {}", checkpoint.artifact_present);
         println!("  Artifact validated: {}", checkpoint.artifact_validated);
         println!("  Reason:             {}", checkpoint.reason);
@@ -501,11 +511,102 @@ fn print_refund_checkpoints(state: &SwapState) {
             "  Refund address:     {}",
             checkpoint.refund_address.as_deref().unwrap_or("<missing>")
         );
-        println!("  Refund height:      {}", checkpoint.refund_height);
+        println!("  Refund delay:       {}s", checkpoint.refund_delay_seconds);
         println!("  Artifact present:   {}", checkpoint.artifact_present);
         println!("  Artifact validated: {}", checkpoint.artifact_validated);
         println!("  Reason:             {}", checkpoint.reason);
     }
+}
+
+fn build_outgoing_refund_artifact(state: &SwapState) -> anyhow::Result<PersistedRefundArtifact> {
+    let (role, params, addresses, secret_bytes) = match state {
+        SwapState::JointAddress {
+            role,
+            params,
+            addresses,
+            secret_bytes,
+            ..
+        } => (*role, params, addresses, *secret_bytes),
+        SwapState::WowLocked {
+            role,
+            params,
+            addresses,
+            secret_bytes,
+            ..
+        }
+        | SwapState::XmrLocked {
+            role,
+            params,
+            addresses,
+            secret_bytes,
+            ..
+        } => (*role, params, addresses, *secret_bytes),
+        other => anyhow::bail!(
+            "refund artifacts require joint/locked swap state, got {}",
+            phase_name(other)
+        ),
+    };
+
+    let (destination, refund_delay_seconds, chain) = match role {
+        SwapRole::Alice => (
+            params
+                .bob_refund_address
+                .as_deref()
+                .ok_or_else(|| anyhow::anyhow!("bob_refund_address missing from transcript"))?,
+            params.wow_refund_delay_seconds,
+            xmr_wow_wallet::RefundChain::Wow,
+        ),
+        SwapRole::Bob => (
+            params
+                .alice_refund_address
+                .as_deref()
+                .ok_or_else(|| anyhow::anyhow!("alice_refund_address missing from transcript"))?,
+            params.xmr_refund_delay_seconds,
+            xmr_wow_wallet::RefundChain::Xmr,
+        ),
+    };
+
+    let squarings_per_second = match env::var("XMR_WOW_VTS_SQUARINGS_PER_SECOND") {
+        Ok(raw) => raw.parse::<u64>().map_err(|e| {
+            anyhow::anyhow!("invalid XMR_WOW_VTS_SQUARINGS_PER_SECOND={raw:?}: {e}")
+        })?,
+        Err(env::VarError::NotPresent) => xmr_wow_vts::calibration::DEFAULT_SQUARINGS_PER_SECOND,
+        Err(err) => anyhow::bail!("failed to read XMR_WOW_VTS_SQUARINGS_PER_SECOND: {err}"),
+    };
+    if squarings_per_second == 0 {
+        anyhow::bail!("XMR_WOW_VTS_SQUARINGS_PER_SECOND must be > 0");
+    }
+
+    let modulus_bits = match env::var("XMR_WOW_VTS_MODULUS_BITS") {
+        Ok(raw) => Some(
+            raw.parse::<u32>()
+                .map_err(|e| anyhow::anyhow!("invalid XMR_WOW_VTS_MODULUS_BITS={raw:?}: {e}"))?,
+        ),
+        Err(env::VarError::NotPresent) => None,
+        Err(err) => anyhow::bail!("failed to read XMR_WOW_VTS_MODULUS_BITS: {err}"),
+    };
+
+    Ok(match modulus_bits {
+        Some(bits) => RefundArtifact::new_with_bits(
+            chain,
+            addresses.swap_id,
+            destination,
+            refund_delay_seconds,
+            &secret_bytes,
+            squarings_per_second,
+            bits,
+        ),
+        None => RefundArtifact::new(
+            chain,
+            addresses.swap_id,
+            destination,
+            refund_delay_seconds,
+            &secret_bytes,
+            squarings_per_second,
+        ),
+    }
+    .map(PersistedRefundArtifact::from)
+    .map_err(|e| anyhow::anyhow!("failed to build refund artifact: {}", e))?)
 }
 
 /// Poll for confirmation with exponential backoff, doubling the interval each attempt up to 120 s.
@@ -584,6 +685,9 @@ fn derive_swap_state(raw_messages: &[Vec<u8>]) -> (usize, String, String) {
                 Ok(xmr_wow_client::ProtocolMessage::Response { .. }) => {
                     last_type = "Response".to_string();
                 }
+                Ok(xmr_wow_client::ProtocolMessage::RefundArtifact { .. }) => {
+                    last_type = "RefundArtifact".to_string();
+                }
                 Ok(xmr_wow_client::ProtocolMessage::AdaptorPreSig { .. }) => {
                     last_type = "AdaptorPreSig".to_string();
                 }
@@ -606,6 +710,7 @@ fn derive_swap_state(raw_messages: &[Vec<u8>]) -> (usize, String, String) {
     let inferred = match last_type.as_str() {
         "Init" => "Awaiting Bob response",
         "Response" => "Awaiting lock transactions",
+        "RefundArtifact" => "Awaiting WOW/XMR lock after refund artifact exchange",
         "AdaptorPreSig" => "Awaiting claim proof",
         "ClaimProof" => "Complete (claim seen)",
         "RefundCooperate" => "Refund cooperation in progress",
@@ -822,8 +927,8 @@ async fn main() -> anyhow::Result<()> {
             amount_wow,
             xmr_daemon,
             wow_daemon,
-            xmr_lock_blocks,
-            wow_lock_blocks,
+            xmr_refund_delay,
+            wow_refund_delay,
             alice_refund_address,
         } => {
             if amount_xmr == 0 {
@@ -833,16 +938,16 @@ async fn main() -> anyhow::Result<()> {
                 anyhow::bail!("--amount-wow must be greater than 0");
             }
 
-            if xmr_lock_blocks > 10000 {
+            if xmr_refund_delay > 10000 {
                 anyhow::bail!(
-                    "--xmr-lock-blocks {} exceeds maximum 10000 (would lock funds for months)",
-                    xmr_lock_blocks
+                    "--xmr-refund-delay {} exceeds maximum 10000 seconds",
+                    xmr_refund_delay
                 );
             }
-            if wow_lock_blocks > 10000 {
+            if wow_refund_delay > 100000 {
                 anyhow::bail!(
-                    "--wow-lock-blocks {} exceeds maximum 10000 (would lock funds for months)",
-                    wow_lock_blocks
+                    "--wow-refund-delay {} exceeds maximum 100000 seconds",
+                    wow_refund_delay
                 );
             }
 
@@ -852,19 +957,19 @@ async fn main() -> anyhow::Result<()> {
 
             let xmr_height = XmrWallet::new(&xmr_daemon).get_current_height().await?;
             let wow_height = WowWallet::new(&wow_daemon).get_current_height().await?;
-            let (refund_timing, xmr_refund_height, wow_refund_height) =
+            let (refund_timing, xmr_refund_delay_seconds, wow_refund_delay_seconds) =
                 build_observed_refund_timing(
                     xmr_height,
                     wow_height,
-                    xmr_lock_blocks,
-                    wow_lock_blocks,
+                    xmr_refund_delay,
+                    wow_refund_delay,
                 )?;
 
             let params = SwapParams {
                 amount_xmr,
                 amount_wow,
-                xmr_refund_height,
-                wow_refund_height,
+                xmr_refund_delay_seconds,
+                wow_refund_delay_seconds,
                 refund_timing: Some(refund_timing.clone()),
                 alice_refund_address: Some(alice_refund_address.clone()),
                 bob_refund_address: None,
@@ -899,8 +1004,8 @@ async fn main() -> anyhow::Result<()> {
                 proof: my_proof,
                 amount_xmr,
                 amount_wow,
-                xmr_refund_height,
-                wow_refund_height,
+                xmr_refund_delay_seconds,
+                wow_refund_delay_seconds,
                 refund_timing: Some(refund_timing.clone()),
                 alice_refund_address: Some(alice_refund_address.clone()),
             };
@@ -992,8 +1097,8 @@ async fn main() -> anyhow::Result<()> {
                 alice_proof,
                 amount_xmr,
                 amount_wow,
-                xmr_refund_height,
-                wow_refund_height,
+                xmr_refund_delay_seconds,
+                wow_refund_delay_seconds,
                 refund_timing,
                 alice_refund_address,
             ) = match init_msg {
@@ -1002,8 +1107,8 @@ async fn main() -> anyhow::Result<()> {
                     proof,
                     amount_xmr,
                     amount_wow,
-                    xmr_refund_height,
-                    wow_refund_height,
+                    xmr_refund_delay_seconds,
+                    wow_refund_delay_seconds,
                     refund_timing,
                     alice_refund_address,
                 } => (
@@ -1011,8 +1116,8 @@ async fn main() -> anyhow::Result<()> {
                     proof,
                     amount_xmr,
                     amount_wow,
-                    xmr_refund_height,
-                    wow_refund_height,
+                    xmr_refund_delay_seconds,
+                    wow_refund_delay_seconds,
                     refund_timing,
                     alice_refund_address,
                 ),
@@ -1031,8 +1136,8 @@ async fn main() -> anyhow::Result<()> {
             let params = SwapParams {
                 amount_xmr,
                 amount_wow,
-                xmr_refund_height,
-                wow_refund_height,
+                xmr_refund_delay_seconds,
+                wow_refund_delay_seconds,
                 refund_timing: Some(refund_timing.clone()),
                 alice_refund_address: Some(alice_refund_address.clone()),
                 bob_refund_address: Some(bob_refund_address.clone()),
@@ -1057,6 +1162,7 @@ async fn main() -> anyhow::Result<()> {
 
             let state = state.receive_counterparty_key(alice_pubkey, &alice_proof)?;
             let state = state.derive_joint_addresses()?;
+            let response_refund_artifact = build_outgoing_refund_artifact(&state)?;
 
             let (swap_id, xmr_address, wow_address) = match &state {
                 SwapState::JointAddress { addresses, .. } => (
@@ -1078,6 +1184,7 @@ async fn main() -> anyhow::Result<()> {
                 pubkey: my_pubkey,
                 proof: my_proof,
                 bob_refund_address: Some(bob_refund_address.clone()),
+                refund_artifact: Some(response_refund_artifact),
             };
 
             println!("Swap initialized as Bob.");
@@ -1143,18 +1250,23 @@ async fn main() -> anyhow::Result<()> {
 
             let response_msg =
                 resolve_incoming_message(message, &cli.transport, &*messenger, &temp_id).await?;
-            let (bob_pubkey, bob_proof, bob_refund_address) = match response_msg {
-                ProtocolMessage::Response {
-                    pubkey,
-                    proof,
-                    bob_refund_address,
-                } => (pubkey, proof, bob_refund_address),
-                _ => anyhow::bail!("Expected Response message from Bob"),
-            };
+            let (bob_pubkey, bob_proof, bob_refund_address, bob_refund_artifact) =
+                match response_msg {
+                    ProtocolMessage::Response {
+                        pubkey,
+                        proof,
+                        bob_refund_address,
+                        refund_artifact,
+                    } => (pubkey, proof, bob_refund_address, refund_artifact),
+                    _ => anyhow::bail!("Expected Response message from Bob"),
+                };
             let bob_refund_address = bob_refund_address.ok_or_else(|| {
                 anyhow::anyhow!(
                     "legacy response messages without bob_refund_address are unsupported"
                 )
+            })?;
+            let bob_refund_artifact = bob_refund_artifact.ok_or_else(|| {
+                anyhow::anyhow!("legacy response messages without refund_artifact are unsupported")
             })?;
 
             let state = state.receive_counterparty_key(bob_pubkey, &bob_proof)?;
@@ -1167,6 +1279,7 @@ async fn main() -> anyhow::Result<()> {
                     my_pubkey,
                     counterparty_pubkey,
                     before_wow_lock_checkpoint,
+                    refund_artifact: _,
                     secret_bytes,
                 } => {
                     params.bob_refund_address = Some(bob_refund_address.clone());
@@ -1177,12 +1290,14 @@ async fn main() -> anyhow::Result<()> {
                         my_pubkey,
                         counterparty_pubkey,
                         before_wow_lock_checkpoint,
+                        refund_artifact: Some(bob_refund_artifact),
                         secret_bytes,
                     }
                     .refresh_refund_readiness()?
                 }
                 other => other,
             };
+            let alice_refund_artifact = build_outgoing_refund_artifact(&state)?;
 
             let (real_swap_id, xmr_address, wow_address) = match &state {
                 SwapState::JointAddress { addresses, .. } => (
@@ -1207,6 +1322,28 @@ async fn main() -> anyhow::Result<()> {
             println!("Swap ID: {}", hex::encode(real_swap_id));
             println!("XMR joint address: {}", xmr_address);
             println!("WOW joint address: {}", wow_address);
+
+            let (role, my_pubkey, counterparty_pubkey) = match &state {
+                SwapState::JointAddress {
+                    role,
+                    my_pubkey,
+                    counterparty_pubkey,
+                    ..
+                } => (*role, *my_pubkey, *counterparty_pubkey),
+                _ => unreachable!(),
+            };
+            let coord_id = derive_send_coord_id(role, &my_pubkey, &counterparty_pubkey);
+            let refund_artifact_msg = ProtocolMessage::RefundArtifact {
+                artifact: alice_refund_artifact,
+            };
+            dispatch_outgoing_message(
+                &cli.transport,
+                &*messenger,
+                &coord_id,
+                &refund_artifact_msg,
+                "refund artifact",
+            )
+            .await?;
         }
 
         Command::Show { swap_id } => {
@@ -1426,20 +1563,42 @@ async fn main() -> anyhow::Result<()> {
             )?;
             // ===== end Track 1 fix =====
 
-            let (sender_spend, sender_view) =
-                resolve_sender_keys(&mnemonic, &spend_key, &view_key, SeedCoin::Monero)?;
-            let xmr_wallet = XmrWallet::with_sender_keys(&xmr_daemon, sender_spend, sender_view)
-                .with_scan_from(scan_from);
             println!(
                 "Locking {} XMR atomic units to joint address...",
                 params.amount_xmr
             );
-            let tx_hash = xmr_wallet
+            let (sender_spend, sender_view) =
+                resolve_sender_keys(&mnemonic, &spend_key, &view_key, SeedCoin::Monero)?;
+            let tx_hash = match XmrWallet::with_sender_keys(&xmr_daemon, sender_spend, sender_view)
+                .with_scan_from(scan_from)
                 .lock(&joint_spend, &view_scalar, params.amount_xmr)
-                .await?;
+                .await
+            {
+                Ok(tx_hash) => tx_hash,
+                // `lock-xmr --scan-from` is used to accelerate Bob's WOW-lock verification.
+                // In Phase 47 Shadow OOB, that hint can be far ahead of Alice's own XMR
+                // funding history, which makes the sender-wallet scan miss real spendable
+                // inputs even after Bob's WOW lock verified successfully. Retry from 0
+                // before failing so the counterparty-chain hint does not break Alice's
+                // sender-wallet scan.
+                Err(xmr_wow_wallet::WalletError::NoOutputsFound) if scan_from > 0 => {
+                    eprintln!(
+                        "No XMR sender outputs found from height {}; retrying sender scan from 0.",
+                        scan_from
+                    );
+                    let (sender_spend, sender_view) =
+                        resolve_sender_keys(&mnemonic, &spend_key, &view_key, SeedCoin::Monero)?;
+                    XmrWallet::with_sender_keys(&xmr_daemon, sender_spend, sender_view)
+                        .with_scan_from(0)
+                        .lock(&joint_spend, &view_scalar, params.amount_xmr)
+                        .await?
+                }
+                Err(err) => return Err(err.into()),
+            };
             println!("XMR lock tx: {}", hex::encode(tx_hash));
 
             println!("Waiting for confirmation...");
+            let xmr_wallet = XmrWallet::new(&xmr_daemon);
             wait_for_confirmation(&xmr_wallet, &tx_hash, 1, 10).await?;
 
             let state = state.record_xmr_lock(tx_hash)?;
@@ -1479,6 +1638,7 @@ async fn main() -> anyhow::Result<()> {
 
         Command::LockWow {
             swap_id,
+            message,
             wow_daemon,
             spend_key,
             view_key,
@@ -1528,6 +1688,40 @@ async fn main() -> anyhow::Result<()> {
                     state
                 }
                 joint_state @ SwapState::JointAddress { .. } => {
+                    let coord_id = derive_receive_coord_id(role, &my_pubkey, &counterparty_pubkey);
+                    let joint_state = if joint_state.refund_artifact().is_some() {
+                        joint_state
+                    } else {
+                        let refund_msg = resolve_incoming_message(
+                            message,
+                            &cli.transport,
+                            &*messenger,
+                            &coord_id,
+                        )
+                        .await?;
+                        let refund_artifact = match refund_msg {
+                            ProtocolMessage::RefundArtifact { artifact } => artifact,
+                            other => anyhow::bail!(
+                                "Expected RefundArtifact message before lock-wow, got {:?}",
+                                std::mem::discriminant(&other)
+                            ),
+                        };
+                        let updated_state = joint_state.record_refund_artifact(refund_artifact)?;
+                        // Persist the consumed refund artifact immediately so sharechain
+                        // cursor advancement is crash/timeout-safe. Without this, a
+                        // confirmation timeout after broadcast leaves Bob in JointAddress
+                        // with no local refund artifact while the sharechain cursor has
+                        // already moved past Alice's message, making lock-wow retries
+                        // impossible.
+                        let encrypted = encrypt_secret(&enc_key, &*secret_bytes);
+                        let state_json = serde_json::to_string(&updated_state)?;
+                        store_shared.lock().unwrap().save_with_secret(
+                            &id,
+                            &state_json,
+                            Some(&encrypted),
+                        )?;
+                        updated_state
+                    };
                     require_checkpoint_ready(
                         &joint_state,
                         RefundCheckpointName::BeforeWowLock,
@@ -1550,7 +1744,7 @@ async fn main() -> anyhow::Result<()> {
                         .refund_timing
                         .as_ref()
                         .map(|timing| timing.wow_base_height);
-                    let verify_from = resolve_lock_xmr_verify_scan_from(
+                    let recent_scan_from = resolve_lock_xmr_verify_scan_from(
                         wow_height,
                         scan_from,
                         observed_wow_base_height,
@@ -1561,15 +1755,15 @@ async fn main() -> anyhow::Result<()> {
                         &joint_spend,
                         &view_scalar,
                         params.amount_wow,
-                        verify_from,
+                        recent_scan_from,
                     )
                     .await
                     {
                         Ok(scan_result) => {
                             println!(
                                 "Found existing WOW lock on-chain while resuming (scanned {} blocks from {}).",
-                                wow_height.saturating_sub(verify_from),
-                                verify_from
+                                wow_height.saturating_sub(recent_scan_from),
+                                recent_scan_from
                             );
                             println!(
                                 "Verified: Bob locked {} WOW at height {}",
@@ -1584,19 +1778,52 @@ async fn main() -> anyhow::Result<()> {
                                 &view_key,
                                 SeedCoin::Wownero,
                             )?;
-                            let wow_wallet =
-                                WowWallet::with_sender_keys(&wow_daemon, sender_spend, sender_view)
-                                    .with_scan_from(scan_from);
                             println!(
                                 "Locking {} WOW atomic units to joint address...",
                                 params.amount_wow
                             );
-                            let wow_tx_hash = wow_wallet
-                                .lock(&joint_spend, &view_scalar, params.amount_wow)
-                                .await?;
+                            let wow_tx_hash = match WowWallet::with_sender_keys(
+                                &wow_daemon,
+                                sender_spend,
+                                sender_view,
+                            )
+                            .with_scan_from(recent_scan_from)
+                            .lock(&joint_spend, &view_scalar, params.amount_wow)
+                            .await
+                            {
+                                Ok(tx_hash) => tx_hash,
+                                // Bob's WOW sender wallet does not need to rescan from genesis
+                                // when we already have a recent chain-height basis from the
+                                // recorded refund timing. Retry from 0 only if the narrower scan
+                                // window misses spendable outputs.
+                                Err(xmr_wow_wallet::WalletError::NoOutputsFound)
+                                    if recent_scan_from > 0 =>
+                                {
+                                    eprintln!(
+                                        "No WOW sender outputs found from height {}; retrying sender scan from 0.",
+                                        recent_scan_from
+                                    );
+                                    let (sender_spend, sender_view) = resolve_sender_keys(
+                                        &mnemonic,
+                                        &spend_key,
+                                        &view_key,
+                                        SeedCoin::Wownero,
+                                    )?;
+                                    WowWallet::with_sender_keys(
+                                        &wow_daemon,
+                                        sender_spend,
+                                        sender_view,
+                                    )
+                                    .with_scan_from(0)
+                                    .lock(&joint_spend, &view_scalar, params.amount_wow)
+                                    .await?
+                                }
+                                Err(err) => return Err(err.into()),
+                            };
                             println!("WOW lock tx: {}", hex::encode(wow_tx_hash));
 
                             println!("Waiting for WOW confirmation...");
+                            let wow_wallet = WowWallet::new(&wow_daemon);
                             wait_for_confirmation(&wow_wallet, &wow_tx_hash, 1, 10).await?;
 
                             joint_state.record_wow_lock(wow_tx_hash)?
@@ -1707,9 +1934,10 @@ async fn main() -> anyhow::Result<()> {
             let (state, secret_bytes, _) =
                 load_and_decrypt_state(&store_shared.lock().unwrap(), &id, &enc_key)?;
 
-            let (role, my_pubkey, counterparty_pubkey, my_adaptor_pre_sig) = match &state {
+            let (role, params, my_pubkey, counterparty_pubkey, my_adaptor_pre_sig) = match &state {
                 SwapState::WowLocked {
                     role,
+                    params,
                     my_pubkey,
                     counterparty_pubkey,
                     my_adaptor_pre_sig,
@@ -1718,6 +1946,7 @@ async fn main() -> anyhow::Result<()> {
                 }
                 | SwapState::XmrLocked {
                     role,
+                    params,
                     my_pubkey,
                     counterparty_pubkey,
                     my_adaptor_pre_sig,
@@ -1734,6 +1963,7 @@ async fn main() -> anyhow::Result<()> {
                     }
                     (
                         *role,
+                        params.clone(),
                         *my_pubkey,
                         *counterparty_pubkey,
                         my_adaptor_pre_sig.clone(),
@@ -1770,12 +2000,13 @@ async fn main() -> anyhow::Result<()> {
             let wow_wallet = WowWallet::new(&wow_daemon).with_scan_from(scan_from);
             println!("Sweeping WOW from joint address to {}...", destination);
             let sweep_tx = wow_wallet
-                .sweep(&combined, &view_scalar, &destination)
+                .sweep_known_amount(&combined, &view_scalar, &destination, params.amount_wow)
                 .await?;
             println!("WOW sweep tx: {}", hex::encode(sweep_tx));
 
             println!("Waiting for WOW sweep confirmation...");
-            wait_for_confirmation(&wow_wallet, &sweep_tx, 1, 10).await?;
+            let wow_confirmation_wallet = WowWallet::new(&wow_daemon).with_scan_from(scan_from);
+            wait_for_confirmation(&wow_confirmation_wallet, &sweep_tx, 1, 10).await?;
 
             // Alice reveals her secret by completing her own pre-sig, enabling Bob to claim XMR.
             let alice_completed = my_adaptor_pre_sig
@@ -1870,6 +2101,13 @@ async fn main() -> anyhow::Result<()> {
             .await?;
             println!();
 
+            if message.is_none() && matches!(cli.transport, TransportMode::OutOfBand) {
+                println!(
+                    "Bob claim proof sent. Re-run claim-xmr with Alice's claim proof to complete the XMR sweep."
+                );
+                return Ok(());
+            }
+
             let (joint_spend_point, view_scalar) =
                 SwapState::compute_joint_keys(&my_pubkey, &counterparty_pubkey, role)?;
             let xmr_wallet = XmrWallet::new(&xmr_daemon).with_scan_from(scan_from);
@@ -1906,7 +2144,8 @@ async fn main() -> anyhow::Result<()> {
             println!("XMR sweep tx: {}", hex::encode(sweep_tx));
 
             println!("Waiting for XMR sweep confirmation...");
-            wait_for_confirmation(&xmr_wallet, &sweep_tx, 1, 10).await?;
+            let xmr_confirmation_wallet = XmrWallet::new(&xmr_daemon).with_scan_from(scan_from);
+            wait_for_confirmation(&xmr_confirmation_wallet, &sweep_tx, 1, 10).await?;
 
             let k_b_revealed = alice_secret.to_bytes();
             let complete_state = SwapState::Complete {
@@ -2253,8 +2492,8 @@ mod tests {
             proof,
             amount_xmr: 1_000_000_000_000,
             amount_wow: 500_000_000_000_000,
-            xmr_refund_height: 2000,
-            wow_refund_height: 1000,
+            xmr_refund_delay_seconds: 2000,
+            wow_refund_delay_seconds: 1000,
             refund_timing: None,
             alice_refund_address: None,
         };
@@ -2274,6 +2513,7 @@ mod tests {
             pubkey: contrib.public_bytes(),
             proof,
             bob_refund_address: None,
+            refund_artifact: None,
         };
         let coord = wrap_protocol_message(dummy_swap_id(), &msg).unwrap();
         serde_json::to_vec(&coord).unwrap()

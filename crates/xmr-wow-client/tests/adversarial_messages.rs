@@ -6,13 +6,13 @@ use xmr_wow_client::{
 use xmr_wow_crypto::{AdaptorSignature, CompletedSignature, DleqProof, KeyContribution};
 
 fn sample_params() -> SwapParams {
-    let (refund_timing, xmr_refund_height, wow_refund_height) =
+    let (refund_timing, xmr_refund_delay_seconds, wow_refund_delay_seconds) =
         build_observed_refund_timing(100, 200, 500, 800).unwrap();
     SwapParams {
         amount_xmr: 1_000_000_000_000,
         amount_wow: 500_000_000_000_000,
-        xmr_refund_height,
-        wow_refund_height,
+        xmr_refund_delay_seconds,
+        wow_refund_delay_seconds,
         refund_timing: Some(refund_timing),
         alice_refund_address: Some("alice-refund-addr".into()),
         bob_refund_address: Some("bob-refund-addr".into()),
@@ -340,8 +340,8 @@ fn make_all_four_variants() -> Vec<(&'static str, ProtocolMessage)> {
         proof: proof_init,
         amount_xmr: 1_000_000_000_000,
         amount_wow: 500_000_000_000_000,
-        xmr_refund_height: 2000,
-        wow_refund_height: 1000,
+        xmr_refund_delay_seconds: 2000,
+        wow_refund_delay_seconds: 1000,
         refund_timing: None,
         alice_refund_address: Some("alice-refund-addr".into()),
     };
@@ -357,6 +357,7 @@ fn make_all_four_variants() -> Vec<(&'static str, ProtocolMessage)> {
         pubkey: contrib_resp.public_bytes(),
         proof: proof_resp,
         bob_refund_address: Some("bob-refund-addr".into()),
+        refund_artifact: None,
     };
 
     let adaptor_pre_sig = ProtocolMessage::AdaptorPreSig {
@@ -493,8 +494,8 @@ fn coord_envelope_replayed_init_state_machine_rejects_second_application() {
         proof: bob_proof.clone(),
         amount_xmr: 1_000_000_000_000,
         amount_wow: 500_000_000_000_000,
-        xmr_refund_height: 2000,
-        wow_refund_height: 1000,
+        xmr_refund_delay_seconds: 2000,
+        wow_refund_delay_seconds: 1000,
         refund_timing: None,
         alice_refund_address: None,
     };

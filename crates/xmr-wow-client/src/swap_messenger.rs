@@ -196,8 +196,8 @@ mod tests {
             proof,
             amount_xmr: 1_000_000_000_000,
             amount_wow: 500_000_000_000_000,
-            xmr_refund_height: 2000,
-            wow_refund_height: 1000,
+            xmr_refund_delay_seconds: 2000,
+            wow_refund_delay_seconds: 1000,
             refund_timing: None,
             alice_refund_address: None,
         };

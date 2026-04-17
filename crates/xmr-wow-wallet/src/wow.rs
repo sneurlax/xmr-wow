@@ -364,16 +364,21 @@ impl WowWallet {
             .ok_or_else(|| WalletError::RpcRequest("missing count in get_block_count".into()))
     }
 
-    /// Fetch a block by height and its transactions, constructing a ScannableBlock.
+    /// Fetch a block by height and any non-miner transactions it contains.
     ///
     /// Uses wownerod JSON-RPC `get_block` to get the block blob, then
-    /// `/get_transactions` to fetch the non-miner transactions. Constructs
-    /// a `ScannableBlock` suitable for wownero-oxide's Scanner.
-    async fn fetch_scannable_block(
+    /// `/get_transactions` to fetch the non-miner transactions.
+    async fn fetch_scannable_block_parts(
         client: &reqwest::Client,
         daemon_url: &str,
         height: u64,
-    ) -> Result<wownero_interface::ScannableBlock, WalletError> {
+    ) -> Result<
+        (
+            wownero_oxide::block::Block,
+            Vec<wownero_oxide::transaction::Transaction<wownero_oxide::transaction::Pruned>>,
+        ),
+        WalletError,
+    > {
         // Step 1: Fetch block blob via get_block
         let resp = client
             .post(format!("{}/json_rpc", daemon_url))
@@ -481,14 +486,80 @@ impl WowWallet {
             }
         }
 
-        // Step 3: Get output_index_for_first_ringct_output
-        let output_index =
-            Self::get_first_ringct_output_index(daemon_url, &block, &pruned_txs).await?;
+        Ok((block, pruned_txs))
+    }
+
+    fn block_ringct_output_count(
+        block: &wownero_oxide::block::Block,
+        txs: &[wownero_oxide::transaction::Transaction<wownero_oxide::transaction::Pruned>],
+    ) -> Result<u64, WalletError> {
+        let mut total = 0u64;
+
+        if matches!(
+            block.miner_transaction(),
+            wownero_oxide::transaction::Transaction::V2 { .. }
+        ) {
+            total = total
+                .checked_add(
+                    u64::try_from(block.miner_transaction().prefix().outputs.len()).map_err(
+                        |_| {
+                            WalletError::ScanFailed(
+                                "miner transaction output count overflow".into(),
+                            )
+                        },
+                    )?,
+                )
+                .ok_or_else(|| WalletError::ScanFailed("RingCT output index overflow".into()))?;
+        }
+
+        for tx in txs {
+            if matches!(tx, wownero_oxide::transaction::Transaction::V2 { .. }) {
+                total = total
+                    .checked_add(u64::try_from(tx.prefix().outputs.len()).map_err(|_| {
+                        WalletError::ScanFailed("transaction output count overflow".into())
+                    })?)
+                    .ok_or_else(|| {
+                        WalletError::ScanFailed("RingCT output index overflow".into())
+                    })?;
+            }
+        }
+
+        Ok(total)
+    }
+
+    /// Fetch a ScannableBlock while carrying forward the RingCT output index
+    /// across a sequential height scan.
+    async fn fetch_scannable_block(
+        client: &reqwest::Client,
+        daemon_url: &str,
+        height: u64,
+        next_ringct_output_index: &mut Option<u64>,
+    ) -> Result<wownero_interface::ScannableBlock, WalletError> {
+        let (block, pruned_txs) =
+            Self::fetch_scannable_block_parts(client, daemon_url, height).await?;
+        let ringct_output_count = Self::block_ringct_output_count(&block, &pruned_txs)?;
+
+        let output_index_for_first_ringct_output = if ringct_output_count == 0 {
+            None
+        } else {
+            if next_ringct_output_index.is_none() {
+                *next_ringct_output_index =
+                    Self::get_first_ringct_output_index(daemon_url, &block, &pruned_txs).await?;
+            }
+
+            let current_index = *next_ringct_output_index;
+            if let Some(next_index) = next_ringct_output_index.as_mut() {
+                *next_index = next_index.checked_add(ringct_output_count).ok_or_else(|| {
+                    WalletError::ScanFailed("RingCT output index overflow".into())
+                })?;
+            }
+            current_index
+        };
 
         Ok(wownero_interface::ScannableBlock {
             block,
             transactions: pruned_txs,
-            output_index_for_first_ringct_output: output_index,
+            output_index_for_first_ringct_output,
         })
     }
 
@@ -668,12 +739,20 @@ impl WowWallet {
         let mut scanner = wownero_wallet::Scanner::new(view_pair);
         let mut results = Vec::new();
         let mut wallet_outputs = Vec::new();
+        let mut next_ringct_output_index = None;
 
         let mut scanned = 0u64;
         let mut skipped_parse = 0u64;
         let mut skipped_proto = 0u64;
         for height in from_height..to_height {
-            let scannable = match Self::fetch_scannable_block(client, daemon_url, height).await {
+            let scannable = match Self::fetch_scannable_block(
+                client,
+                daemon_url,
+                height,
+                &mut next_ringct_output_index,
+            )
+            .await
+            {
                 Ok(s) => s,
                 Err(WalletError::ScanFailed(msg))
                     if msg.contains("deserialize") || msg.contains("parse") =>
@@ -800,6 +879,455 @@ impl WowWallet {
 
         Ok(unspent)
     }
+
+    /// Scan sender outputs in ascending block order and stop once enough mature,
+    /// unspent funds exist to satisfy a lock attempt.
+    async fn scan_lock_ready_outputs(
+        client: &reqwest::Client,
+        daemon_url: &str,
+        spend_point: &EdwardsPoint,
+        view_scalar: &Scalar,
+        sender_spend: &Scalar,
+        from_height: u64,
+        to_height: u64,
+        current_height: u64,
+        amount: u64,
+    ) -> Result<Vec<wownero_wallet::WalletOutput>, WalletError> {
+        let view_pair = Self::create_view_pair(spend_point, view_scalar)?;
+        let mut scanner = wownero_wallet::Scanner::new(view_pair);
+        let mut mature_outputs = Vec::new();
+        let mut next_ringct_output_index = None;
+
+        let mut scanned = 0u64;
+        let mut skipped_parse = 0u64;
+        let mut skipped_proto = 0u64;
+        for height in from_height..to_height {
+            let scannable = match Self::fetch_scannable_block(
+                client,
+                daemon_url,
+                height,
+                &mut next_ringct_output_index,
+            )
+            .await
+            {
+                Ok(s) => s,
+                Err(WalletError::ScanFailed(msg))
+                    if msg.contains("deserialize") || msg.contains("parse") =>
+                {
+                    tracing::debug!(
+                        target: "wow_wallet",
+                        height = height,
+                        error = %msg,
+                        "skipped unparseable block during lock scan"
+                    );
+                    skipped_parse += 1;
+                    continue;
+                }
+                Err(e) => return Err(e),
+            };
+
+            match scanner.scan(scannable) {
+                Ok(timelocked) => {
+                    for output in timelocked.ignore_additional_timelock() {
+                        let is_mature = match output.additional_timelock() {
+                            wownero_oxide::transaction::Timelock::None => true,
+                            wownero_oxide::transaction::Timelock::Block(unlock_height) => {
+                                (current_height as usize) >= unlock_height
+                            }
+                            wownero_oxide::transaction::Timelock::Time(unlock_time) => {
+                                let now = std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .unwrap_or_default()
+                                    .as_secs();
+                                now >= unlock_time
+                            }
+                        };
+                        if !is_mature {
+                            continue;
+                        }
+
+                        tracing::debug!(
+                            target: "wow_wallet",
+                            amount = output.commitment().amount,
+                            height = height,
+                            "found mature WOW lock candidate"
+                        );
+                        mature_outputs.push(output);
+                    }
+                }
+                Err(wownero_wallet::ScanError::UnsupportedProtocol(version)) => {
+                    tracing::debug!(
+                        target: "wow_wallet",
+                        height = height,
+                        protocol_version = version,
+                        "skipped unsupported protocol version during lock scan"
+                    );
+                    skipped_proto += 1;
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        target: "wow_wallet",
+                        height = height,
+                        error = %err,
+                        "scan error, skipping block during lock scan"
+                    );
+                }
+            }
+            scanned += 1;
+
+            if mature_outputs.is_empty() {
+                continue;
+            }
+
+            let mature_amounts: Vec<u64> = mature_outputs
+                .iter()
+                .map(|output| output.commitment().amount)
+                .collect();
+            if Self::select_lock_output_indices(&mature_amounts, amount).is_err() {
+                continue;
+            }
+
+            let unspent =
+                Self::filter_unspent(client, daemon_url, sender_spend, mature_outputs.clone())
+                    .await?;
+            let unspent_amounts: Vec<u64> = unspent
+                .iter()
+                .map(|output| output.commitment().amount)
+                .collect();
+            if Self::select_lock_output_indices(&unspent_amounts, amount).is_ok() {
+                tracing::info!(
+                    target: "wow_wallet",
+                    from_height = from_height,
+                    to_height = to_height,
+                    scanned = scanned,
+                    skipped_parse = skipped_parse,
+                    skipped_proto = skipped_proto,
+                    candidates = unspent.len(),
+                    "lock scan found sufficient mature unspent WOW outputs before tip"
+                );
+                return Ok(unspent);
+            }
+
+            mature_outputs = unspent;
+        }
+
+        tracing::info!(
+            target: "wow_wallet",
+            from_height = from_height,
+            to_height = to_height,
+            scanned = scanned,
+            skipped_parse = skipped_parse,
+            skipped_proto = skipped_proto,
+            candidates = mature_outputs.len(),
+            "lock scan exhausted range without early exit"
+        );
+
+        Self::filter_unspent(client, daemon_url, sender_spend, mature_outputs).await
+    }
+
+    /// Scan joint-address outputs in ascending block order and stop once enough
+    /// mature, unspent funds exist to satisfy a sweep of the known swap amount.
+    async fn scan_sweep_ready_outputs(
+        client: &reqwest::Client,
+        daemon_url: &str,
+        spend_point: &EdwardsPoint,
+        view_scalar: &Scalar,
+        spend_secret: &Scalar,
+        from_height: u64,
+        to_height: u64,
+        current_height: u64,
+        expected_amount: u64,
+    ) -> Result<Vec<wownero_wallet::WalletOutput>, WalletError> {
+        let view_pair = Self::create_view_pair(spend_point, view_scalar)?;
+        let mut scanner = wownero_wallet::Scanner::new(view_pair);
+        let mut mature_outputs = Vec::new();
+        let mut next_ringct_output_index = None;
+
+        let mut scanned = 0u64;
+        let mut skipped_parse = 0u64;
+        let mut skipped_proto = 0u64;
+        for height in from_height..to_height {
+            let scannable = match Self::fetch_scannable_block(
+                client,
+                daemon_url,
+                height,
+                &mut next_ringct_output_index,
+            )
+            .await
+            {
+                Ok(s) => s,
+                Err(WalletError::ScanFailed(msg))
+                    if msg.contains("deserialize") || msg.contains("parse") =>
+                {
+                    tracing::debug!(
+                        target: "wow_wallet",
+                        height = height,
+                        error = %msg,
+                        "skipped unparseable block during sweep scan"
+                    );
+                    skipped_parse += 1;
+                    continue;
+                }
+                Err(e) => return Err(e),
+            };
+
+            match scanner.scan(scannable) {
+                Ok(timelocked) => {
+                    for output in timelocked.ignore_additional_timelock() {
+                        let is_mature = match output.additional_timelock() {
+                            wownero_oxide::transaction::Timelock::None => true,
+                            wownero_oxide::transaction::Timelock::Block(unlock_height) => {
+                                (current_height as usize) >= unlock_height
+                            }
+                            wownero_oxide::transaction::Timelock::Time(unlock_time) => {
+                                let now = std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .unwrap_or_default()
+                                    .as_secs();
+                                now >= unlock_time
+                            }
+                        };
+                        if !is_mature {
+                            continue;
+                        }
+
+                        tracing::debug!(
+                            target: "wow_wallet",
+                            amount = output.commitment().amount,
+                            height = height,
+                            "found mature WOW sweep candidate"
+                        );
+                        mature_outputs.push(output);
+                    }
+                }
+                Err(wownero_wallet::ScanError::UnsupportedProtocol(version)) => {
+                    tracing::debug!(
+                        target: "wow_wallet",
+                        height = height,
+                        protocol_version = version,
+                        "skipped unsupported protocol version during sweep scan"
+                    );
+                    skipped_proto += 1;
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        target: "wow_wallet",
+                        height = height,
+                        error = %err,
+                        "scan error, skipping block during sweep scan"
+                    );
+                }
+            }
+            scanned += 1;
+
+            if mature_outputs.is_empty() {
+                continue;
+            }
+
+            let unspent =
+                Self::filter_unspent(client, daemon_url, spend_secret, mature_outputs.clone())
+                    .await?;
+            let total_unspent: u64 = unspent
+                .iter()
+                .map(|output| output.commitment().amount)
+                .sum();
+            if total_unspent >= expected_amount {
+                tracing::info!(
+                    target: "wow_wallet",
+                    from_height = from_height,
+                    to_height = to_height,
+                    scanned = scanned,
+                    skipped_parse = skipped_parse,
+                    skipped_proto = skipped_proto,
+                    candidates = unspent.len(),
+                    total_amount = total_unspent,
+                    "sweep scan found sufficient mature unspent WOW outputs before tip"
+                );
+                return Ok(unspent);
+            }
+
+            mature_outputs = unspent;
+        }
+
+        let unspent =
+            Self::filter_unspent(client, daemon_url, spend_secret, mature_outputs).await?;
+        let total_unspent: u64 = unspent
+            .iter()
+            .map(|output| output.commitment().amount)
+            .sum();
+        tracing::info!(
+            target: "wow_wallet",
+            from_height = from_height,
+            to_height = to_height,
+            scanned = scanned,
+            skipped_parse = skipped_parse,
+            skipped_proto = skipped_proto,
+            candidates = unspent.len(),
+            total_amount = total_unspent,
+            "sweep scan exhausted range without early exit"
+        );
+        Ok(unspent)
+    }
+
+    async fn build_and_broadcast_sweep_tx(
+        &self,
+        spend_secret: &Scalar,
+        view_scalar: &Scalar,
+        destination: &str,
+        joint_outputs: Vec<wownero_wallet::WalletOutput>,
+    ) -> Result<TxHash, WalletError> {
+        if joint_outputs.is_empty() {
+            return Err(WalletError::NoOutputsFound);
+        }
+
+        let total_amount: u64 = joint_outputs.iter().map(|o| o.commitment().amount).sum();
+        for (i, o) in joint_outputs.iter().enumerate() {
+            tracing::info!(
+                target: "wow_wallet",
+                index = i,
+                amount = o.commitment().amount,
+                global_index = o.index_on_blockchain(),
+                "sweep input output"
+            );
+        }
+
+        tracing::info!(
+            target: "wow_wallet",
+            outputs = joint_outputs.len(),
+            total_amount = total_amount,
+            "found outputs at joint address, building sweep transaction"
+        );
+
+        // Step 2: Parse destination address
+        // WOW addresses use different type bytes than Monero, so decode with our own
+        // address parser and construct a MoneroAddress for the wallet library.
+        let dest_addr = {
+            let (spend, view, _network) = xmr_wow_crypto::address::decode_address(destination)
+                .map_err(|e| WalletError::InvalidAddress(format!("invalid destination: {}", e)))?;
+            let oxide_spend = wownero_oxide::ed25519::Point::from(spend);
+            let oxide_view = wownero_oxide::ed25519::Point::from(view);
+            wownero_wallet::address::MoneroAddress::new(
+                wownero_wallet::address::Network::Mainnet,
+                wownero_wallet::address::AddressType::Legacy,
+                oxide_spend,
+                oxide_view,
+            )
+        };
+
+        // Step 3: Build sweep transaction via MoneroDaemon
+        use crate::rpc_transport::ReqwestTransport;
+        use wownero_interface::ProvidesFeeRates;
+
+        let transport = ReqwestTransport::new(&self.daemon_url);
+        let daemon = transport
+            .wownero_daemon()
+            .await
+            .map_err(|e| WalletError::TxBuildFailed(format!("daemon connection: {}", e)))?;
+
+        let fee_rate = daemon
+            .fee_rate(
+                wownero_interface::FeePriority::Normal,
+                WOW_FEE_RATE_SANITY_BOUND,
+            )
+            .await
+            .map_err(|e| WalletError::TxBuildFailed(format!("fee rate: {}", e)))?;
+
+        use wownero_interface::ProvidesBlockchainMeta;
+        let block_number = daemon
+            .latest_block_number()
+            .await
+            .map_err(|e| WalletError::TxBuildFailed(format!("latest block: {}", e)))?;
+
+        let mut rng = rand_core::OsRng;
+        let ring_len: u8 = 22; // WOW ring size
+
+        let mut inputs_with_decoys = Vec::with_capacity(joint_outputs.len());
+        for output in joint_outputs {
+            let owd = Self::select_sweep_decoys(&mut rng, &daemon, ring_len, block_number, output)
+                .await?;
+            inputs_with_decoys.push(owd);
+        }
+
+        let outgoing_view_key = {
+            use sha2::{Digest, Sha256};
+            let mut hasher = Sha256::new();
+            hasher.update(view_scalar.as_bytes());
+            let hash = hasher.finalize();
+            Zeroizing::new(<[u8; 32]>::try_from(&hash[..]).expect("SHA-256 is 32 bytes"))
+        };
+
+        // Sweep: send (total - estimated_fee) to destination.
+        // Monero requires at least 2 outputs, so change goes to destination.
+        let change = wownero_wallet::send::Change::fingerprintable(Some(dest_addr));
+        let sweep_amount = Self::exact_sweep_payment_amount(
+            total_amount,
+            &outgoing_view_key,
+            &inputs_with_decoys,
+            dest_addr,
+            fee_rate,
+            None,
+        )?;
+        let payments = vec![(dest_addr, sweep_amount)];
+
+        let signable = wownero_wallet::send::SignableTransaction::new(
+            wownero_oxide::ringct::RctType::WowneroClsagBulletproofPlus,
+            outgoing_view_key,
+            inputs_with_decoys,
+            payments,
+            change,
+            vec![],
+            fee_rate,
+        )
+        .map_err(|e| WalletError::TxBuildFailed(format!("build sweep tx: {}", e)))?;
+
+        let oxide_spend_secret =
+            Zeroizing::new(wownero_oxide::ed25519::Scalar::from(*spend_secret));
+        let signed_tx = signable
+            .sign(&mut rng, &oxide_spend_secret)
+            .map_err(|e| WalletError::TxBuildFailed(format!("sign sweep tx: {}", e)))?;
+
+        let tx_hex = hex::encode(signed_tx.serialize());
+        let client = &self.client;
+        Self::broadcast_tx(client, &self.daemon_url, &tx_hex).await
+    }
+
+    /// Sweep the known swap amount from the joint address, stopping the chain scan
+    /// as soon as enough mature, unspent outputs have been found.
+    pub async fn sweep_known_amount(
+        &self,
+        spend_secret: &Scalar,
+        view_scalar: &Scalar,
+        destination: &str,
+        expected_amount: u64,
+    ) -> Result<TxHash, WalletError> {
+        let spend_point = spend_secret * G;
+        let address = Self::derive_address(&spend_point, view_scalar);
+        tracing::info!(
+            target: "wow_wallet",
+            source_address = %address,
+            destination = %destination,
+            expected_amount = expected_amount,
+            "sweeping known WOW swap amount from joint address"
+        );
+
+        let client = &self.client;
+        let current_height = Self::get_chain_height(client, &self.daemon_url).await?;
+        let joint_outputs = Self::scan_sweep_ready_outputs(
+            client,
+            &self.daemon_url,
+            &spend_point,
+            view_scalar,
+            spend_secret,
+            self.scan_from_height,
+            current_height,
+            current_height,
+            expected_amount,
+        )
+        .await?;
+
+        self.build_and_broadcast_sweep_tx(spend_secret, view_scalar, destination, joint_outputs)
+            .await
+    }
 }
 
 #[async_trait::async_trait]
@@ -849,57 +1377,28 @@ impl CryptoNoteWallet for WowWallet {
         let client = &self.client;
         let current_height = Self::get_chain_height(client, &self.daemon_url).await?;
 
-        let (_scan_results, all_outputs) = Self::scan_with_scanner(
-            &self.client,
+        let sender_outputs = Self::scan_lock_ready_outputs(
+            client,
             &self.daemon_url,
             &sender_spend_point,
             sender_view,
+            sender_spend,
             self.scan_from_height,
             current_height,
+            current_height,
+            amount,
         )
         .await?;
-
-        tracing::info!(target: "wow_wallet", count = all_outputs.len(), "scan found outputs");
-        for o in &all_outputs {
-            tracing::debug!(
-                target: "wow_wallet",
-                amount = o.commitment().amount,
-                tx = %hex::encode(o.transaction()),
-                "scanned output"
-            );
-        }
-
-        // Filter out immature coinbase outputs
-        let total_found = all_outputs.len();
-        let mature_outputs: Vec<_> = all_outputs
-            .into_iter()
-            .filter(|o| match o.additional_timelock() {
-                wownero_oxide::transaction::Timelock::None => true,
-                wownero_oxide::transaction::Timelock::Block(b) => (current_height as usize) >= b,
-                wownero_oxide::transaction::Timelock::Time(t) => {
-                    let now = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap_or_default()
-                        .as_secs();
-                    now >= t
-                }
-            })
-            .collect();
-
-        if mature_outputs.len() < total_found {
-            tracing::info!(
-                target: "wow_wallet",
-                immature = total_found - mature_outputs.len(),
-                mature = mature_outputs.len(),
-                "filtered immature coinbase outputs"
-            );
-        }
-
-        let sender_outputs =
-            Self::filter_unspent(client, &self.daemon_url, sender_spend, mature_outputs).await?;
         let available_unspent = sender_outputs.len();
 
-        tracing::info!(target: "wow_wallet", unspent = available_unspent, "after spent filter");
+        tracing::info!(
+            target: "wow_wallet",
+            from_height = self.scan_from_height,
+            to_height = current_height,
+            blocks = current_height.saturating_sub(self.scan_from_height),
+            unspent = available_unspent,
+            "completed WOW sender scan for lock"
+        );
 
         if sender_outputs.is_empty() {
             return Err(WalletError::NoOutputsFound);
@@ -1077,120 +1576,8 @@ impl CryptoNoteWallet for WowWallet {
             current_height,
         )
         .await?;
-
-        if joint_outputs.is_empty() {
-            return Err(WalletError::NoOutputsFound);
-        }
-
-        let total_amount: u64 = joint_outputs.iter().map(|o| o.commitment().amount).sum();
-        for (i, o) in joint_outputs.iter().enumerate() {
-            tracing::info!(
-                target: "wow_wallet",
-                index = i,
-                amount = o.commitment().amount,
-                global_index = o.index_on_blockchain(),
-                "sweep input output"
-            );
-        }
-
-        tracing::info!(
-            target: "wow_wallet",
-            outputs = joint_outputs.len(),
-            total_amount = total_amount,
-            "found outputs at joint address, building sweep transaction"
-        );
-
-        // Step 2: Parse destination address
-        // WOW addresses use different type bytes than Monero, so decode with our own
-        // address parser and construct a MoneroAddress for the wallet library.
-        let dest_addr = {
-            let (spend, view, _network) = xmr_wow_crypto::address::decode_address(destination)
-                .map_err(|e| WalletError::InvalidAddress(format!("invalid destination: {}", e)))?;
-            let oxide_spend = wownero_oxide::ed25519::Point::from(spend);
-            let oxide_view = wownero_oxide::ed25519::Point::from(view);
-            wownero_wallet::address::MoneroAddress::new(
-                wownero_wallet::address::Network::Mainnet,
-                wownero_wallet::address::AddressType::Legacy,
-                oxide_spend,
-                oxide_view,
-            )
-        };
-
-        // Step 3: Build sweep transaction via MoneroDaemon
-        use crate::rpc_transport::ReqwestTransport;
-        use wownero_interface::ProvidesFeeRates;
-
-        let transport = ReqwestTransport::new(&self.daemon_url);
-        let daemon = transport
-            .wownero_daemon()
+        self.build_and_broadcast_sweep_tx(spend_secret, view_scalar, destination, joint_outputs)
             .await
-            .map_err(|e| WalletError::TxBuildFailed(format!("daemon connection: {}", e)))?;
-
-        let fee_rate = daemon
-            .fee_rate(
-                wownero_interface::FeePriority::Normal,
-                WOW_FEE_RATE_SANITY_BOUND,
-            )
-            .await
-            .map_err(|e| WalletError::TxBuildFailed(format!("fee rate: {}", e)))?;
-
-        use wownero_interface::ProvidesBlockchainMeta;
-        let block_number = daemon
-            .latest_block_number()
-            .await
-            .map_err(|e| WalletError::TxBuildFailed(format!("latest block: {}", e)))?;
-
-        let mut rng = rand_core::OsRng;
-        let ring_len: u8 = 22; // WOW ring size
-
-        let mut inputs_with_decoys = Vec::with_capacity(joint_outputs.len());
-        for output in joint_outputs {
-            let owd = Self::select_sweep_decoys(&mut rng, &daemon, ring_len, block_number, output)
-                .await?;
-            inputs_with_decoys.push(owd);
-        }
-
-        let outgoing_view_key = {
-            use sha2::{Digest, Sha256};
-            let mut hasher = Sha256::new();
-            hasher.update(view_scalar.as_bytes());
-            let hash = hasher.finalize();
-            Zeroizing::new(<[u8; 32]>::try_from(&hash[..]).expect("SHA-256 is 32 bytes"))
-        };
-
-        // Sweep: send (total - estimated_fee) to destination.
-        // Monero requires at least 2 outputs, so change goes to destination.
-        let change = wownero_wallet::send::Change::fingerprintable(Some(dest_addr));
-        let sweep_amount = Self::exact_sweep_payment_amount(
-            total_amount,
-            &outgoing_view_key,
-            &inputs_with_decoys,
-            dest_addr,
-            fee_rate,
-            None,
-        )?;
-        let payments = vec![(dest_addr, sweep_amount)];
-
-        let signable = wownero_wallet::send::SignableTransaction::new(
-            wownero_oxide::ringct::RctType::WowneroClsagBulletproofPlus,
-            outgoing_view_key,
-            inputs_with_decoys,
-            payments,
-            change,
-            vec![],
-            fee_rate,
-        )
-        .map_err(|e| WalletError::TxBuildFailed(format!("build sweep tx: {}", e)))?;
-
-        let oxide_spend_secret =
-            Zeroizing::new(wownero_oxide::ed25519::Scalar::from(*spend_secret));
-        let signed_tx = signable
-            .sign(&mut rng, &oxide_spend_secret)
-            .map_err(|e| WalletError::TxBuildFailed(format!("sign sweep tx: {}", e)))?;
-
-        let tx_hex = hex::encode(signed_tx.serialize());
-        let client = &self.client;
-        Self::broadcast_tx(client, &self.daemon_url, &tx_hex).await
     }
 
     /// Scan the WOW chain for outputs at the joint address.

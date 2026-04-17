@@ -7,17 +7,21 @@
 //! takes `(spend_point, view_scalar)` pairs as input. Clean separation:
 //! crypto = key math, wallet = on-chain ops.
 //!
-//! ## VTS Refund Guarantees (v1.6)
+//! ## VTS Refund Guarantees
 //!
 //! Refund artifacts now lock the refund spend secret behind a VTS time-lock
 //! puzzle instead of embedding `unlock_time` in a pre-signed transaction.
 //! The solver recovers the secret after the difficulty period, then uses
 //! `sweep()` with the recovered secret to claim the refund.
 
-use curve25519_dalek::{edwards::EdwardsPoint, scalar::Scalar};
+use curve25519_dalek::{
+    constants::ED25519_BASEPOINT_POINT as G, edwards::EdwardsPoint, scalar::Scalar,
+};
 use sha2::{Digest, Sha256};
 
 use crate::error::WalletError;
+use xmr_wow_crypto::{verify_keypair_bytes, DleqProof};
+use xmr_wow_vts::{verify::generate_with_proof, VerificationProof};
 
 /// A confirmed transaction hash (32 bytes).
 pub type TxHash = [u8; 32];
@@ -51,10 +55,12 @@ pub enum RefundChain {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RefundArtifactMetadata {
     pub chain: RefundChain,
-    pub lock_tx_hash: TxHash,
+    pub swap_id: TxHash,
     pub destination: String,
     /// Time-lock duration in seconds (replaces legacy `refund_height` block count).
     pub refund_delay_seconds: u64,
+    /// Counterparty pubkey whose secret is locked behind the puzzle.
+    pub locked_pubkey: [u8; 32],
     /// SHA-256 of the locked refund secret (for post-solve verification).
     pub secret_hash: [u8; 32],
 }
@@ -79,36 +85,141 @@ pub struct RefundArtifact {
     pub metadata: RefundArtifactMetadata,
     /// VTS time-lock puzzle containing the locked refund spend secret.
     pub puzzle: xmr_wow_vts::TimeLockPuzzle,
+    /// Cut-and-choose checkpoints proving the puzzle structure without solving it.
+    pub verification_proof: VerificationProof,
+    /// Transcript-bound proof that the artifact was authored by the locked key.
+    pub binding_proof: DleqProof,
+}
+
+#[derive(serde::Serialize)]
+struct RefundArtifactBindingTranscript<'a> {
+    metadata: &'a RefundArtifactMetadata,
+    puzzle: &'a xmr_wow_vts::TimeLockPuzzle,
+    verification_proof: &'a VerificationProof,
 }
 
 impl RefundArtifact {
+    const PROOF_CHECKPOINTS: u32 = 3;
+
     /// Create a new VTS-based refund artifact.
     ///
     /// Locks `secret` (the refund spend secret) behind a time-lock puzzle
     /// calibrated for `refund_delay_seconds` of sequential computation.
     pub fn new(
         chain: RefundChain,
-        lock_tx_hash: TxHash,
+        swap_id: TxHash,
         destination: impl Into<String>,
         refund_delay_seconds: u64,
         secret: &[u8],
         squarings_per_second: u64,
     ) -> Result<Self, WalletError> {
-        let secret_hash = Self::secret_hash(secret);
-        let (puzzle, _modulus) = xmr_wow_vts::TimeLockPuzzle::generate(
-            secret, refund_delay_seconds, squarings_per_second,
+        Self::new_internal(
+            chain,
+            swap_id,
+            destination,
+            refund_delay_seconds,
+            secret,
+            squarings_per_second,
+            None,
         )
-        .map_err(|e| WalletError::ArtifactInvalid(format!("VTS puzzle generation failed: {}", e)))?;
+    }
+
+    fn new_internal(
+        chain: RefundChain,
+        swap_id: TxHash,
+        destination: impl Into<String>,
+        refund_delay_seconds: u64,
+        secret: &[u8],
+        squarings_per_second: u64,
+        modulus_bits: Option<u32>,
+    ) -> Result<Self, WalletError> {
+        let secret_bytes: [u8; 32] = secret.try_into().map_err(|_| {
+            WalletError::ArtifactInvalid(
+                "refund artifact secret must be exactly 32 canonical scalar bytes".into(),
+            )
+        })?;
+        let scalar = Scalar::from_canonical_bytes(secret_bytes)
+            .into_option()
+            .ok_or_else(|| {
+                WalletError::ArtifactInvalid(
+                    "refund artifact secret must be a canonical curve scalar".into(),
+                )
+            })?;
+        let secret_hash = Self::secret_hash(secret);
+        let locked_pubkey = (scalar * G).compress().to_bytes();
+        let (puzzle, verification_proof) = match modulus_bits {
+            Some(bits) => xmr_wow_vts::verify::generate_with_proof_bits_rng(
+                secret,
+                refund_delay_seconds,
+                squarings_per_second,
+                Self::PROOF_CHECKPOINTS,
+                bits,
+                &mut rand::thread_rng(),
+            )
+            .map(|(puzzle, proof, _modulus)| (puzzle, proof))
+            .map_err(|e| {
+                WalletError::ArtifactInvalid(format!("VTS puzzle generation failed: {}", e))
+            })?,
+            None => generate_with_proof(
+                secret,
+                refund_delay_seconds,
+                squarings_per_second,
+                Self::PROOF_CHECKPOINTS,
+            )
+            .map(|(puzzle, proof, _modulus)| (puzzle, proof))
+            .map_err(|e| {
+                WalletError::ArtifactInvalid(format!("VTS puzzle generation failed: {}", e))
+            })?,
+        };
 
         let metadata = RefundArtifactMetadata {
             chain,
-            lock_tx_hash,
+            swap_id,
             destination: destination.into(),
             refund_delay_seconds,
+            locked_pubkey,
             secret_hash,
         };
+        let binding_context = Self::binding_context_bytes(&metadata, &puzzle, &verification_proof)?;
+        let locked_point = scalar * G;
+        let binding_proof = DleqProof::prove(
+            &scalar,
+            &locked_point,
+            &binding_context,
+            &mut rand::thread_rng(),
+        );
 
-        Ok(Self { metadata, puzzle })
+        Ok(Self {
+            metadata,
+            puzzle,
+            verification_proof,
+            binding_proof,
+        })
+    }
+
+    /// Create a VTS refund artifact with explicit RSA modulus bit length.
+    ///
+    /// **For testing only.** Production code should use `new()` which defaults
+    /// to 2048-bit RSA moduli. Use this with 256 or 512 bits for fast integration
+    /// tests in debug mode.
+    pub fn new_with_bits(
+        chain: RefundChain,
+        swap_id: TxHash,
+        destination: impl Into<String>,
+        refund_delay_seconds: u64,
+        secret: &[u8],
+        squarings_per_second: u64,
+        modulus_bits: u32,
+    ) -> Result<Self, WalletError> {
+        Self::new_internal(
+            chain,
+            swap_id,
+            destination,
+            refund_delay_seconds,
+            secret,
+            squarings_per_second,
+            Some(modulus_bits),
+        )
     }
 
     /// Compute SHA-256 of the refund secret for post-solve verification.
@@ -123,7 +234,7 @@ impl RefundArtifact {
 
     /// Solve the VTS puzzle to recover the locked refund secret.
     ///
-    /// This performs `t` sequential squarings; intentionally slow.
+    /// This performs `t` sequential squarings: intentionally slow.
     /// The solve time is proportional to `refund_delay_seconds`.
     pub fn solve(&self) -> Result<Vec<u8>, WalletError> {
         self.puzzle
@@ -141,22 +252,54 @@ impl RefundArtifact {
                 hex::encode(actual_hash),
             )));
         }
+        verify_keypair_bytes(
+            &secret.try_into().map_err(|_| {
+                WalletError::ArtifactInvalid("solved refund secret must be exactly 32 bytes".into())
+            })?,
+            &self.metadata.locked_pubkey,
+        )
+        .map_err(|e| WalletError::ArtifactInvalid(format!("locked pubkey check failed: {}", e)))?
+        .then_some(())
+        .ok_or_else(|| {
+            WalletError::ArtifactInvalid("solved refund secret does not match locked_pubkey".into())
+        })?;
         Ok(())
     }
 
     /// Validate basic structural properties of the artifact and its puzzle.
     pub fn validate_structure(&self) -> Result<(), WalletError> {
-        self.puzzle
-            .validate()
-            .map_err(|e| WalletError::ArtifactInvalid(format!("invalid puzzle structure: {}", e)))
+        self.puzzle.validate().map_err(|e| {
+            WalletError::ArtifactInvalid(format!("invalid puzzle structure: {}", e))
+        })?;
+        let proof_ok = xmr_wow_vts::verify::verify_proof(&self.puzzle, &self.verification_proof)
+            .map_err(|e| WalletError::ArtifactInvalid(format!("invalid puzzle proof: {}", e)))?;
+        if !proof_ok {
+            return Err(WalletError::ArtifactInvalid(
+                "puzzle verification proof failed".into(),
+            ));
+        }
+        let binding_context =
+            Self::binding_context_bytes(&self.metadata, &self.puzzle, &self.verification_proof)?;
+        let locked_point =
+            xmr_wow_crypto::KeyContribution::from_public_bytes(&self.metadata.locked_pubkey)
+                .map_err(|e| {
+                    WalletError::ArtifactInvalid(format!("invalid locked_pubkey: {}", e))
+                })?;
+        self.binding_proof
+            .verify(&locked_point, &binding_context)
+            .map_err(|e| {
+                WalletError::ArtifactInvalid(format!("artifact binding proof failed: {}", e))
+            })
     }
 
     /// Validate that the artifact is bound to the expected parameters.
     pub fn validate_binding(
         &self,
         expected_chain: RefundChain,
-        expected_lock_tx_hash: TxHash,
+        expected_swap_id: TxHash,
         expected_destination: &str,
+        expected_refund_delay_seconds: u64,
+        expected_locked_pubkey: &[u8; 32],
     ) -> Result<(), WalletError> {
         self.validate_structure()?;
 
@@ -167,11 +310,11 @@ impl RefundArtifact {
             )));
         }
 
-        if self.metadata.lock_tx_hash != expected_lock_tx_hash {
+        if self.metadata.swap_id != expected_swap_id {
             return Err(WalletError::ArtifactInvalid(format!(
-                "artifact lock tx mismatch: expected {}, got {}",
-                hex::encode(expected_lock_tx_hash),
-                hex::encode(self.metadata.lock_tx_hash),
+                "artifact swap_id mismatch: expected {}, got {}",
+                hex::encode(expected_swap_id),
+                hex::encode(self.metadata.swap_id),
             )));
         }
 
@@ -182,7 +325,40 @@ impl RefundArtifact {
             )));
         }
 
+        if self.metadata.refund_delay_seconds != expected_refund_delay_seconds {
+            return Err(WalletError::ArtifactInvalid(format!(
+                "artifact refund delay mismatch: expected {}s, got {}s",
+                expected_refund_delay_seconds, self.metadata.refund_delay_seconds,
+            )));
+        }
+
+        if &self.metadata.locked_pubkey != expected_locked_pubkey {
+            return Err(WalletError::ArtifactInvalid(format!(
+                "artifact locked pubkey mismatch: expected {}, got {}",
+                hex::encode(expected_locked_pubkey),
+                hex::encode(self.metadata.locked_pubkey),
+            )));
+        }
+
         Ok(())
+    }
+
+    fn binding_context_bytes(
+        metadata: &RefundArtifactMetadata,
+        puzzle: &xmr_wow_vts::TimeLockPuzzle,
+        verification_proof: &VerificationProof,
+    ) -> Result<Vec<u8>, WalletError> {
+        serde_json::to_vec(&RefundArtifactBindingTranscript {
+            metadata,
+            puzzle,
+            verification_proof,
+        })
+        .map_err(|e| {
+            WalletError::ArtifactInvalid(format!(
+                "refund artifact binding transcript serialization failed: {}",
+                e
+            ))
+        })
     }
 }
 
@@ -254,15 +430,15 @@ pub trait CryptoNoteWallet: Send + Sync {
         _view_scalar: &Scalar,
         destination: &str,
         refund_delay_seconds: u64,
-        lock_tx_hash: TxHash,
+        swap_id: TxHash,
     ) -> Result<RefundArtifact, WalletError> {
-        // The refund secret is the spend secret bytes; this is what gets
+        // The refund secret is the spend secret bytes: this is what gets
         // locked behind the VTS puzzle. After the delay, the solver recovers
         // these bytes and uses them with sweep() to claim the refund.
         let secret = spend_secret.as_bytes();
         RefundArtifact::new(
             self.refund_chain(),
-            lock_tx_hash,
+            swap_id,
             destination,
             refund_delay_seconds,
             secret,

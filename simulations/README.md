@@ -115,13 +115,34 @@ shadow /tmp/refund-sim/shadow.yaml
 For the CLI-driven scenarios:
 
 ```bash
-cd $MONEROSIM_DIR
-cargo run -- generate <XMR_WOW_REPO>/simulations/shadow-swap.yaml -o /tmp/shadow-cli-swap
-shadow /tmp/shadow-cli-swap/shadow.yaml
-
-cargo run -- generate <XMR_WOW_REPO>/simulations/shadow-network-partition.yaml -o /tmp/shadow-cli-refund
-shadow /tmp/shadow-cli-refund/shadow.yaml
+scripts/run-shadow-cli-scenario.sh simulations/shadow-swap.yaml --output /tmp/shadow-cli-swap
+scripts/run-shadow-cli-scenario.sh simulations/shadow-network-partition.yaml --output /tmp/shadow-cli-refund
 ```
+
+The helper script intentionally launches `~/.monerosim/bin/shadow` when present
+and rewrites the generated wrapper scripts so the simulated Alice/Bob processes
+execute this repo's local `simulations/agents/xmr_wow_*.py` files directly.
+That avoids the monerosim module-path mismatch for the CLI-driven agents.
+
+For the repeatable local regression matrix:
+
+```bash
+bash scripts/run-e2e-regression-matrix.sh
+```
+
+That single entrypoint runs:
+
+- Shadow OOB via `simulations/shadow-swap.yaml`
+- Shadow sharechain via `simulations/shadow-sharechain-swap.yaml`
+- `scripts/run-live-network-harness.sh --dry-run`
+
+Timestamped evidence lands under `artifacts/e2e-regression-matrix/runs/<UTC>/`,
+and the most recent successful run is copied to
+`artifacts/e2e-regression-matrix/latest/`.
+
+The matrix strengthens local E2E confidence only. It does not replace the real
+live-network proof gate, which still requires operator-provided live secrets and
+refund destinations outside the repo.
 
 ## Integration with XMR-WOW
 
@@ -163,12 +184,12 @@ swap uses manual exchange of protocol messages, but only within the supported
 9-step flow and only when refund checkpoints are ready.
 
 Each method maps to a protocol phase:
-- `generate_keys()`: Phase 1: create Ed25519 key contribution
-- `send_init_message()` / `receive_init_message()`: Phase 2-3: key exchange
-- `lock_funds()`: Phase 4-5: lock funds to joint address via wallet RPC
-- `verify_lock()`: Phase 5: confirm counterparty lock via daemon RPC
-- `claim_funds()`: Phase 6-7: sweep using adaptor signature secret
-- `wait_for_refund()`: Failure path: wait for timelock, then reclaim
+- `generate_keys()`: create Ed25519 key contribution
+- `send_init_message()` / `receive_init_message()`: key exchange and joint address derivation
+- `lock_funds()`: lock funds to joint address via wallet RPC
+- `verify_lock()`: confirm counterparty lock via daemon RPC
+- `claim_funds()`: sweep using adaptor signature secret
+- `wait_for_refund()`: failure path: wait for timelock, then reclaim
 
 ### `xmr_wow_cli_agent.py`
 
@@ -176,6 +197,10 @@ Each method maps to a protocol phase:
 `--password` and `--db` arguments, parses `Swap ID:` and `xmrwow1:` outputs,
 and writes shared JSON files so Alice and Bob can exchange the same messages a
 human operator would copy/paste manually.
+
+The file also supports direct `python3 path/to/xmr_wow_cli_agent.py ...`
+execution, which is what `scripts/run-shadow-cli-scenario.sh` uses after
+monerosim generates the Shadow wrappers.
 
 This agent is intentionally geared toward Shadow validation, not normal local
 development. It assumes the simulation environment has already built the

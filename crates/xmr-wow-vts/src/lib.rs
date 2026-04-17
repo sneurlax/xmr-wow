@@ -1,7 +1,7 @@
 //! Verifiable Timed Signatures (VTS): RSA time-lock puzzles for refund guarantee timelocks.
 //!
 //! This crate implements homomorphic time-lock puzzles based on the
-//! Rivest–Shamir–Wagner scheme using RSA sequential squaring.
+//! Rivest-Shamir-Wagner scheme using RSA sequential squaring.
 //!
 //! # Overview
 //!
@@ -28,11 +28,11 @@
 //!
 //! # Modules
 //!
-//! - [`puzzle`]; Time-lock puzzle generation and solving
-//! - [`verify`]; Cut-and-choose puzzle verification
-//! - [`rsa`]; RSA safe-prime modulus generation
-//! - [`calibration`]; Hardware-specific difficulty calibration
-//! - [`error`]; Error types
+//! - [`puzzle`]: Time-lock puzzle generation and solving
+//! - [`verify`]: Cut-and-choose puzzle verification
+//! - [`rsa`]: RSA safe-prime modulus generation
+//! - [`calibration`]: Hardware-specific difficulty calibration
+//! - [`error`]: Error types
 
 pub mod calibration;
 pub mod error;
@@ -42,3 +42,4 @@ pub mod verify;
 
 pub use error::VtsError;
 pub use puzzle::TimeLockPuzzle;
+pub use verify::VerificationProof;

@@ -9,13 +9,13 @@ use xmr_wow_crypto::{AdaptorSignature, CompletedSignature, DleqProof, KeyContrib
 // separate compilation units and cannot share helpers.
 
 fn sample_params() -> SwapParams {
-    let (refund_timing, xmr_refund_height, wow_refund_height) =
+    let (refund_timing, xmr_refund_delay_seconds, wow_refund_delay_seconds) =
         build_observed_refund_timing(100, 200, 500, 800).unwrap();
     SwapParams {
         amount_xmr: 1_000_000_000_000,
         amount_wow: 500_000_000_000_000,
-        xmr_refund_height,
-        wow_refund_height,
+        xmr_refund_delay_seconds,
+        wow_refund_delay_seconds,
         refund_timing: Some(refund_timing),
         alice_refund_address: Some("alice-refund-addr".into()),
         bob_refund_address: Some("bob-refund-addr".into()),
@@ -170,8 +170,8 @@ fn coord_message_content_never_passed_to_state_transitions() {
         proof,
         amount_xmr: 1_000_000_000_000,
         amount_wow: 500_000_000_000_000,
-        xmr_refund_height: 600,
-        wow_refund_height: 1000,
+        xmr_refund_delay_seconds: 600,
+        wow_refund_delay_seconds: 1000,
         refund_timing: None,
         alice_refund_address: None,
     };
@@ -187,6 +187,7 @@ fn coord_message_content_never_passed_to_state_transitions() {
         pubkey: contrib2.public_bytes(),
         proof: proof2,
         bob_refund_address: None,
+        refund_artifact: None,
     };
 
     let adaptor_pre_sig_msg = ProtocolMessage::AdaptorPreSig {
