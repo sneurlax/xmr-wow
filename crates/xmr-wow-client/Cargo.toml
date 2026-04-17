@@ -39,6 +39,7 @@ zeroize            = { workspace = true }
 base64             = { workspace = true }
 rpassword          = { workspace = true }
 xmr-wow-wallet     = { workspace = true }
+xmr-wow-vts        = { workspace = true }
 
 [[test]]
 name = "adversarial_messages"

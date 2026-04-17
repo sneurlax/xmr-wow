@@ -26,6 +26,10 @@ pub enum GuaranteeMode {
     LiveWowCooperativeRefund,
     ProofHarnessValidation,
     CurrentSingleSignerPreLockArtifact,
+    /// VTS-backed refund artifact present; the refund spend secret is locked
+    /// behind a verifiable time-lock puzzle. Solving the puzzle after the delay
+    /// recovers the secret, enabling a normal sweep refund.
+    VtsRefundArtifact,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -64,6 +68,10 @@ pub fn guarantee_decision(mode: GuaranteeMode) -> GuaranteeDecision {
             status: GuaranteeStatus::UnsupportedForGuarantee,
             reason: "Current keysplit wallet flow has no proven pre-lock refund artifact without post-lock output discovery and secret reconstruction.",
         },
+        GuaranteeMode::VtsRefundArtifact => GuaranteeDecision {
+            status: GuaranteeStatus::Supported,
+            reason: "VTS time-lock puzzle locks the refund spend secret. Solving the puzzle after the delay period recovers the secret for a normal sweep refund.",
+        },
     }
 }
 
@@ -80,16 +88,36 @@ pub fn guidance_decision(state: &SwapState) -> Option<GuaranteeDecision> {
         SwapState::JointAddress { .. } => Some(GuaranteeMode::CurrentSingleSignerPreLockArtifact),
         SwapState::WowLocked {
             role: SwapRole::Alice,
+            refund_artifact: Some(_), // VTS artifact present
+            ..
+        } => Some(GuaranteeMode::VtsRefundArtifact),
+        SwapState::WowLocked {
+            role: SwapRole::Alice,
             ..
         } => Some(GuaranteeMode::CurrentSingleSignerPreLockArtifact),
+        SwapState::WowLocked {
+            role: SwapRole::Bob,
+            refund_artifact: Some(_), // VTS artifact present
+            ..
+        } => Some(GuaranteeMode::VtsRefundArtifact),
         SwapState::WowLocked {
             role: SwapRole::Bob,
             ..
         } => Some(GuaranteeMode::LiveWowCooperativeRefund),
         SwapState::XmrLocked {
             role: SwapRole::Alice,
+            refund_artifact: Some(_), // VTS artifact present
+            ..
+        } => Some(GuaranteeMode::VtsRefundArtifact),
+        SwapState::XmrLocked {
+            role: SwapRole::Alice,
             ..
         } => Some(GuaranteeMode::LiveXmrUnlockTimeRefund),
+        SwapState::XmrLocked {
+            role: SwapRole::Bob,
+            refund_artifact: Some(_),
+            ..
+        } => Some(GuaranteeMode::VtsRefundArtifact),
         SwapState::XmrLocked {
             role: SwapRole::Bob,
             ..
@@ -122,6 +150,10 @@ mod tests {
                 GuaranteeMode::CurrentSingleSignerPreLockArtifact,
                 GuaranteeStatus::UnsupportedForGuarantee,
             ),
+            (
+                GuaranteeMode::VtsRefundArtifact,
+                GuaranteeStatus::Supported,
+            ),
         ];
 
         for (mode, expected_status) in cases {
@@ -129,5 +161,12 @@ mod tests {
             assert_eq!(decision.status, expected_status);
             assert!(!decision.reason.is_empty());
         }
+    }
+
+    #[test]
+    fn vts_refund_artifact_is_supported() {
+        let decision = guarantee_decision(GuaranteeMode::VtsRefundArtifact);
+        assert_eq!(decision.status, GuaranteeStatus::Supported);
+        assert!(decision.reason.contains("VTS"));
     }
 }

@@ -62,10 +62,14 @@ pub fn validate_timelocks(
             "lock period too short (min 10 blocks)".into(),
         ));
     }
-    if wow_refund_height <= xmr_refund_height + MIN_RESPONSE_BLOCKS {
+    // Live XMR stagenet and WOW mainnet have unrelated absolute heights, so the
+    // safety check must compare the relative lock windows rather than the raw
+    // refund heights. Bob's WOW refund window must remain at least
+    // MIN_RESPONSE_BLOCKS longer than Alice's XMR refund window.
+    if wow_lock_blocks <= xmr_lock_blocks + MIN_RESPONSE_BLOCKS {
         return Err(SwapError::InvalidTimelock(format!(
-            "WOW refund height ({}) must be > XMR refund height ({}) + MIN_RESPONSE_BLOCKS ({})",
-            wow_refund_height, xmr_refund_height, MIN_RESPONSE_BLOCKS
+            "WOW lock window ({}) must be > XMR lock window ({}) + MIN_RESPONSE_BLOCKS ({})",
+            wow_lock_blocks, xmr_lock_blocks, MIN_RESPONSE_BLOCKS
         )));
     }
     Ok((xmr_refund_height, wow_refund_height))
@@ -153,19 +157,18 @@ pub struct JointAddresses {
     pub swap_id: [u8; 32],
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PersistedRefundArtifact {
     pub metadata: RefundArtifactMetadata,
-    pub tx_hash: TxHash,
-    pub tx_bytes: Vec<u8>,
+    /// VTS time-lock puzzle containing the locked refund spend secret.
+    pub puzzle: xmr_wow_vts::TimeLockPuzzle,
 }
 
 impl PersistedRefundArtifact {
     pub fn to_wallet_artifact(&self) -> RefundArtifact {
         RefundArtifact {
             metadata: self.metadata.clone(),
-            tx_hash: self.tx_hash,
-            tx_bytes: self.tx_bytes.clone(),
+            puzzle: self.puzzle.clone(),
         }
     }
 
@@ -174,15 +177,20 @@ impl PersistedRefundArtifact {
         expected_chain: RefundChain,
         expected_lock_tx_hash: TxHash,
         expected_destination: &str,
-        expected_refund_height: u64,
     ) -> Result<(), SwapError> {
         self.to_wallet_artifact()
             .validate_binding(
                 expected_chain,
                 expected_lock_tx_hash,
                 expected_destination,
-                expected_refund_height,
             )
+            .map_err(|e| SwapError::InvalidRefundArtifact(e.to_string()))
+    }
+
+    /// Solve the VTS puzzle to recover the locked refund spend secret.
+    pub fn solve(&self) -> Result<Vec<u8>, SwapError> {
+        self.to_wallet_artifact()
+            .solve()
             .map_err(|e| SwapError::InvalidRefundArtifact(e.to_string()))
     }
 }
@@ -191,8 +199,7 @@ impl From<RefundArtifact> for PersistedRefundArtifact {
     fn from(value: RefundArtifact) -> Self {
         Self {
             metadata: value.metadata,
-            tx_hash: value.tx_hash,
-            tx_bytes: value.tx_bytes,
+            puzzle: value.puzzle,
         }
     }
 }
@@ -1161,7 +1168,7 @@ impl SwapState {
 
     fn expected_refund_binding_owned(
         &self,
-    ) -> Result<(RefundChain, TxHash, String, u64), SwapError> {
+    ) -> Result<(RefundChain, TxHash, String), SwapError> {
         match self {
             SwapState::XmrLocked {
                 params,
@@ -1177,7 +1184,6 @@ impl SwapState {
                     RefundChain::Xmr,
                     *xmr_lock_tx,
                     destination,
-                    params.xmr_refund_height,
                 ))
             }
             SwapState::WowLocked {
@@ -1194,7 +1200,6 @@ impl SwapState {
                     RefundChain::Wow,
                     *wow_lock_tx,
                     destination,
-                    params.wow_refund_height,
                 ))
             }
             _ => Err(SwapError::InvalidTransition(
@@ -1223,18 +1228,18 @@ impl SwapState {
 
     pub fn validate_refund_artifact(&self) -> Result<(), SwapError> {
         let artifact = self.require_refund_artifact()?;
-        let (chain, lock_tx_hash, destination, refund_height) =
+        let (chain, lock_tx_hash, destination) =
             self.expected_refund_binding_owned()?;
-        artifact.validate_binding(chain, lock_tx_hash, &destination, refund_height)
+        artifact.validate_binding(chain, lock_tx_hash, &destination)
     }
 
     pub fn record_refund_artifact(
         self,
         artifact: PersistedRefundArtifact,
     ) -> Result<SwapState, SwapError> {
-        let (chain, lock_tx_hash, destination, refund_height) =
+        let (chain, lock_tx_hash, destination) =
             self.expected_refund_binding_owned()?;
-        artifact.validate_binding(chain, lock_tx_hash, &destination, refund_height)?;
+        artifact.validate_binding(chain, lock_tx_hash, &destination)?;
 
         match self {
             SwapState::XmrLocked {
@@ -2228,6 +2233,13 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("too short"), "error: {err}");
+    }
+
+    #[test]
+    fn validate_timelocks_ignores_cross_chain_height_scale() {
+        let (xmr_h, wow_h) = validate_timelocks(2_096_699, 829_836, 50, 200).unwrap();
+        assert_eq!(xmr_h, 2_096_749);
+        assert_eq!(wow_h, 830_036);
     }
 
     #[test]
