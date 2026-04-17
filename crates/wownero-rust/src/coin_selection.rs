@@ -384,8 +384,14 @@ mod tests {
     #[test]
     fn test_estimate_fee_2_outputs() {
         // 2 outputs = base case, no extra BP+ cost
-        assert_eq!(estimate_fee(1, 2), BASE_FEE_ESTIMATE + FEE_PER_INPUT_ESTIMATE);
-        assert_eq!(estimate_fee(2, 2), BASE_FEE_ESTIMATE + 2 * FEE_PER_INPUT_ESTIMATE);
+        assert_eq!(
+            estimate_fee(1, 2),
+            BASE_FEE_ESTIMATE + FEE_PER_INPUT_ESTIMATE
+        );
+        assert_eq!(
+            estimate_fee(2, 2),
+            BASE_FEE_ESTIMATE + 2 * FEE_PER_INPUT_ESTIMATE
+        );
     }
 
     #[test]

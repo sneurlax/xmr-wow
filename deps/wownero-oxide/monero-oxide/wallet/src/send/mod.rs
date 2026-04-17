@@ -65,15 +65,15 @@ impl PartialEq for ChangeEnum {
         ChangeEnum::Standard { view_pair: lhs_vp, subaddress: lhs_s },
         ChangeEnum::Standard { view_pair: rhs_vp, subaddress: rhs_s },
       ) => {
-        bool::from(lhs_vp.spend.ct_eq(&rhs_vp.spend) & lhs_vp.view.ct_eq(&rhs_vp.view)) &
-          (lhs_s == rhs_s)
+        bool::from(lhs_vp.spend.ct_eq(&rhs_vp.spend) & lhs_vp.view.ct_eq(&rhs_vp.view))
+          & (lhs_s == rhs_s)
       }
       (
         ChangeEnum::Guaranteed { view_pair: lhs_vp, subaddress: lhs_s },
         ChangeEnum::Guaranteed { view_pair: rhs_vp, subaddress: rhs_s },
       ) => {
-        bool::from(lhs_vp.0.spend.ct_eq(&rhs_vp.0.spend) & lhs_vp.0.view.ct_eq(&rhs_vp.0.view)) &
-          (lhs_s == rhs_s)
+        bool::from(lhs_vp.0.spend.ct_eq(&rhs_vp.0.spend) & lhs_vp.0.view.ct_eq(&rhs_vp.0.view))
+          & (lhs_s == rhs_s)
       }
       _ => false,
     }
@@ -260,13 +260,13 @@ pub struct SignableTransaction {
 
 impl PartialEq for SignableTransaction {
   fn eq(&self, other: &Self) -> bool {
-    (self.rct_type == other.rct_type) &&
-      bool::from(self.outgoing_view_key.deref().ct_eq(other.outgoing_view_key.deref())) &&
-      (self.inputs == other.inputs) &&
-      (self.payments == other.payments) &&
-      (self.data == other.data) &&
-      (self.fee_rate == other.fee_rate) &&
-      (self.additional_timelock == other.additional_timelock)
+    (self.rct_type == other.rct_type)
+      && bool::from(self.outgoing_view_key.deref().ct_eq(other.outgoing_view_key.deref()))
+      && (self.inputs == other.inputs)
+      && (self.payments == other.payments)
+      && (self.data == other.data)
+      && (self.fee_rate == other.fee_rate)
+      && (self.additional_timelock == other.additional_timelock)
   }
 }
 impl Eq for SignableTransaction {}
@@ -295,25 +295,27 @@ struct SignableTransactionWithKeyImages {
 impl SignableTransaction {
   fn validate(&self) -> Result<(), SendError> {
     match self.rct_type {
-      RctType::ClsagBulletproof | RctType::ClsagBulletproofPlus | RctType::WowneroClsagBulletproofPlus => {}
+      RctType::ClsagBulletproof
+      | RctType::ClsagBulletproofPlus
+      | RctType::WowneroClsagBulletproofPlus => {}
       _ => Err(SendError::UnsupportedRctType)?,
     }
 
     if self.inputs.is_empty() {
       Err(SendError::NoInputs)?;
     }
-    if self.inputs.iter().map(|input| input.key().compress()).collect::<HashSet<_>>().len() !=
-      self.inputs.len()
+    if self.inputs.iter().map(|input| input.key().compress()).collect::<HashSet<_>>().len()
+      != self.inputs.len()
     {
       Err(SendError::InvalidInputs)?;
     }
     for input in &self.inputs {
       // decoys().len() returns the full ring length (decoys + 1 real output)
-      if input.decoys().len() !=
-        match self.rct_type {
-          RctType::ClsagBulletproof => 12,  // ring size 12
-          RctType::ClsagBulletproofPlus => 16,  // ring size 16 (Monero)
-          RctType::WowneroClsagBulletproofPlus => 22,  // ring size 22 (Wownero)
+      if input.decoys().len()
+        != match self.rct_type {
+          RctType::ClsagBulletproof => 12,            // ring size 12
+          RctType::ClsagBulletproofPlus => 16,        // ring size 16 (Monero)
+          RctType::WowneroClsagBulletproofPlus => 22, // ring size 22 (Wownero)
           _ => panic!("unsupported RctType"),
         }
       {
@@ -451,8 +453,15 @@ impl SignableTransaction {
       payments.push(InternalPayment::Change(change));
     }
 
-    let mut res =
-      SignableTransaction { rct_type, outgoing_view_key, inputs, payments, data, fee_rate, additional_timelock: Timelock::None };
+    let mut res = SignableTransaction {
+      rct_type,
+      outgoing_view_key,
+      inputs,
+      payments,
+      data,
+      fee_rate,
+      additional_timelock: Timelock::None,
+    };
     res.validate()?;
 
     // Shuffle the payments
@@ -487,8 +496,15 @@ impl SignableTransaction {
       payments.push(InternalPayment::Change(change));
     }
 
-    let mut res =
-      SignableTransaction { rct_type, outgoing_view_key, inputs, payments, data, fee_rate, additional_timelock };
+    let mut res = SignableTransaction {
+      rct_type,
+      outgoing_view_key,
+      inputs,
+      payments,
+      data,
+      fee_rate,
+      additional_timelock,
+    };
     res.validate()?;
 
     {
@@ -566,8 +582,14 @@ impl SignableTransaction {
     // Write the timelock discriminant and value
     match self.additional_timelock {
       Timelock::None => w.write_all(&[0])?,
-      Timelock::Block(h) => { w.write_all(&[1])?; w.write_all(&(h as u64).to_le_bytes())?; }
-      Timelock::Time(t) => { w.write_all(&[2])?; w.write_all(&t.to_le_bytes())?; }
+      Timelock::Block(h) => {
+        w.write_all(&[1])?;
+        w.write_all(&(h as u64).to_le_bytes())?;
+      }
+      Timelock::Time(t) => {
+        w.write_all(&[2])?;
+        w.write_all(&t.to_le_bytes())?;
+      }
     }
     Ok(())
   }

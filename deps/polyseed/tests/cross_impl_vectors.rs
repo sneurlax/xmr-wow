@@ -1,5 +1,12 @@
-// Vendored upstream test code — lint suppressed
-#![allow(clippy::needless_borrows_for_generic_args, clippy::manual_div_ceil, clippy::identity_op, clippy::erasing_op, dead_code, unused_variables)]
+// Vendored upstream test code; lint suppressed
+#![allow(
+    clippy::needless_borrows_for_generic_args,
+    clippy::manual_div_ceil,
+    clippy::identity_op,
+    clippy::erasing_op,
+    dead_code,
+    unused_variables
+)]
 //! Cross-implementation test vectors.
 
 use polyseed::{Coin, Language, Polyseed};
@@ -43,19 +50,32 @@ fn birthday_encode(time: u64) -> u16 {
 fn test_dart_vector_key_derivation() {
     let phrase = "unaware yard donate shallow slot sing oil oxygen \
                   loyal bench near hill surround forum execute lamp";
-    let seed =
-        Polyseed::from_string(Language::English, Zeroizing::new(phrase.to_string()), Coin::Monero, 0).unwrap();
+    let seed = Polyseed::from_string(
+        Language::English,
+        Zeroizing::new(phrase.to_string()),
+        Coin::Monero,
+        0,
+    )
+    .unwrap();
 
     let key_hex = hex::encode(seed.key(Coin::Monero).as_ref());
-    assert_eq!(key_hex, "cbbd142d38347773d44aa830f5f01442aa6d0d3bb48571884479531248e6fa1c");
+    assert_eq!(
+        key_hex,
+        "cbbd142d38347773d44aa830f5f01442aa6d0d3bb48571884479531248e6fa1c"
+    );
 }
 
 #[test]
 fn test_c_seed1_entropy() {
     let phrase = "raven tail swear infant grief assist regular lamp \
                   duck valid someone little harsh puppy airport language";
-    let seed =
-        Polyseed::from_string(Language::English, Zeroizing::new(phrase.to_string()), Coin::Monero, 0).unwrap();
+    let seed = Polyseed::from_string(
+        Language::English,
+        Zeroizing::new(phrase.to_string()),
+        Coin::Monero,
+        0,
+    )
+    .unwrap();
 
     assert_eq!(
         hex::encode(seed.entropy().as_ref()),
@@ -72,8 +92,13 @@ fn test_c_seed1_entropy() {
 fn test_c_seed2_spanish_entropy_and_birthday() {
     let phrase = "eje fin parte ce\u{0301}lebre tabu\u{0301} pestan\u{0303}a lienzo puma \
                   prisio\u{0301}n hora regalo lengua existir la\u{0301}piz lote sonoro";
-    let seed =
-        Polyseed::from_string(Language::Spanish, Zeroizing::new(phrase.to_string()), Coin::Monero, 0).unwrap();
+    let seed = Polyseed::from_string(
+        Language::Spanish,
+        Zeroizing::new(phrase.to_string()),
+        Coin::Monero,
+        0,
+    )
+    .unwrap();
 
     assert_eq!(
         hex::encode(seed.entropy().as_ref()),
@@ -130,8 +155,13 @@ fn test_salt_construction_comparison() {
 fn test_multi_coin_support() {
     let phrase = "raven tail swear infant grief assist regular lamp \
                   duck valid someone little harsh puppy airport language";
-    let seed =
-        Polyseed::from_string(Language::English, Zeroizing::new(phrase.to_string()), Coin::Monero, 0).unwrap();
+    let seed = Polyseed::from_string(
+        Language::English,
+        Zeroizing::new(phrase.to_string()),
+        Coin::Monero,
+        0,
+    )
+    .unwrap();
 
     let key_monero = seed.key(Coin::Monero);
     let key_aeon = seed.key(Coin::Aeon);
@@ -159,12 +189,20 @@ fn test_nfc_vs_nfd_accent_handling_fixed() {
     let nfd_phrase = "eje fin parte ce\u{0301}lebre tabu\u{0301} pestan\u{0303}a lienzo puma \
                       prisio\u{0301}n hora regalo lengua existir la\u{0301}piz lote sonoro";
 
-    let nfd_result =
-        Polyseed::from_string(Language::Spanish, Zeroizing::new(nfd_phrase.to_string()), Coin::Monero, 0);
+    let nfd_result = Polyseed::from_string(
+        Language::Spanish,
+        Zeroizing::new(nfd_phrase.to_string()),
+        Coin::Monero,
+        0,
+    );
     assert!(nfd_result.is_ok());
 
-    let nfc_result =
-        Polyseed::from_string(Language::Spanish, Zeroizing::new(nfc_phrase.to_string()), Coin::Monero, 0);
+    let nfc_result = Polyseed::from_string(
+        Language::Spanish,
+        Zeroizing::new(nfc_phrase.to_string()),
+        Coin::Monero,
+        0,
+    );
     assert!(nfc_result.is_ok());
 
     assert_eq!(nfd_result.unwrap(), nfc_result.unwrap());

@@ -46,8 +46,13 @@ pub use scan_coordinator::{
 // -- Scanning --
 pub use scanner::{
     // Types
-    BlockScanResult, DerivedKeys, Lookahead, MempoolScanResult, MultiWalletScanResult,
-    WalletScanConfig, WalletScanData,
+    BlockScanResult,
+    DerivedKeys,
+    Lookahead,
+    MempoolScanResult,
+    MultiWalletScanResult,
+    WalletScanConfig,
+    WalletScanData,
     // Constants
     DEFAULT_LOOKAHEAD,
 };
@@ -65,8 +70,8 @@ pub fn test_integration() -> String {
 // -- Abstractions (RPC, storage, time) --
 pub use abstractions::{
     AbError, AbResult, BlockData, BlockHeader, BlockResponse, GetOutsParams, HeightResponse,
-    MemoryStorage, OutEntry, OutsResponse, OutputIndex, RpcClient, TimeProvider,
-    TransactionData, TxSubmitResponse, WalletStorage,
+    MemoryStorage, OutEntry, OutputIndex, OutsResponse, RpcClient, TimeProvider, TransactionData,
+    TxSubmitResponse, WalletStorage,
 };
 
 // -- Platform-specific implementations --

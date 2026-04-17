@@ -3,7 +3,7 @@
 #![deny(missing_docs)]
 #![cfg_attr(not(feature = "std"), no_std)]
 #![allow(non_snake_case)]
-// Vendored upstream code — MSRV lint suppressed
+// Vendored upstream code; MSRV lint suppressed
 #![allow(clippy::incompatible_msrv)]
 
 use std_shims::{
@@ -121,7 +121,7 @@ impl Mlsag {
   /// Read a MLSAG.
   pub fn read<R: Read>(decoys: usize, ss_2_elements: usize, r: &mut R) -> io::Result<Mlsag> {
     Ok(Mlsag {
-      ss: (0 .. decoys)
+      ss: (0..decoys)
         .map(|_| read_raw_vec(Scalar::read, ss_2_elements, r))
         .collect::<Result<_, _>>()?,
       cc: Scalar::read(r)?,
@@ -190,7 +190,7 @@ impl Mlsag {
 
       ci = Scalar::hash(&buf).into();
       // keep the msg in the buffer.
-      buf.drain(msg.len() ..);
+      buf.drain(msg.len()..);
     }
 
     if ci != self.cc.into() {
@@ -223,8 +223,8 @@ impl AggregateRingMatrixBuilder {
         .iter()
         .map(|compressed| compressed.decompress().map(Point::into))
         .sum::<Option<EdwardsPoint>>()
-        .ok_or(MlsagError::InvalidRing)? +
-        (*H * curve25519_dalek::Scalar::from(fee)),
+        .ok_or(MlsagError::InvalidRing)?
+        + (*H * curve25519_dalek::Scalar::from(fee)),
     })
   }
 

@@ -242,7 +242,7 @@ impl SignMachine<Transaction> for TransactionSignMachine {
     let view = self.keys.view(included.clone()).map_err(|_| {
       FrostError::InvalidSigningSet("couldn't form an interpolated view of the key")
     })?;
-    let mut commitments = (0 .. self.clsags.len())
+    let mut commitments = (0..self.clsags.len())
       .map(|c| {
         included
           .iter()
@@ -255,8 +255,8 @@ impl SignMachine<Transaction> for TransactionSignMachine {
 
             // While here, calculate the key image as needed to call sign
             // The CLSAG algorithm will independently calculate the key image/verify these shares
-            key_images[c] += preprocess.addendum.key_image_share().0 *
-              view.interpolation_factor(*l).ok_or(FrostError::InternalError(
+            key_images[c] += preprocess.addendum.key_image_share().0
+              * view.interpolation_factor(*l).ok_or(FrostError::InternalError(
                 "view successfully formed with participant without an interpolation factor",
               ))?;
 

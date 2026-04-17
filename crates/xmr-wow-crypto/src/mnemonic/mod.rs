@@ -14,8 +14,8 @@
 use std::collections::HashMap;
 use std::sync::LazyLock;
 
-use curve25519_dalek::scalar::Scalar;
 use crc::{Crc, CRC_32_ISO_HDLC};
+use curve25519_dalek::scalar::Scalar;
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::error::CryptoError;
@@ -91,7 +91,8 @@ fn polyseed_to_scalar(mnemonic: &str, coin: SeedCoin) -> Result<Scalar, CryptoEr
         Zeroizing::new(mnemonic.to_string()),
         ps_coin,
         0, // no special features enabled
-    ).map_err(|e| CryptoError::MnemonicError(format!("polyseed: {:?}", e)))?;
+    )
+    .map_err(|e| CryptoError::MnemonicError(format!("polyseed: {:?}", e)))?;
 
     let key_bytes = seed.key(ps_coin);
     let scalar = Scalar::from_bytes_mod_order(*key_bytes);
@@ -100,7 +101,10 @@ fn polyseed_to_scalar(mnemonic: &str, coin: SeedCoin) -> Result<Scalar, CryptoEr
 
 /// Convert a 24/25-word classic mnemonic to a private spend key Scalar.
 fn classic_mnemonic_to_scalar(mnemonic: &str) -> Result<Scalar, CryptoError> {
-    let words: Vec<String> = mnemonic.split_whitespace().map(|w| w.to_lowercase()).collect();
+    let words: Vec<String> = mnemonic
+        .split_whitespace()
+        .map(|w| w.to_lowercase())
+        .collect();
 
     let lang = &*ENGLISH;
 
@@ -151,11 +155,12 @@ fn classic_mnemonic_to_scalar(mnemonic: &str) -> Result<Scalar, CryptoError> {
         bytes[pos..pos + 4].copy_from_slice(&(val as u32).to_le_bytes());
     }
 
-    let scalar = Scalar::from_canonical_bytes(bytes)
-        .into_option()
-        .ok_or(CryptoError::MnemonicError(
-            "seed bytes are not a canonical scalar".into(),
-        ))?;
+    let scalar =
+        Scalar::from_canonical_bytes(bytes)
+            .into_option()
+            .ok_or(CryptoError::MnemonicError(
+                "seed bytes are not a canonical scalar".into(),
+            ))?;
 
     bytes.zeroize();
     Ok(scalar)

@@ -5,7 +5,7 @@
 //! - Bob generates (k_b, K_b) where K_b = k_b * G
 //! - Joint public key: K_joint = K_a + K_b
 //! - Joint private key: k_joint = k_a + k_b (mod l)
-//! - Algebraic consistency: k_joint * G = (k_a + k_b) * G = K_a + K_b = K_joint 
+//! - Algebraic consistency: k_joint * G = (k_a + k_b) * G = K_a + K_b = K_joint
 //!
 //! This is the key structure used for the atomic swap escrow address on
 //! Monero-family chains (XMR, WOW, SAL, AEON, ZANO).
@@ -58,8 +58,8 @@ impl KeyContribution {
     ///
     /// Validates that the point is on the curve and in the prime-order subgroup.
     pub fn from_public_bytes(bytes: &[u8; 32]) -> Result<EdwardsPoint, CryptoError> {
-        let compressed = CompressedEdwardsY::from_slice(bytes)
-            .map_err(|_| CryptoError::InvalidPoint)?;
+        let compressed =
+            CompressedEdwardsY::from_slice(bytes).map_err(|_| CryptoError::InvalidPoint)?;
         let point = compressed.decompress().ok_or(CryptoError::InvalidPoint)?;
         // Reject points with a torsion component (8-torsion).
         // For Monero's prime-order subgroup l*P must be the identity.
@@ -105,8 +105,7 @@ pub fn verify_keypair_bytes(
     scalar_bytes: &[u8; 32],
     point_bytes: &[u8; 32],
 ) -> Result<bool, CryptoError> {
-    let scalar: Scalar = parse_scalar(*scalar_bytes)
-        .ok_or(CryptoError::InvalidScalar)?;
+    let scalar: Scalar = parse_scalar(*scalar_bytes).ok_or(CryptoError::InvalidScalar)?;
     let point = KeyContribution::from_public_bytes(point_bytes)?;
     Ok(verify_keypair(&scalar, &point))
 }
@@ -187,14 +186,16 @@ mod tests {
         // l LE bytes: [0xed,0xd3,0xf5,0x5c,0x1a,0x63,0x12,0x58,0xd6,0x9c,0xf7,0xa2,
         //              0xde,0xf9,0xde,0x14,0x00,...,0x00,0x10]
         let l_bytes: [u8; 32] = [
-            0xed, 0xd3, 0xf5, 0x5c, 0x1a, 0x63, 0x12, 0x58,
-            0xd6, 0x9c, 0xf7, 0xa2, 0xde, 0xf9, 0xde, 0x14,
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10,
+            0xed, 0xd3, 0xf5, 0x5c, 0x1a, 0x63, 0x12, 0x58, 0xd6, 0x9c, 0xf7, 0xa2, 0xde, 0xf9,
+            0xde, 0x14, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            0x00, 0x00, 0x00, 0x10,
         ];
         let point_bytes = (Scalar::random(&mut OsRng) * G).compress().to_bytes();
         let result = verify_keypair_bytes(&l_bytes, &point_bytes);
-        assert!(result.is_err(), "group order l must be rejected as non-canonical scalar");
+        assert!(
+            result.is_err(),
+            "group order l must be rejected as non-canonical scalar"
+        );
     }
 
     #[test]

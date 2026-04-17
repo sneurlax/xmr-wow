@@ -39,7 +39,7 @@ async fn select_n(
   }
 
   // Get the distribution
-  let distribution = rpc.ringct_output_distribution(..= block_number).await?;
+  let distribution = rpc.ringct_output_distribution(..=block_number).await?;
   if distribution.len() < DEFAULT_LOCK_WINDOW {
     Err(InterfaceError::InternalError("not enough blocks to select decoys".to_string()))?;
   }
@@ -90,11 +90,10 @@ async fn select_n(
       // Ensure this isn't infinitely looping
       // We check both that we aren't at the maximum amount of iterations and that the not-yet
       // selected candidates exceed the amount of candidates necessary to trigger the next iteration
-      if (iters == MAX_ITERS) ||
-        ((highest_output_exclusive_bound -
-          u64::try_from(do_not_select.len())
-            .expect("amount of ignored decoys exceeds 2^{64}")) <
-          u64::from(ring_len))
+      if (iters == MAX_ITERS)
+        || ((highest_output_exclusive_bound
+          - u64::try_from(do_not_select.len()).expect("amount of ignored decoys exceeds 2^{64}"))
+          < u64::from(ring_len))
       {
         Err(InterfaceError::InternalError("hit decoy selection round limit".to_string()))?;
       }
@@ -115,8 +114,8 @@ async fn select_n(
         age -= TIP_APPLICATION;
       } else {
         // f64 does not have try_from available, which is why these are written with `as`
-        age = (rng.next_u64() %
-          (RECENT_WINDOW * u64::try_from(BLOCK_TIME).expect("BLOCK_TIME exceeded u64::MAX")))
+        age = (rng.next_u64()
+          % (RECENT_WINDOW * u64::try_from(BLOCK_TIME).expect("BLOCK_TIME exceeded u64::MAX")))
           as f64;
       }
 
@@ -175,9 +174,9 @@ async fn select_n(
     {
       // https://github.com/monero-oxide/monero-oxide/issues/56
       if real_index == Some(i) {
-        if (Some(output_being_spent.key()) != output.map(|[key, _commitment]| key)) ||
-          (Some(output_being_spent.commitment().commit()) !=
-            output.map(|[_key, commitment]| commitment))
+        if (Some(output_being_spent.key()) != output.map(|[key, _commitment]| key))
+          || (Some(output_being_spent.commitment().commit())
+            != output.map(|[_key, commitment]| commitment))
         {
           Err(InterfaceError::InvalidInterface(
             "node presented different view of output we're trying to spend".to_string(),
@@ -243,7 +242,7 @@ async fn select_decoys<R: RngCore + CryptoRng>(
   let mut offsets = Vec::with_capacity(ring.len());
   {
     offsets.push(ring[0].0);
-    for m in 1 .. ring.len() {
+    for m in 1..ring.len() {
       offsets.push(ring[m].0 - ring[m - 1].0);
     }
   }

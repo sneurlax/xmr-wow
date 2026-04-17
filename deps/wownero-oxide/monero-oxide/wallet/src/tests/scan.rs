@@ -164,3 +164,35 @@ fn scan_long_encrypted_amount() {
   assert_eq!(outputs[0], wallet_output0());
   assert_eq!(outputs[1], wallet_output1());
 }
+
+#[test]
+fn scan_accepts_post_v20_wownero_blocks() {
+  let spend_key_buf = hex::decode(SPEND_KEY).unwrap();
+  let spend_key = Zeroizing::new(Scalar::read(&mut spend_key_buf.as_slice()).unwrap());
+
+  let view_key_buf = hex::decode(VIEW_KEY).unwrap();
+  let view_key = Zeroizing::new(Scalar::read(&mut view_key_buf.as_slice()).unwrap());
+
+  let tx_buf = hex::decode(PRUNED_TX_WITH_LONG_ENCRYPTED_AMOUNT).unwrap();
+  let tx = Transaction::<Pruned>::read(&mut tx_buf.as_slice()).unwrap();
+
+  let block_buf = hex::decode(BLOCK).unwrap();
+  let mut block = Block::read(&mut block_buf.as_slice()).unwrap();
+  block.header.hardfork_version = 21;
+
+  let spend_pub = Point::from(&(*spend_key).into() * ED25519_BASEPOINT_TABLE);
+  let view = ViewPair::new(spend_pub, view_key).unwrap();
+  let mut scanner = Scanner::new(view);
+
+  let scannable_block = ScannableBlock {
+    block,
+    transactions: vec![tx],
+    output_index_for_first_ringct_output: Some(OUTPUT_INDEX_FOR_FIRST_RINGCT_OUTPUT),
+  };
+
+  let outputs = scanner.scan(scannable_block).unwrap().not_additionally_locked();
+
+  assert_eq!(outputs.len(), 2);
+  assert_eq!(outputs[0], wallet_output0());
+  assert_eq!(outputs[1], wallet_output1());
+}

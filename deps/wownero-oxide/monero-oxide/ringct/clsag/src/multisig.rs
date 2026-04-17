@@ -205,8 +205,8 @@ impl Algorithm<Ed25519> for ClsagMultisig {
     keys: &ThresholdKeys<Ed25519>,
   ) -> ClsagAddendum {
     ClsagAddendum {
-      key_image_share: dfg::EdwardsPoint(self.key_image_generator) *
-        keys.original_secret_share().deref(),
+      key_image_share: dfg::EdwardsPoint(self.key_image_generator)
+        * keys.original_secret_share().deref(),
     }
   }
 
@@ -260,12 +260,12 @@ impl Algorithm<Ed25519> for ClsagMultisig {
       .append_message(b"key_image_share", addendum.key_image_share.compress().to_bytes());
 
     // Accumulate the interpolated share
-    let interpolated_key_image_share = ((addendum.key_image_share *
-      view
+    let interpolated_key_image_share = ((addendum.key_image_share
+      * view
         .interpolation_factor(l)
-        .ok_or(FrostError::InternalError("processing addendum for non-participant"))?) *
-      view.scalar()) +
-      dfg::EdwardsPoint(self.key_image_generator * offset);
+        .ok_or(FrostError::InternalError("processing addendum for non-participant"))?)
+      * view.scalar())
+      + dfg::EdwardsPoint(self.key_image_generator * offset);
     self.image += interpolated_key_image_share;
 
     self

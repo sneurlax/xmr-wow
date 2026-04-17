@@ -1,5 +1,12 @@
-// Vendored upstream test code — lint suppressed
-#![allow(clippy::needless_borrows_for_generic_args, clippy::manual_div_ceil, clippy::identity_op, clippy::erasing_op, dead_code, unused_variables)]
+// Vendored upstream test code; lint suppressed
+#![allow(
+    clippy::needless_borrows_for_generic_args,
+    clippy::manual_div_ceil,
+    clippy::identity_op,
+    clippy::erasing_op,
+    dead_code,
+    unused_variables
+)]
 use polyseed::{Coin, Language, Polyseed, PolyseedError};
 use zeroize::Zeroizing;
 
@@ -126,9 +133,13 @@ fn verify_poly_zeroing_roundtrip() {
     let seed = Polyseed::from_string(Language::English, phrase, Coin::Monero, 0).unwrap();
 
     let serialized = seed.to_string(Coin::Monero);
-    let deserialized =
-        Polyseed::from_string(Language::English, Zeroizing::new(serialized.to_string()), Coin::Monero, 0)
-            .unwrap();
+    let deserialized = Polyseed::from_string(
+        Language::English,
+        Zeroizing::new(serialized.to_string()),
+        Coin::Monero,
+        0,
+    )
+    .unwrap();
 
     assert_eq!(seed, deserialized);
 }
@@ -165,9 +176,13 @@ fn verify_coin_enum_api() {
     let _k3 = seed.key(Coin::Wownero);
 
     let monero_phrase = seed.to_string(Coin::Monero);
-    let seed2 =
-        Polyseed::from_string(Language::English, Zeroizing::new(monero_phrase.to_string()), Coin::Monero, 0)
-            .unwrap();
+    let seed2 = Polyseed::from_string(
+        Language::English,
+        Zeroizing::new(monero_phrase.to_string()),
+        Coin::Monero,
+        0,
+    )
+    .unwrap();
     assert_eq!(seed, seed2);
 
     let result_aeon = Polyseed::from_string(
@@ -253,8 +268,8 @@ fn verify_crypt_roundtrip_restores_entropy() {
 
 #[test]
 fn verify_crypt_salt_construction() {
-    use sha2::Sha256;
     use pbkdf2::pbkdf2_hmac;
+    use sha2::Sha256;
 
     let mut salt = [0u8; 16];
     salt[..13].copy_from_slice(b"POLYSEED mask");
@@ -318,7 +333,10 @@ fn verify_dart_vector_cross_implementation() {
     let seed = Polyseed::from_string(Language::English, phrase, Coin::Monero, 0).unwrap();
     let key_hex = hex::encode(seed.key(Coin::Monero).as_ref());
 
-    assert_eq!(key_hex, "cbbd142d38347773d44aa830f5f01442aa6d0d3bb48571884479531248e6fa1c");
+    assert_eq!(
+        key_hex,
+        "cbbd142d38347773d44aa830f5f01442aa6d0d3bb48571884479531248e6fa1c"
+    );
 }
 
 #[test]
@@ -384,7 +402,10 @@ fn verify_crypt_wrong_password_does_not_restore() {
 fn verify_load_rejects_bad_header() {
     let mut bad = [0u8; 32];
     bad[..8].copy_from_slice(b"BADHEAD!");
-    assert_eq!(Polyseed::load(&bad, Language::English, 0), Err(PolyseedError::InvalidFormat));
+    assert_eq!(
+        Polyseed::load(&bad, Language::English, 0),
+        Err(PolyseedError::InvalidFormat)
+    );
 }
 
 #[test]
@@ -398,5 +419,8 @@ fn verify_load_rejects_bad_footer() {
     let mut storage = *seed.store();
     storage[30] = 0x00;
     storage[31] = 0x00;
-    assert_eq!(Polyseed::load(&storage, Language::English, 0), Err(PolyseedError::InvalidFormat));
+    assert_eq!(
+        Polyseed::load(&storage, Language::English, 0),
+        Err(PolyseedError::InvalidFormat)
+    );
 }

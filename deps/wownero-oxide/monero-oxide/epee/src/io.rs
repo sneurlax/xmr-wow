@@ -62,8 +62,8 @@ impl<'encoding> BytesLike<'encoding> for &'encoding [u8] {
     if self.len() < bytes {
       Err(EpeeError::Short(bytes))?;
     }
-    let res = &self[.. bytes];
-    *self = &self[bytes ..];
+    let res = &self[..bytes];
+    *self = &self[bytes..];
     Ok(((), res))
   }
 
@@ -102,7 +102,7 @@ pub(crate) fn read_varint<'encoding>(
   };
 
   let mut vi = u64::from(vi_start);
-  for i in 1 .. len {
+  for i in 1..len {
     vi |= u64::from(reader.read_byte()?) << (i * 8);
   }
   vi >>= 2;

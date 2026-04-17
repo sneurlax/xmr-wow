@@ -40,8 +40,8 @@ impl SignableTransaction {
 
     let mut res = Vec::with_capacity(self.payments.len());
     for (payment, shared_key_derivations) in self.payments.iter().zip(&shared_key_derivations) {
-      let key = (&shared_key_derivations.shared_key.into() * ED25519_BASEPOINT_TABLE) +
-        payment.address().spend().into();
+      let key = (&shared_key_derivations.shared_key.into() * ED25519_BASEPOINT_TABLE)
+        + payment.address().spend().into();
       res.push(Output {
         key: Point::from(key).compress(),
         amount: None,
@@ -179,20 +179,20 @@ impl SignableTransaction {
             bp.extend([0; 31]);
           };
           let push_scalar = |bp: &mut Vec<u8>| bp.extend([0; 32]);
-          for _ in 0 .. 4 {
+          for _ in 0..4 {
             push_point(&mut bp);
           }
-          for _ in 0 .. 2 {
+          for _ in 0..2 {
             push_scalar(&mut bp);
           }
-          for _ in 0 .. 2 {
+          for _ in 0..2 {
             VarInt::write(&lr_len, &mut bp)
               .expect("write failed but <Vec as io::Write> doesn't fail");
-            for _ in 0 .. lr_len {
+            for _ in 0..lr_len {
               push_point(&mut bp);
             }
           }
-          for _ in 0 .. 3 {
+          for _ in 0..3 {
             push_scalar(&mut bp);
           }
           Bulletproof::read(&mut bp.as_slice()).expect("made an invalid dummy BP")
@@ -204,16 +204,16 @@ impl SignableTransaction {
             bp.extend([0; 31]);
           };
           let push_scalar = |bp: &mut Vec<u8>| bp.extend([0; 32]);
-          for _ in 0 .. 3 {
+          for _ in 0..3 {
             push_point(&mut bp);
           }
-          for _ in 0 .. 3 {
+          for _ in 0..3 {
             push_scalar(&mut bp);
           }
-          for _ in 0 .. 2 {
+          for _ in 0..2 {
             VarInt::write(&lr_len, &mut bp)
               .expect("write failed but <Vec as io::Write> doesn't fail");
-            for _ in 0 .. lr_len {
+            for _ in 0..lr_len {
               push_point(&mut bp);
             }
           }
@@ -232,11 +232,16 @@ impl SignableTransaction {
         },
         proofs: Some(RctProofs {
           base: RctBase { fee: 0, encrypted_amounts, pseudo_outs: vec![], commitments },
-          prunable: RctPrunable::Clsag { rct_type: self.rct_type, bulletproof, clsags, pseudo_outs },
+          prunable: RctPrunable::Clsag {
+            rct_type: self.rct_type,
+            bulletproof,
+            clsags,
+            pseudo_outs,
+          },
         }),
       }
-      .weight() -
-        1
+      .weight()
+        - 1
     };
 
     // We now have the base weight, without the fee encoded
@@ -245,7 +250,7 @@ impl SignableTransaction {
     // Assert LOWER_BOUND == 1, which this code assumes
     const _LOWER_BOUND_IS_LTE_ONE: [(); 1 - <u64 as VarInt>::LOWER_BOUND] = [(); _];
     const _LOWER_BOUND_IS_GTE_ONE: [(); <u64 as VarInt>::LOWER_BOUND - 1] = [(); _];
-    for i in <u64 as VarInt>::LOWER_BOUND ..= <u64 as VarInt>::UPPER_BOUND {
+    for i in <u64 as VarInt>::LOWER_BOUND..=<u64 as VarInt>::UPPER_BOUND {
       possible_weights.push(base_weight + i);
     }
 
@@ -304,7 +309,9 @@ impl SignableTransactionWithKeyImages {
       let mut bp_rng = self.intent.seeded_rng(b"bulletproof");
       (match self.intent.rct_type {
         RctType::ClsagBulletproof => Bulletproof::prove(&mut bp_rng, bp_commitments),
-        RctType::ClsagBulletproofPlus | RctType::WowneroClsagBulletproofPlus => Bulletproof::prove_plus(&mut bp_rng, bp_commitments),
+        RctType::ClsagBulletproofPlus | RctType::WowneroClsagBulletproofPlus => {
+          Bulletproof::prove_plus(&mut bp_rng, bp_commitments)
+        }
         _ => panic!("unsupported RctType"),
       })
       .expect("couldn't prove BP(+)s for this many payments despite checking in constructor?")
@@ -347,7 +354,12 @@ impl SignableTransactionWithKeyImages {
           pseudo_outs: vec![],
           commitments,
         },
-        prunable: RctPrunable::Clsag { rct_type: self.intent.rct_type, bulletproof, clsags: vec![], pseudo_outs: vec![] },
+        prunable: RctPrunable::Clsag {
+          rct_type: self.intent.rct_type,
+          bulletproof,
+          clsags: vec![],
+          pseudo_outs: vec![],
+        },
       }),
     }
   }

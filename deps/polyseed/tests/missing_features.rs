@@ -1,15 +1,22 @@
-// Vendored upstream test code — lint suppressed
-#![allow(clippy::needless_borrows_for_generic_args, clippy::manual_div_ceil, clippy::identity_op, clippy::erasing_op, dead_code, unused_variables)]
+// Vendored upstream test code; lint suppressed
+#![allow(
+    clippy::needless_borrows_for_generic_args,
+    clippy::manual_div_ceil,
+    clippy::identity_op,
+    clippy::erasing_op,
+    dead_code,
+    unused_variables
+)]
 //! Tests verifying feature parity with C reference.
 
-use polyseed::{Coin, Language, Polyseed, PolyseedError, get_feature};
+use polyseed::{get_feature, Coin, Language, Polyseed, PolyseedError};
 use zeroize::Zeroizing;
 
 /// Fixed 19-byte entropy from the English test vector.
 fn test_entropy() -> Zeroizing<[u8; 32]> {
     let mut buf = [0u8; 32];
-    let bytes = hex::decode("dd76e7359a0ded37cd0ff0f3c829a5ae01673300000000000000000000000000")
-        .unwrap();
+    let bytes =
+        hex::decode("dd76e7359a0ded37cd0ff0f3c829a5ae01673300000000000000000000000000").unwrap();
     buf.copy_from_slice(&bytes);
     Zeroizing::new(buf)
 }
@@ -26,8 +33,8 @@ fn english_seed_phrase() -> Zeroizing<String> {
 /// Japanese test vector entropy.
 fn japanese_entropy() -> Zeroizing<[u8; 32]> {
     let mut buf = [0u8; 32];
-    let bytes = hex::decode("94e6665518a6286c6e3ba508a2279eb62b771f00000000000000000000000000")
-        .unwrap();
+    let bytes =
+        hex::decode("94e6665518a6286c6e3ba508a2279eb62b771f00000000000000000000000000").unwrap();
     buf.copy_from_slice(&bytes);
     Zeroizing::new(buf)
 }
@@ -38,8 +45,8 @@ const JAPANESE_BIRTHDAY: u64 = 1679318722;
 /// Korean test vector entropy.
 fn korean_entropy() -> Zeroizing<[u8; 32]> {
     let mut buf = [0u8; 32];
-    let bytes = hex::decode("684663fda420298f42ed94b2c512ed38ddf12b00000000000000000000000000")
-        .unwrap();
+    let bytes =
+        hex::decode("684663fda420298f42ed94b2c512ed38ddf12b00000000000000000000000000").unwrap();
     buf.copy_from_slice(&bytes);
     Zeroizing::new(buf)
 }
@@ -50,36 +57,49 @@ const KOREAN_BIRTHDAY: u64 = 1679317073;
 // Encryption / decryption
 #[test]
 fn gap1_encryption_decryption_exists() {
-    let seed = Polyseed::from_string(Language::English, english_seed_phrase(), Coin::Monero, 0).unwrap();
+    let seed =
+        Polyseed::from_string(Language::English, english_seed_phrase(), Coin::Monero, 0).unwrap();
     let original_entropy = seed.entropy().clone();
 
     // crypt() now exists and works
     let mut encrypted = seed.clone();
     encrypted.crypt("test_password");
     assert!(encrypted.is_encrypted(), "Seed should be encrypted");
-    assert_ne!(encrypted.entropy(), &original_entropy, "Entropy should change when encrypted");
+    assert_ne!(
+        encrypted.entropy(),
+        &original_entropy,
+        "Entropy should change when encrypted"
+    );
 
     // Decrypt
     encrypted.crypt("test_password");
     assert!(!encrypted.is_encrypted(), "Seed should be decrypted");
-    assert_eq!(encrypted.entropy(), &original_entropy, "Decrypted entropy should match");
+    assert_eq!(
+        encrypted.entropy(),
+        &original_entropy,
+        "Decrypted entropy should match"
+    );
     assert_eq!(encrypted, seed, "Decrypted seed should match original");
 }
 
 // Binary serialization
 #[test]
 fn gap2_binary_serialization_exists() {
-    let seed = Polyseed::from_string(Language::English, english_seed_phrase(), Coin::Monero, 0).unwrap();
+    let seed =
+        Polyseed::from_string(Language::English, english_seed_phrase(), Coin::Monero, 0).unwrap();
 
     // store() produces a 32-byte binary representation
     let storage = seed.store();
     assert_eq!(storage.len(), 32);
-    assert_eq!(&storage[.. 8], b"POLYSEED", "Header should be POLYSEED");
+    assert_eq!(&storage[..8], b"POLYSEED", "Header should be POLYSEED");
     assert_eq!(storage[29], 0xFF, "Extra byte should be 0xFF");
 
     // load() reconstructs the seed from the binary representation
     let loaded = Polyseed::load(&storage, Language::English, 0).unwrap();
-    assert_eq!(seed, loaded, "Round-trip store/load should preserve the seed");
+    assert_eq!(
+        seed, loaded,
+        "Round-trip store/load should preserve the seed"
+    );
     assert_eq!(*seed.entropy(), *loaded.entropy());
     assert_eq!(seed.birthday(), loaded.birthday());
     assert_eq!(seed.features(), loaded.features());
@@ -95,22 +115,35 @@ fn gap3_language_auto_detection_exists() {
     let phrase = english_seed_phrase();
 
     // from_string_auto() detects the language automatically:
-    let (seed, detected_lang) = Polyseed::from_string_auto(phrase.clone(), Coin::Monero, 0).unwrap();
-    assert_eq!(detected_lang, Language::English, "Auto-detection should find English");
+    let (seed, detected_lang) =
+        Polyseed::from_string_auto(phrase.clone(), Coin::Monero, 0).unwrap();
+    assert_eq!(
+        detected_lang,
+        Language::English,
+        "Auto-detection should find English"
+    );
 
     // The result should match explicit from_string():
-    let explicit_seed = Polyseed::from_string(Language::English, phrase.clone(), Coin::Monero, 0).unwrap();
-    assert_eq!(seed, explicit_seed, "Auto-detected seed should match explicit decode");
+    let explicit_seed =
+        Polyseed::from_string(Language::English, phrase.clone(), Coin::Monero, 0).unwrap();
+    assert_eq!(
+        seed, explicit_seed,
+        "Auto-detected seed should match explicit decode"
+    );
 
     // Wrong language still fails with explicit from_string():
     let result_wrong = Polyseed::from_string(Language::Spanish, phrase.clone(), Coin::Monero, 0);
-    assert!(result_wrong.is_err(), "Wrong language still fails with explicit from_string()");
+    assert!(
+        result_wrong.is_err(),
+        "Wrong language still fails with explicit from_string()"
+    );
 }
 
 // Multi-coin support
 #[test]
 fn gap4_multi_coin_support_exists() {
-    let seed = Polyseed::from_string(Language::English, english_seed_phrase(), Coin::Monero, 0).unwrap();
+    let seed =
+        Polyseed::from_string(Language::English, english_seed_phrase(), Coin::Monero, 0).unwrap();
 
     // key() now accepts a Coin parameter:
     let key_monero = seed.key(Coin::Monero);
@@ -118,8 +151,14 @@ fn gap4_multi_coin_support_exists() {
     let key_wownero = seed.key(Coin::Wownero);
 
     assert_eq!(key_monero.len(), 32, "key() produces a 32-byte key");
-    assert_ne!(*key_monero, *key_aeon, "Different coins produce different keys");
-    assert_ne!(*key_monero, *key_wownero, "Different coins produce different keys");
+    assert_ne!(
+        *key_monero, *key_aeon,
+        "Different coins produce different keys"
+    );
+    assert_ne!(
+        *key_monero, *key_wownero,
+        "Different coins produce different keys"
+    );
 
     // to_string() and from_string() also accept a Coin parameter:
     let phrase = seed.to_string(Coin::Monero);
@@ -156,24 +195,27 @@ fn gap5_no_enable_features_support() {
 // is_encrypted() accessor
 #[test]
 fn gap6_is_encrypted_accessor_exists() {
-    let seed = Polyseed::from_string(Language::English, english_seed_phrase(), Coin::Monero, 0).unwrap();
+    let seed =
+        Polyseed::from_string(Language::English, english_seed_phrase(), Coin::Monero, 0).unwrap();
 
     // is_encrypted() now works:
-    assert!(!seed.is_encrypted(), "An unencrypted seed should return false");
-    assert_eq!(seed.features(), 0, "This test seed has features=0 (unencrypted)");
+    assert!(
+        !seed.is_encrypted(),
+        "An unencrypted seed should return false"
+    );
+    assert_eq!(
+        seed.features(),
+        0,
+        "This test seed has features=0 (unencrypted)"
+    );
 }
 
 // NFC output composition (Japanese/Korean ideographic spaces)
 
 #[test]
 fn gap7_no_nfc_output_composition() {
-    let ja_seed = Polyseed::from(
-        Language::Japanese,
-        0,
-        JAPANESE_BIRTHDAY,
-        japanese_entropy(),
-    )
-    .unwrap();
+    let ja_seed =
+        Polyseed::from(Language::Japanese, 0, JAPANESE_BIRTHDAY, japanese_entropy()).unwrap();
 
     let output = ja_seed.to_string(Coin::Monero);
 
@@ -196,27 +238,19 @@ fn gap7_no_nfc_output_composition() {
     assert_eq!(word_count, 16, "Japanese seed has 16 words");
 
     // NFC composition means no combining marks
-    let has_combining_marks = output.chars().any(|c| {
-        c == '\u{3099}' || c == '\u{309A}'
-    });
+    let has_combining_marks = output.chars().any(|c| c == '\u{3099}' || c == '\u{309A}');
     assert!(
         !has_combining_marks,
         "Rust output is NFC-composed, no combining marks"
     );
-
 }
 
 // Round-trip fidelity with C reference
 
 #[test]
 fn gap_roundtrip_differences_with_c_reference() {
-    let ja_seed = Polyseed::from(
-        Language::Japanese,
-        0,
-        JAPANESE_BIRTHDAY,
-        japanese_entropy(),
-    )
-    .unwrap();
+    let ja_seed =
+        Polyseed::from(Language::Japanese, 0, JAPANESE_BIRTHDAY, japanese_entropy()).unwrap();
 
     let rust_output = ja_seed.to_string(Coin::Monero);
 
@@ -230,7 +264,9 @@ fn gap_roundtrip_differences_with_c_reference() {
         "Rust output no longer uses ASCII spaces for Japanese"
     );
 
-    let has_nfd_marks = rust_output.chars().any(|c| c == '\u{3099}' || c == '\u{309A}');
+    let has_nfd_marks = rust_output
+        .chars()
+        .any(|c| c == '\u{3099}' || c == '\u{309A}');
     assert!(
         !has_nfd_marks,
         "Rust output is NFC-composed, no combining marks"
@@ -238,7 +274,8 @@ fn gap_roundtrip_differences_with_c_reference() {
 
     // English round-trip IS identical (ASCII only, no Unicode issues)
     let en_phrase = english_seed_phrase();
-    let en_seed = Polyseed::from_string(Language::English, en_phrase.clone(), Coin::Monero, 0).unwrap();
+    let en_seed =
+        Polyseed::from_string(Language::English, en_phrase.clone(), Coin::Monero, 0).unwrap();
     let en_output = en_seed.to_string(Coin::Monero);
     assert_eq!(
         *en_output, *en_phrase,
@@ -247,13 +284,8 @@ fn gap_roundtrip_differences_with_c_reference() {
 
     // Round-trip for Japanese via from_string + to_string
     let ja_phrase = rust_output.clone();
-    let ja_seed2 = Polyseed::from_string(
-        Language::Japanese,
-        ja_phrase.clone(),
-        Coin::Monero,
-        0,
-    )
-    .unwrap();
+    let ja_seed2 =
+        Polyseed::from_string(Language::Japanese, ja_phrase.clone(), Coin::Monero, 0).unwrap();
     let ja_output2 = ja_seed2.to_string(Coin::Monero);
     assert_eq!(
         *ja_output2, *ja_phrase,
@@ -266,7 +298,8 @@ fn gap_roundtrip_differences_with_c_reference() {
 #[test]
 fn summary_api_inventory() {
     // Verify the API shape by exercising every public method:
-    let seed = Polyseed::from_string(Language::English, english_seed_phrase(), Coin::Monero, 0).unwrap();
+    let seed =
+        Polyseed::from_string(Language::English, english_seed_phrase(), Coin::Monero, 0).unwrap();
     let _birthday: u64 = seed.birthday();
     let _features: u8 = seed.features();
     let _is_encrypted: bool = seed.is_encrypted();
@@ -299,5 +332,4 @@ fn summary_api_inventory() {
         Language::ChineseSimplified,
         Language::ChineseTraditional,
     ];
-
 }

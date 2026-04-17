@@ -20,7 +20,7 @@
 //! Completion (knowing t where T = t*G):
 //! - s = s' + t
 //! - Completed sig: (R_T, s)
-//! - Verify as standard Schnorr: s*G == R_T + c*A 
+//! - Verify as standard Schnorr: s*G == R_T + c*A
 //!   (because s*G = s'*G + t*G = R_T - T + c*A + T = R_T + c*A)
 //!
 //! Adaptor secret extraction:
@@ -121,8 +121,8 @@ impl AdaptorSignature {
             .decompress()
             .ok_or(CryptoError::AdaptorVerificationFailed)?;
 
-        let s_prime: Scalar = parse_scalar(self.s_prime)
-            .ok_or(CryptoError::AdaptorVerificationFailed)?;
+        let s_prime: Scalar =
+            parse_scalar(self.s_prime).ok_or(CryptoError::AdaptorVerificationFailed)?;
 
         let c = challenge(&R_T, A, msg);
 
@@ -142,8 +142,8 @@ impl AdaptorSignature {
     /// The resulting `CompletedSignature` is a valid Schnorr signature
     /// verifiable with the signer's public key A.
     pub fn complete(&self, t: &Scalar) -> Result<CompletedSignature, CryptoError> {
-        let s_prime: Scalar = parse_scalar(self.s_prime)
-            .ok_or(CryptoError::AdaptorVerificationFailed)?;
+        let s_prime: Scalar =
+            parse_scalar(self.s_prime).ok_or(CryptoError::AdaptorVerificationFailed)?;
         let s: Scalar = s_prime + t;
         Ok(CompletedSignature {
             r_t: self.r_plus_t,
@@ -157,14 +157,10 @@ impl AdaptorSignature {
     ///
     /// This is how the atomic swap protocol allows one party to learn the other's
     /// secret once a completed signature appears on-chain.
-    pub fn extract_secret(
-        &self,
-        completed: &CompletedSignature,
-    ) -> Result<Scalar, CryptoError> {
-        let s_prime: Scalar = parse_scalar(self.s_prime)
-            .ok_or(CryptoError::SecretExtractionFailed)?;
-        let s: Scalar = parse_scalar(completed.s)
-            .ok_or(CryptoError::SecretExtractionFailed)?;
+    pub fn extract_secret(&self, completed: &CompletedSignature) -> Result<Scalar, CryptoError> {
+        let s_prime: Scalar =
+            parse_scalar(self.s_prime).ok_or(CryptoError::SecretExtractionFailed)?;
+        let s: Scalar = parse_scalar(completed.s).ok_or(CryptoError::SecretExtractionFailed)?;
         Ok(s - s_prime)
     }
 }
@@ -179,8 +175,7 @@ impl CompletedSignature {
             .decompress()
             .ok_or(CryptoError::AdaptorVerificationFailed)?;
 
-        let s: Scalar = parse_scalar(self.s)
-            .ok_or(CryptoError::AdaptorVerificationFailed)?;
+        let s: Scalar = parse_scalar(self.s).ok_or(CryptoError::AdaptorVerificationFailed)?;
 
         let c = challenge(&R_T, A, msg);
 
@@ -307,13 +302,21 @@ mod tests {
         let msg = b"sidechain-redeem-tx";
 
         let pre_sig = AdaptorSignature::sign(&a, &A, msg, &T, &mut OsRng);
-        pre_sig.verify_pre_sig(&A, msg, &T).expect("pre-sig must verify");
+        pre_sig
+            .verify_pre_sig(&A, msg, &T)
+            .expect("pre-sig must verify");
 
         let completed = pre_sig.complete(&t).unwrap();
-        completed.verify(&A, msg).expect("completed sig must verify");
+        completed
+            .verify(&A, msg)
+            .expect("completed sig must verify");
 
         let recovered = pre_sig.extract_secret(&completed).unwrap();
-        assert_eq!(recovered.to_bytes(), t.to_bytes(), "must recover Bob's secret");
+        assert_eq!(
+            recovered.to_bytes(),
+            t.to_bytes(),
+            "must recover Bob's secret"
+        );
 
         // Confirm recovered t gives the right adaptor point
         assert_eq!((recovered * G).compress(), T.compress());

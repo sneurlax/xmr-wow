@@ -128,7 +128,7 @@ impl ExtraField {
     match self {
       ExtraField::Padding(size) => {
         w.write_all(&[0])?;
-        for _ in 1 .. *size {
+        for _ in 1..*size {
           write_byte(&0u8, w)?;
         }
       }
@@ -293,14 +293,14 @@ impl Extra {
     // Only parse arbitrary data from the amount of extra data accepted under the relay rule
     let serialized = self.serialize();
     let bounded_extra =
-      Self::read(&mut &serialized[.. serialized.len().min(MAX_EXTRA_SIZE_BY_RELAY_RULE)])
+      Self::read(&mut &serialized[..serialized.len().min(MAX_EXTRA_SIZE_BY_RELAY_RULE)])
         .expect("`Extra::read` only fails if the IO fails and `&[u8]` won't");
 
     let mut res = vec![];
     for field in &bounded_extra.0 {
       if let ExtraField::Nonce(data) = field {
         if data.first() == Some(&ARBITRARY_DATA_MARKER) {
-          res.push(data[1 ..].to_vec());
+          res.push(data[1..].to_vec());
         }
       }
     }

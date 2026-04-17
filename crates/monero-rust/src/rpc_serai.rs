@@ -65,11 +65,7 @@ impl NativeRpcClient {
     }
 
     /// Post to a non-JSON-RPC endpoint (e.g., /sendrawtransaction).
-    async fn post_other(
-        &self,
-        path: &str,
-        body: serde_json::Value,
-    ) -> AbResult<serde_json::Value> {
+    async fn post_other(&self, path: &str, body: serde_json::Value) -> AbResult<serde_json::Value> {
         let resp = self
             .client
             .post(format!("{}{}", self.url, path))
@@ -175,10 +171,7 @@ impl RpcClient for NativeRpcClient {
             .await?;
 
         Ok(TxSubmitResponse {
-            status: result["status"]
-                .as_str()
-                .unwrap_or("UNKNOWN")
-                .to_string(),
+            status: result["status"].as_str().unwrap_or("UNKNOWN").to_string(),
             tx_hash: result["tx_hash"].as_str().map(|s| s.to_string()),
             reason: result["reason"].as_str().map(|s| s.to_string()),
         })
@@ -186,10 +179,7 @@ impl RpcClient for NativeRpcClient {
 
     async fn get_fee_estimate(&self) -> AbResult<u64> {
         let result = self
-            .post_other(
-                "/get_fee_estimate",
-                serde_json::json!({}),
-            )
+            .post_other("/get_fee_estimate", serde_json::json!({}))
             .await?;
 
         result["fee"]

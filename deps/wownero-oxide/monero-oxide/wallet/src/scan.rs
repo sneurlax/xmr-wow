@@ -51,8 +51,8 @@ impl Timelocked {
   pub fn additional_timelock_satisfied_by(self, block: usize, time: u64) -> Vec<WalletOutput> {
     let mut res = vec![];
     for output in &self.0 {
-      if (output.additional_timelock() <= Timelock::Block(block)) ||
-        (output.additional_timelock() <= Timelock::Time(time))
+      if (output.additional_timelock() <= Timelock::Block(block))
+        || (output.additional_timelock() <= Timelock::Time(time))
       {
         res.push(output.clone());
       }
@@ -239,7 +239,9 @@ impl InternalScanner {
             let rct_type = proofs.rct_type;
             if rct_type == RctType::WowneroClsagBulletproofPlus {
               // WOW type 8 stores commitments as C * INV_EIGHT, so stored * 8 = full C
-              if let Some(dalek_point) = curve25519_dalek::edwards::CompressedEdwardsY(stored.to_bytes()).decompress() {
+              if let Some(dalek_point) =
+                curve25519_dalek::edwards::CompressedEdwardsY(stored.to_bytes()).decompress()
+              {
                 // Multiply by cofactor (8) to recover full commitment
                 let full = Point::from(dalek_point.mul_by_cofactor());
                 full.compress() == rebuilt.compress()
@@ -301,10 +303,13 @@ impl InternalScanner {
       return Ok(Timelocked(vec![]));
     };
 
-    // Wownero uses hardfork versions up to 20+; Monero up to 16
-    if block.header.hardfork_version > 20 {
-      Err(ScanError::UnsupportedProtocol(block.header.hardfork_version))?;
-    }
+    /*
+      Wownero keeps incrementing its hardfork version beyond v20 while preserving the block/tx
+      layout this scanner actually consumes. The old `> 20` guard turned otherwise parseable WOW
+      lock blocks into silent misses on live daemons once the local chain advanced far enough,
+      despite `Block::read` already handling the v20+ header shape. Trust the structural parsing
+      below instead of rejecting newer version numbers up front.
+    */
 
     // We obtain all TXs in full
     let mut txs_with_hashes = vec![(
