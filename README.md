@@ -1,8 +1,7 @@
 # xmr-wow
 
-Atomic swaps between Monero (XMR) and Wownero (WOW) with decentralized coordination
-via a sharechain network. WOW-first lock order enforces atomicity without trusted
-third parties.
+Atomic swaps between Monero (XMR) and Wownero (WOW) with optional coordination
+via a customized p2pool-style sharechain. WOW locks first.
 
 ## Status
 
